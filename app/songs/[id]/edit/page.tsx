@@ -1297,27 +1297,57 @@ export default function SongEditPage() {
               return (
                 <div 
                   key={currentWordIdx} 
-                  style={{ WebkitTouchCallout: chordMode === 'Chords' ? 'none' : 'default' }}
+                  style={{ 
+                    WebkitTouchCallout: chordMode === 'Chords' ? 'none' : 'default',
+                    WebkitUserSelect: chordMode === 'Chords' ? 'none' : 'auto',
+                    userSelect: chordMode === 'Chords' ? 'none' : 'auto',
+                    // ✅ SURGICAL FIX: Completely prevents touch panning on mobile while holding
+                    touchAction: chordMode === 'Chords' ? 'none' : 'auto' 
+                  }}
+                  // ✅ SURGICAL FIX: Blocks the Desktop "Ghost Drag" that was killing the timer!
+                  onDragStart={(e) => e.preventDefault()} 
+                  
                   onPointerDown={(e) => {
                     if (chordMode !== "Chords") return;
+                    // Ignore desktop right-clicks
+                    if (e.pointerType === "mouse" && e.button !== 0) return; 
+
                     holdStartPosRef.current = { x: e.clientX, y: e.clientY };
+                    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+                    
                     holdTimerRef.current = setTimeout(() => {
                       const { x, y } = holdStartPosRef.current;
                       // Dynamic boundary checking to snap to a semi-circle if near the edge
                       const mode = x < 140 ? "right" : (window.innerWidth - x < 140 ? "left" : "full");
                       setWheelState({ isOpen: true, x, y, sectionType, lineIdx, wordIdx: currentWordIdx, mode });
-                      if (navigator.vibrate) navigator.vibrate(50);
-                    }, 600);
+                      try { if (navigator.vibrate) navigator.vibrate(50); } catch(err){}
+                    }, 400); 
                   }}
                   onPointerMove={(e) => {
+                    if (chordMode !== "Chords") return;
                     if (holdTimerRef.current) {
                       const dx = Math.abs(e.clientX - holdStartPosRef.current.x);
                       const dy = Math.abs(e.clientY - holdStartPosRef.current.y);
-                      if (dx > 10 || dy > 10) clearTimeout(holdTimerRef.current); // Cancel if they are just scrolling
+                      if (dx > 20 || dy > 20) {
+                        clearTimeout(holdTimerRef.current);
+                        holdTimerRef.current = null;
+                      }
                     }
                   }}
-                  onPointerUp={() => { if (holdTimerRef.current) clearTimeout(holdTimerRef.current); }}
-                  onPointerCancel={() => { if (holdTimerRef.current) clearTimeout(holdTimerRef.current); }}
+                  onPointerUp={() => { 
+                    if (chordMode !== "Chords") return;
+                    if (holdTimerRef.current) {
+                      clearTimeout(holdTimerRef.current); 
+                      holdTimerRef.current = null;
+                    }
+                  }}
+                  onPointerCancel={() => { 
+                    if (chordMode !== "Chords") return;
+                    if (holdTimerRef.current) {
+                      clearTimeout(holdTimerRef.current);
+                      holdTimerRef.current = null;
+                    }
+                  }}
                   onContextMenu={(e) => {
                     if (chordMode === "Chords") e.preventDefault(); // Blocks the mobile magnifier
                   }}
@@ -1346,7 +1376,7 @@ export default function SongEditPage() {
                         wordIdx: currentWordIdx,
                         cleanWord: cleanWordDisplay || "$word"
                       });
-                      }
+                    }
                   }} 
                   className={`
                     flex flex-col items-start relative select-none rounded-lg px-2 py-0.5 transition-all duration-150 cursor-pointer
