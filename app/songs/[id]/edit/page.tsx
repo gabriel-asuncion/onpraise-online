@@ -111,6 +111,148 @@ const transposeSingleNote = (note: string, semitones: number): string => {
   return CHROMATIC_SCALE[(idx + semitones + 12) % 12];
 };
 
+// ============================================================================
+// ✅ SURGICAL ADDITION: RADIAL MENU ENGINE (DRAG TO SELECT)
+// ============================================================================
+const ChordWheelOverlay = ({ config, deck, onSelect, onCancel }: { config: any, deck: any[], onSelect: (c: any) => void, onCancel: () => void }) => {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const activeIndexRef = useRef<number | null>(null);
+  activeIndexRef.current = activeIndex;
+
+  useEffect(() => {
+    const handleMove = (e: TouchEvent | PointerEvent) => {
+      if(e.cancelable) e.preventDefault(); // Lock native scrolling while wheel is open
+      
+      let cx, cy;
+      if ('touches' in e && e.touches.length > 0) {
+        cx = e.touches[0].clientX;
+        cy = e.touches[0].clientY;
+      } else {
+        cx = (e as PointerEvent).clientX;
+        cy = (e as PointerEvent).clientY;
+      }
+
+      const dx = cx - config.x;
+      const dy = cy - config.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // Deadzone in the center
+      if (dist < 40) { 
+        setActiveIndex(null);
+        return;
+      }
+
+      let angle = Math.atan2(dy, dx) * (180 / Math.PI);
+      let idx = null;
+
+      if (config.mode === "full") {
+        let a = (angle + 90 + 360) % 360;
+        let shiftedA = (a + (180 / 7)) % 360; 
+        idx = Math.floor(shiftedA / (360 / 7));
+      } else if (config.mode === "right") {
+        if (angle >= -100 && angle <= 100) { 
+          idx = Math.round((angle + 90) / 30);
+        }
+      } else if (config.mode === "left") {
+        let a = (angle + 360) % 360; 
+        if (a >= 80 && a <= 280) {
+          idx = Math.round((270 - a) / 30);
+        }
+      }
+
+      if (idx !== null && idx >= 0 && idx < 7) setActiveIndex(idx);
+      else setActiveIndex(null);
+    };
+
+    const handleUp = (e: Event) => {
+      if(e.cancelable) e.preventDefault();
+      if (activeIndexRef.current !== null) onSelect(deck[activeIndexRef.current]);
+      else onCancel();
+    };
+
+    window.addEventListener('pointermove', handleMove, { passive: false });
+    window.addEventListener('pointerup', handleUp, { passive: false });
+    window.addEventListener('touchmove', handleMove, { passive: false });
+    window.addEventListener('touchend', handleUp, { passive: false });
+    window.addEventListener('contextmenu', (e) => e.preventDefault());
+    
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('touchmove', handleMove);
+      window.removeEventListener('touchend', handleUp);
+      window.removeEventListener('contextmenu', (e) => e.preventDefault());
+    };
+  }, [config, deck, onSelect, onCancel]);
+
+  const getPos = (i: number) => {
+    let theta = 0;
+    if (config.mode === "full") theta = (i * (360 / 7)) - 90;
+    else if (config.mode === "right") theta = -90 + (i * 30);
+    else if (config.mode === "left") theta = 270 - (i * 30);
+    
+    const rad = 85; 
+    return { x: Math.cos(theta * Math.PI / 180) * rad, y: Math.sin(theta * Math.PI / 180) * rad };
+  };
+
+  let clipStyle = 'none';
+  if (config.mode === "right") clipStyle = 'inset(0 0 0 50%)';
+  if (config.mode === "left") clipStyle = 'inset(0 50% 0 0)';
+
+  return (
+    <div className="fixed inset-0 z-[600000] touch-none select-none overflow-hidden animate-in fade-in duration-150">
+      <div className="absolute inset-0 bg-zinc-950/20 backdrop-blur-[2px]" />
+      
+      {/* Base Wheel Background */}
+      <div 
+        className="absolute shadow-2xl bg-white/90 backdrop-blur-xl"
+        style={{
+           left: config.x, top: config.y, width: 260, height: 260,
+           transform: 'translate(-50%, -50%)', borderRadius: '50%',
+           clipPath: clipStyle, boxShadow: '0 30px 60px rgba(0,0,0,0.3), inset 0 0 0 1px rgba(0,0,0,0.05)'
+        }}
+      >
+         {/* Divider Lines */}
+         <svg width="260" height="260" viewBox="-130 -130 260 260" className="absolute top-0 left-0 opacity-10 pointer-events-none">
+           {Array.from({length: 7}).map((_, i) => {
+              let lineTheta = 0;
+              if (config.mode === "full") lineTheta = (i * (360 / 7)) - 90 + (180/7); 
+              else if (config.mode === "right") lineTheta = -90 + (i * 30) + 15;
+              else lineTheta = 270 - (i * 30) - 15;
+              const lx = Math.cos(lineTheta * Math.PI / 180) * 130;
+              const ly = Math.sin(lineTheta * Math.PI / 180) * 130;
+              return <line key={i} x1="0" y1="0" x2={lx} y2={ly} stroke="#000" strokeWidth="2.5" />;
+           })}
+         </svg>
+      </div>
+
+      {/* Dynamic Chord Options */}
+      {deck.map((chord, i) => {
+         const pos = getPos(i);
+         const isActive = activeIndex === i;
+         return (
+            <div 
+              key={i}
+              className={`absolute w-16 h-16 -ml-8 -mt-8 rounded-full flex flex-col items-center justify-center transition-all duration-150 leading-none ${isActive ? 'bg-blue-600 text-white scale-125 shadow-xl font-black' : 'bg-transparent text-zinc-700 font-bold'}`}
+              style={{ left: config.x + pos.x, top: config.y + pos.y }}
+            >
+              <span className={isActive ? 'text-[22px]' : 'text-[18px]'}>{chord.root}</span>
+              {chord.suffix && <span className={`text-[10px] mt-0.5 ${isActive ? 'text-blue-100' : 'text-zinc-400'}`}>{chord.suffix}</span>}
+            </div>
+         );
+      })}
+
+      {/* Center Cancel Bubble */}
+      <div 
+        className={`absolute w-14 h-14 -ml-7 -mt-7 rounded-full shadow-lg border flex items-center justify-center font-black text-xl transition-all duration-150 ${activeIndex === null ? 'scale-110 bg-white text-zinc-900 border-zinc-200' : 'scale-95 bg-zinc-100 text-zinc-400 border-zinc-200'}`}
+        style={{ left: config.x, top: config.y }}
+      >
+        ✕
+      </div>
+    </div>
+  );
+};
+
 export default function SongEditPage() {
   const supabase = createClient();
   const router = useRouter();
@@ -245,6 +387,38 @@ export default function SongEditPage() {
   // ✅ SURGICAL ADDITION: 3-State Chords Toggle Engine State
   const [chordMode, setChordMode] = useState<"Off" | "Chords" | "Keyboard">("Off");
   const [isAddNotesModeActive, setIsAddNotesModeActive] = useState(false); 
+
+  // ✅ RADIAL WHEEL ENGINE STATES
+  const [wheelState, setWheelState] = useState<{isOpen: boolean, x: number, y: number, sectionType: string, lineIdx: number, wordIdx: number, mode: "full"|"left"|"right"} | null>(null);
+  const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const holdStartPosRef = useRef({ x: 0, y: 0 });
+  const justClosedWheelRef = useRef(0);
+
+  const handleWheelSelect = (chordObj: { root: string, suffix: string }) => {
+    if (!wheelState) return;
+    const chordStr = `${chordObj.root}${chordObj.suffix}`;
+    const { sectionType, lineIdx, wordIdx } = wheelState;
+    
+    setHasUnsavedChanges(true);
+    setFormSections(prev => prev.map(sec => {
+      if (sec.type !== sectionType) return sec;
+      const lines = sec.content.split("\n");
+      let realWordCounter = 0;
+      lines[lineIdx] = (lines[lineIdx] || "").replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
+        if (realWordCounter === wordIdx) {
+          realWordCounter++;
+          const cleanTextWord = match.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "");
+          return `[${chordStr}]${cleanTextWord}`; // Inject selected chord
+        }
+        realWordCounter++;
+        return match;
+      });
+      return { ...sec, content: lines.join("\n") };
+    }));
+
+    setWheelState(null);
+    justClosedWheelRef.current = Date.now(); // 🛡️ Prevent normal click event
+  };
 
   const [multiSelectedChords, setMultiSelectedChords] = useState<{sectionType: string, lineIdx: number, wordIdx: number}[]>([]);
 
@@ -1123,13 +1297,43 @@ export default function SongEditPage() {
               return (
                 <div 
                   key={currentWordIdx} 
+                  style={{ WebkitTouchCallout: chordMode === 'Chords' ? 'none' : 'default' }}
+                  onPointerDown={(e) => {
+                    if (chordMode !== "Chords") return;
+                    holdStartPosRef.current = { x: e.clientX, y: e.clientY };
+                    holdTimerRef.current = setTimeout(() => {
+                      const { x, y } = holdStartPosRef.current;
+                      // Dynamic boundary checking to snap to a semi-circle if near the edge
+                      const mode = x < 140 ? "right" : (window.innerWidth - x < 140 ? "left" : "full");
+                      setWheelState({ isOpen: true, x, y, sectionType, lineIdx, wordIdx: currentWordIdx, mode });
+                      if (navigator.vibrate) navigator.vibrate(50);
+                    }, 600);
+                  }}
+                  onPointerMove={(e) => {
+                    if (holdTimerRef.current) {
+                      const dx = Math.abs(e.clientX - holdStartPosRef.current.x);
+                      const dy = Math.abs(e.clientY - holdStartPosRef.current.y);
+                      if (dx > 10 || dy > 10) clearTimeout(holdTimerRef.current); // Cancel if they are just scrolling
+                    }
+                  }}
+                  onPointerUp={() => { if (holdTimerRef.current) clearTimeout(holdTimerRef.current); }}
+                  onPointerCancel={() => { if (holdTimerRef.current) clearTimeout(holdTimerRef.current); }}
+                  onContextMenu={(e) => {
+                    if (chordMode === "Chords") e.preventDefault(); // Blocks the mobile magnifier
+                  }}
                   onClick={(e) => { 
+                    // 🛡️ SHIELD: Prevent the bottom sheet from opening if they just released the wheel!
+                    if (Date.now() - justClosedWheelRef.current < 400) {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      return;
+                    }
+
                     if (chordMode === "Keyboard") { 
                       e.stopPropagation(); 
                       setChordTargetCoordinate({ sectionType, lineIdx, wordIdx: currentWordIdx }); 
                       setCustomChordInputValue(hasNotation ? extractedChordsList[0] : ""); 
                     } else if (chordMode === "Chords") {
-                      // ✅ Open design-spec Advanced Bottom Sheet notation picker instead of standard field injection
                       e.stopPropagation();
                       setMultiSelectedChords([]);
                       setPickerLayoutView("family");
@@ -2254,7 +2458,16 @@ export default function SongEditPage() {
             )}
           </div>
         </div>
+      )}{/* ✅ SURGICAL ADDITION: RADIAL CHORD WHEEL */}
+      {wheelState && (
+        <ChordWheelOverlay 
+          config={wheelState} 
+          deck={activeScaleDiatonicDeck} 
+          onSelect={handleWheelSelect} 
+          onCancel={() => { setWheelState(null); justClosedWheelRef.current = Date.now(); }} 
+        />
       )}
+      
     </div>
   );
 }

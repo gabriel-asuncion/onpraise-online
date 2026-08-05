@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { createClient } from '../utils/supabase/client';
-
+import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 
 
@@ -37,6 +37,7 @@ const Blob = ({
 
 export default function Home() {
   const supabase = createClient();
+  const router = useRouter();
   const [activeSlide, setActiveSlide] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(true);
 
@@ -50,39 +51,26 @@ export default function Home() {
   const [showInstallSuccessModal, setShowInstallSuccessModal] = useState(false);
 
   useEffect(() => {
-    // 1. Check if they are in the browser or already inside the standalone app
-    const isStandalone = window.matchMedia('(display-mode: standalone)').matches 
-                      || (window.navigator as any).standalone === true;
-    setIsInBrowserTab(!isStandalone);
-
-    // 2. Check our local memory to see if they installed OnPraise in the past
-    if (localStorage.getItem('onpraise_app_installed') === 'true') {
-      setHasInstalledApp(true);
-    }
-
-    // 3. Listen for the native install prompt
-    const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-      setIsInstallable(true);
+    // 1. Check if they already have a cookie when the page mounts
+    const checkExistingSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        router.push('/songs'); // Change '/songs' to your actual dashboard route if different!
+      }
     };
+    checkExistingSession();
 
-    // 4. Listen for the exact moment they finish installing it!
-    const handleAppInstalled = () => {
-      localStorage.setItem('onpraise_app_installed', 'true');
-      setHasInstalledApp(true);
-      setIsInstallable(false);
-      setShowInstallSuccessModal(true);
-    };
+    // 2. Listen for the exact moment the OAuth callback finishes
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session) {
+        router.push('/songs'); 
+      }
+    });
 
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    window.addEventListener('appinstalled', handleAppInstalled);
-    
     return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('appinstalled', handleAppInstalled);
+      authListener.subscription.unsubscribe();
     };
-  }, []);
+  }, [supabase, router]);
 
   const handleInstallClick = async () => {
     // ✅ SURGICAL FIX: Fallback alert for iOS or strict browsers
