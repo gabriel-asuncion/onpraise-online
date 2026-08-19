@@ -277,10 +277,27 @@ export default function SongEditPage() {
 
   const handleCanvasScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const currentScrollY = e.currentTarget.scrollTop;
-    if (currentScrollY > lastScrollY.current + 5) setIsScrollingDown(true);
-    else if (currentScrollY < lastScrollY.current - 5) setIsScrollingDown(false);
+
+    // ✅ SURGICAL FIX: 0-pixel tolerance for instant triggering. 
+    // Also guarantees it stays visible if you bounce at the absolute top of the page.
+    if (currentScrollY <= 0) {
+      setIsScrollingDown(false);
+    } else if (currentScrollY > lastScrollY.current) {
+      setIsScrollingDown(true);
+    } else if (currentScrollY < lastScrollY.current) {
+      setIsScrollingDown(false);
+    }
+    
     lastScrollY.current = currentScrollY;
   };
+
+
+  // ✅ Ensures the nav is locked up the exact millisecond the page mounts
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("onpraise-scroll", { detail: false }));
+    }
+  }, []);
   
   const [formTitle, setFormTitle] = useState("");
   const [formTempo, setFormTempo] = useState("");
@@ -296,6 +313,52 @@ export default function SongEditPage() {
   const [ytCurrentTime, setYtCurrentTime] = useState(0);
   const [ytDuration, setYtDuration] = useState(0);
   const ytTimeTrackerRef = useRef<number | null>(null);
+
+  // ============================================================================
+  // ✅ SURGICAL ADDITION: Media Player Gesture & State Engine
+  // ============================================================================
+  const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
+  const [playerDragY, setPlayerDragY] = useState(0);
+  const isPlayerDraggingRef = useRef(false);
+  const playerDragStartYRef = useRef(0);
+
+  const handlePlayerPointerDown = (e: React.PointerEvent) => {
+    const target = e.target as HTMLElement;
+    // Don't trigger drag if interacting with controls
+    if (target.tagName === 'INPUT' || target.closest('button')) return;
+    
+    isPlayerDraggingRef.current = true;
+    playerDragStartYRef.current = e.clientY;
+    target.setPointerCapture(e.pointerId);
+  };
+
+  const handlePlayerPointerMove = (e: React.PointerEvent) => {
+    if (!isPlayerDraggingRef.current) return;
+    const deltaY = e.clientY - playerDragStartYRef.current;
+    
+    // ✅ SURGICAL FIX: Removed drag-up logic for docked state.
+    // Expanded: Only allow dragging DOWN (positive delta) to close.
+    if (isPlayerExpanded && deltaY > 0) {
+      setPlayerDragY(deltaY);
+    }
+  };
+
+  const handlePlayerPointerUp = (e: React.PointerEvent) => {
+    if (!isPlayerDraggingRef.current) return;
+    isPlayerDraggingRef.current = false;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+
+    const deltaY = e.clientY - playerDragStartYRef.current;
+
+    if (!isPlayerExpanded) {
+      // ✅ SURGICAL FIX: Only allow standard click detection when docked. No swipe thresholds.
+      if (Math.abs(deltaY) < 10) setIsPlayerExpanded(true); 
+    } else {
+      if (deltaY > 60) setIsPlayerExpanded(false); // Keep swipe down to close
+    }
+
+    setPlayerDragY(0); // Reset live transform, let Tailwind take over
+  };
 
   const formatTime = (seconds: number) => {
     if (!seconds || isNaN(seconds)) return "0:00";
@@ -469,6 +532,9 @@ export default function SongEditPage() {
   const [initialModalText, setInitialModalText] = useState(""); 
 
   const [isFetchingLyrics, setIsFetchingLyrics] = useState(false);
+  // ✅ NEW: Tracks the loading state while the backend scrapes the clicked song
+  const [isScrapingSelection, setIsScrapingSelection] = useState(false);
+  const [fetchedLyricsOptions, setFetchedLyricsOptions] = useState<{title: string, artist: string, url?: string, lyrics?: string, type?: string, thumbnail?: string}[] | null>(null);
 
   const handleSmartLyricsFetch = async () => {
     if (!formTitle.trim()) {
@@ -476,24 +542,94 @@ export default function SongEditPage() {
       return;
     }
     setIsFetchingLyrics(true);
+    setFetchedLyricsOptions(null); 
 
     let cleanTitle = formTitle.replace(/\[.*?\]|\(.*?\)/g, ""); 
     cleanTitle = cleanTitle.replace(/(official|live|lyric|video|audio|music)/gi, "").trim(); 
-    const searchQuery = `${cleanTitle} ${formArtist}`.trim();
+    
+    // We send ONLY the title to cast a wide net
+    const searchQuery = cleanTitle;
 
     try {
-      const res = await fetch(`/api/lyrics?q=${encodeURIComponent(searchQuery)}`);
+      // ✅ STEP 1: We tell the API to ONLY perform a search and return an array of hits
+      const res = await fetch(`/api/lyrics?q=${encodeURIComponent(searchQuery)}&action=search`);
       const data = await res.json();
 
-      if (res.ok && data.lyrics) {
-        setPastedRawLyricsText(data.lyrics);
+      if (res.ok) {
+        if (data.results && Array.isArray(data.results) && data.results.length > 0) {
+          
+          const targetArtist = formArtist.toLowerCase().trim();
+          const targetTitle = cleanTitle.toLowerCase();
+
+          const scoredResults = data.results.map((item: any) => {
+            const itemArtist = (item.artist || "").toLowerCase();
+            const itemTitle = (item.title || "").toLowerCase();
+            let score = 0; let type = "Alternative Version";
+
+            if (itemTitle === targetTitle) score += 10;
+            else if (itemTitle.includes(targetTitle)) score += 5;
+
+            if (targetArtist && itemArtist === targetArtist) {
+              score += 50; type = "Top Result";
+            } else if (targetArtist && (itemArtist.includes(targetArtist) || targetArtist.includes(itemArtist))) {
+              score += 25; type = "Close Match";
+            }
+
+            return { ...item, score, type };
+          });
+
+          scoredResults.sort((a: any, b: any) => b.score - a.score);
+          if (scoredResults.length > 0 && scoredResults[0].type === "Alternative Version") {
+            scoredResults[0].type = "Top Result";
+          }
+          setFetchedLyricsOptions(scoredResults);
+        } 
+        // Fallback for your current API until you update it
+        else if (data.lyrics) {
+          setFetchedLyricsOptions([{ title: cleanTitle, artist: formArtist || "Unknown", lyrics: data.lyrics, type: "Top Result" }]);
+        } else {
+          alert("No lyrics found for this track. Try simplifying the title.");
+        }
       } else {
-        alert(data.error || "No lyrics found for this exact track. Try simplifying the title.");
+        alert(data.error || "Failed to fetch lyrics.");
       }
     } catch (err) {
       alert("Failed to connect to the Lyrics Engine.");
     } finally {
       setIsFetchingLyrics(false);
+    }
+  };
+
+  // ✅ STEP 2: The Scrape Execution
+  const handleSelectLyricsCard = async (opt: any) => {
+    // If the API provided the lyrics upfront (fallback), use them directly
+    if (opt.lyrics) {
+      setPastedRawLyricsText(opt.lyrics);
+      setFetchedLyricsOptions(null);
+      return;
+    }
+
+    if (!opt.url) {
+      alert("Missing URL to scrape lyrics from.");
+      return;
+    }
+
+    setIsScrapingSelection(true);
+    try {
+      // Send the specific URL back to the API for scraping
+      const res = await fetch(`/api/lyrics?url=${encodeURIComponent(opt.url)}&action=scrape`);
+      const data = await res.json();
+
+      if (res.ok && data.lyrics) {
+        setPastedRawLyricsText(data.lyrics);
+        setFetchedLyricsOptions(null);
+      } else {
+        alert(data.error || "Failed to extract lyrics for this specific version.");
+      }
+    } catch (err) {
+      alert("Error parsing lyrics data.");
+    } finally {
+      setIsScrapingSelection(false);
     }
   };
 
@@ -1145,7 +1281,32 @@ export default function SongEditPage() {
       const rawString = formSections.map((sec) => {
         const metrics = getCentralizedMetricsTuple(sec.type);
         const header = `[${sec.type}] (M: ${metrics.measures}, B: ${metrics.beats}, R: ${metrics.repeats}, H: ${metrics.head_m}, T: ${metrics.tail_m})`;
-        return `${header}\n${sec.content}`.trim();
+        
+        // ✅ SURGICAL FIX: Serialize line-level (M: x, B: y) metrics into the text
+        const lines = sec.content.split("\n");
+        const processedLines = lines.map(l => ({ rawText: l, cleanText: l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim() }));
+        const validLines = processedLines.filter(l => l.cleanText.length > 0);
+        const totalLines = validLines.length;
+
+        const autoSpreadMeasures = totalLines > 0 ? Math.floor(metrics.measures / totalLines) : 0;
+        const remainderMeasures = totalLines > 0 ? metrics.measures % totalLines : 0;
+        const autoSpreadBeats = totalLines > 0 ? Math.floor(metrics.beats / totalLines) : 0;
+        const remainderBeats = totalLines > 0 ? metrics.beats % totalLines : 0;
+
+        let validLineCounter = 0;
+        const linesWithMetrics = lines.map((line) => {
+           const clean = line.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim();
+           if (clean.length === 0) return line;
+
+           const override = (lineOverrides as any)?.[sec.type]?.[validLineCounter];
+           const m = override?.measures ?? (autoSpreadMeasures + (validLineCounter < remainderMeasures ? 1 : 0));
+           const b = override?.beats ?? (autoSpreadBeats + (validLineCounter < remainderBeats ? 1 : 0));
+           validLineCounter++;
+
+           return `${line} (M: ${m}, B: ${b})`;
+        });
+
+        return `${header}\n${linesWithMetrics.join('\n')}`.trim();
       }).join("\n\n");
       
       setPastedRawLyricsText(rawString);
@@ -1167,6 +1328,9 @@ export default function SongEditPage() {
     const parsedBlocks: SongSectionBlock[] = [];
     let unassignedCounter = 1;
     const newExtractedTimings: SectionTimingMap = {};
+    
+    // ✅ NEW: Capture line-level overrides during parsing
+    const newLineOverrides: Record<string, Record<number, { measures: number; beats: number }>> = {};
 
     const flushBuffer = () => {
       if (currentBuffer.length === 0 && !currentSectionType) return;
@@ -1211,7 +1375,26 @@ export default function SongEditPage() {
       } else if (line === "") {
         if (currentBuffer.length > 0) flushBuffer(); 
       } else {
-        currentBuffer.push(line);
+        // ✅ SURGICAL FIX: Detect and strip line-level metrics (M: x, B: y)
+        const lineMetricMatch = line.match(/(.*?)\s*\(\s*M:\s*(\d+),\s*B:\s*(\d+)\s*\)$/i);
+        let cleanLineForContent = line;
+        
+        if (lineMetricMatch) {
+           cleanLineForContent = lineMetricMatch[1].trim();
+        }
+
+        const isContentLine = cleanLineForContent.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0;
+        
+        if (isContentLine && lineMetricMatch && currentSectionType) {
+           const m = parseInt(lineMetricMatch[2], 10);
+           const b = parseInt(lineMetricMatch[3], 10);
+           if (!newLineOverrides[currentSectionType]) newLineOverrides[currentSectionType] = {};
+           
+           const currentLineIdx = currentBuffer.filter(l => l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0).length;
+           newLineOverrides[currentSectionType][currentLineIdx] = { measures: m, beats: b };
+        }
+
+        currentBuffer.push(cleanLineForContent);
       }
     });
 
@@ -1225,6 +1408,17 @@ export default function SongEditPage() {
         });
         return mergedTimings;
       });
+      
+      // ✅ Apply the newly scraped line overrides
+      if (Object.keys(newLineOverrides).length > 0) {
+         setLineOverrides(prev => {
+            const merged = { ...(prev || {}) };
+            Object.keys(newLineOverrides).forEach(key => {
+               merged[key] = { ...(merged[key] || {}), ...newLineOverrides[key] };
+            });
+            return merged;
+         });
+      }
     }
     setIsImportModalOpen(false); 
     setPastedRawLyricsText("");
@@ -1250,16 +1444,40 @@ export default function SongEditPage() {
 
     try {
       const updatedSectionTimings: Record<string, any> = {};
+      
       formSections.forEach((sec) => {
         const metricsTuple = getCentralizedMetricsTuple(sec.type);
-        const specificRowOverrides = lineOverrides?.[sec.type] || null;
+        let specificRowOverrides = lineOverrides?.[sec.type] || null;
+
+        // ============================================================================
+        // ✅ SURGICAL FIX: Force generate the exact line timings!
+        // This stops the Setlist Live Page from falling back to the broken "repeats" math.
+        // ============================================================================
+        if (!specificRowOverrides) {
+          const processedLines = sec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim()).filter(l => l.length > 0);
+          const totalLines = processedLines.length;
+          
+          const autoSpreadMeasures = totalLines > 0 ? Math.floor(metricsTuple.measures / totalLines) : 0;
+          const remainderMeasures = totalLines > 0 ? metricsTuple.measures % totalLines : 0;
+          const autoSpreadBeats = totalLines > 0 ? Math.floor(metricsTuple.beats / totalLines) : 0;
+          const remainderBeats = totalLines > 0 ? metricsTuple.beats % totalLines : 0;
+
+          specificRowOverrides = {};
+          processedLines.forEach((_, lIdx) => {
+            specificRowOverrides![lIdx] = {
+              measures: autoSpreadMeasures + (lIdx < remainderMeasures ? 1 : 0),
+              beats: autoSpreadBeats + (lIdx < remainderBeats ? 1 : 0)
+            };
+          });
+        }
+
         updatedSectionTimings[sec.type] = {
           measures: metricsTuple.measures,
           beats: metricsTuple.beats,
           repeats: metricsTuple.repeats,
           head_m: metricsTuple.head_m,  
           tail_m: metricsTuple.tail_m,  
-          line_timings: specificRowOverrides,
+          line_timings: specificRowOverrides, // ✅ DB now explicitly tells Live exactly what to do
           youtube_url: formYoutubeUrl.trim(),
           youtube_sync_offset_ms: formYoutubeSyncOffset
         };
@@ -1494,20 +1712,21 @@ export default function SongEditPage() {
     const checkTuple = getCentralizedMetricsTuple(checkSec.type);
     const checkLines = checkSec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").trim()).filter(l => l.length > 0);
     if (checkLines.length === 0) return false;
-    const totalCheckPasses = (checkTuple.repeats || 0) + 1; 
-    const totalLineSegments = checkLines.length * totalCheckPasses;
+    
+    // ✅ SURGICAL FIX: Target beats for ONE pass. Removed head/tail bloat from line calculations.
     const targetAbsoluteBeats = (checkTuple.measures * 4) + checkTuple.beats;
-    const checkSpreadMeasures = Math.floor(checkTuple.measures / totalLineSegments);
-    const checkRemainderMeasures = checkTuple.measures % totalLineSegments;
-    const checkSpreadBeats = Math.floor(checkTuple.beats / totalLineSegments);
-    const checkRemainderBeats = checkTuple.beats % totalLineSegments;
+    
+    const checkSpreadMeasures = Math.floor(checkTuple.measures / checkLines.length);
+    const checkRemainderMeasures = checkTuple.measures % checkLines.length;
+    const checkSpreadBeats = Math.floor(checkTuple.beats / checkLines.length);
+    const checkRemainderBeats = checkTuple.beats % checkLines.length;
 
-    const calculatedBeatsSum = (checkLines.reduce((sum, _, lineIndex) => {
+    const calculatedBeatsSum = checkLines.reduce((sum, _, lineIndex) => {
       const lineOverride = (lineOverrides as any)?.[checkSec.type]?.[lineIndex];
       const measures = lineOverride?.measures ?? (checkSpreadMeasures + (lineIndex < checkRemainderMeasures ? 1 : 0));
       const beats = lineOverride?.beats ?? (checkSpreadBeats + (lineIndex < checkRemainderBeats ? 1 : 0));
       return sum + (measures * 4) + beats;
-    }, 0) * totalCheckPasses) + (checkTuple.head_m * 4) + (checkTuple.tail_m * 4);
+    }, 0);
 
     return calculatedBeatsSum !== targetAbsoluteBeats;
   });
@@ -1517,7 +1736,7 @@ export default function SongEditPage() {
   
 
   return (
-    <div ref={editorContentContainerRef} className="h-screen w-full overflow-hidden bg-[#f8f9fa] flex flex-col relative animate-in fade-in duration-200">
+    <div ref={editorContentContainerRef} className="h-screen w-full border-b-[57px] overflow-hidden bg-[#f8f9fa] flex flex-col relative animate-in fade-in duration-200">
       <style dangerouslySetInnerHTML={{__html: `@import url('https://fonts.googleapis.com/css2?family=Nothing+You+Could+Do&display=swap');`}} />
 
       {/* --- UNIFIED SEMANTIC STICKY HEADER --- */}
@@ -1600,7 +1819,10 @@ export default function SongEditPage() {
       </header>
 
       {/* FULL-BLEED WORKSPACE CANVAS */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full" onScroll={handleCanvasScroll}>
+      <div 
+        className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full" 
+        onScroll={handleCanvasScroll}
+      >
         {editorActiveTab === "details" && (
           <div className="w-full animate-in fade-in">
             <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-zinc-200 space-y-4 shadow-sm">
@@ -1759,13 +1981,12 @@ export default function SongEditPage() {
                 const totalLines = processedLines.length;
                 const sectionRepeats = timingTuple.repeats || 0;
                 const totalPasses = sectionRepeats + 1; 
-                const totalLineSegmentsCount = totalLines * totalPasses;
                 const masterTotalAbsoluteBeats = (timingTuple.measures * 4) + timingTuple.beats;
 
-                const autoSpreadMeasures = totalLineSegmentsCount > 0 ? Math.floor(timingTuple.measures / totalLineSegmentsCount) : 0;
-                const remainderMeasures = totalLineSegmentsCount > 0 ? timingTuple.measures % totalLineSegmentsCount : 0;
-                const autoSpreadBeats = totalLineSegmentsCount > 0 ? Math.floor(timingTuple.beats / totalLineSegmentsCount) : 0;
-                const remainderBeats = totalLineSegmentsCount > 0 ? timingTuple.beats % totalLineSegmentsCount : 0;
+                const autoSpreadMeasures = totalLines > 0 ? Math.floor(timingTuple.measures / totalLines) : 0;
+                const remainderMeasures = totalLines > 0 ? timingTuple.measures % totalLines : 0;
+                const autoSpreadBeats = totalLines > 0 ? Math.floor(timingTuple.beats / totalLines) : 0;
+                const remainderBeats = totalLines > 0 ? timingTuple.beats % totalLines : 0;
 
                 const currentLinesMetrics = processedLines.map((_, lIdx) => {
                   const explicitOverride = (lineOverrides as any)?.[sec.type]?.[lIdx];
@@ -1776,9 +1997,9 @@ export default function SongEditPage() {
                   };
                 });
 
-                const totalManualLineMeasures = currentLinesMetrics.reduce((sum, l) => sum + l.measures, 0) * totalPasses;
-                const totalManualLineBeats = currentLinesMetrics.reduce((sum, l) => sum + l.beats, 0) * totalPasses;
-                const totalManualAbsoluteBeats = (totalManualLineMeasures * 4) + totalManualLineBeats + (timingTuple.head_m * 4) + (timingTuple.tail_m * 4);
+                const totalManualLineMeasures = currentLinesMetrics.reduce((sum, l) => sum + l.measures, 0);
+                const totalManualLineBeats = currentLinesMetrics.reduce((sum, l) => sum + l.beats, 0);
+                const totalManualAbsoluteBeats = (totalManualLineMeasures * 4) + totalManualLineBeats;
                 const isSectionMismatched = totalLines > 0 && totalManualAbsoluteBeats !== masterTotalAbsoluteBeats;
 
                 const handleAdjustLineMetricValue = (lineIdx: number, field: "measures" | "beats", delta: number) => {
@@ -2161,12 +2382,11 @@ export default function SongEditPage() {
             const sec = formSections.find(s => s.type === sType);
             const processedLines = sec ? sec.content.split("\n").map(l => ({ rawText: l, cleanText: l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim() })).filter(l => l.cleanText.length > 0) : [];
             const totalLines = processedLines.length;
-            const totalLineSegmentsCount = totalLines * ((timingTuple.repeats || 0) + 1);
             
-            const autoSpreadMeasures = totalLineSegmentsCount > 0 ? Math.floor(timingTuple.measures / totalLineSegmentsCount) : 0;
-            const remainderMeasures = totalLineSegmentsCount > 0 ? timingTuple.measures % totalLineSegmentsCount : 0;
-            const autoSpreadBeats = totalLineSegmentsCount > 0 ? Math.floor(timingTuple.beats / totalLineSegmentsCount) : 0;
-            const remainderBeats = totalLineSegmentsCount > 0 ? timingTuple.beats % totalLineSegmentsCount : 0;
+            const autoSpreadMeasures = totalLines > 0 ? Math.floor(timingTuple.measures / totalLines) : 0;
+            const remainderMeasures = totalLines > 0 ? timingTuple.measures % totalLines : 0;
+            const autoSpreadBeats = totalLines > 0 ? Math.floor(timingTuple.beats / totalLines) : 0;
+            const remainderBeats = totalLines > 0 ? timingTuple.beats % totalLines : 0;
 
             const currentLinesMetrics = processedLines.map((_, lIdx) => {
               const explicitOverride = (lineOverrides as any)?.[sType]?.[lIdx];
@@ -2410,53 +2630,104 @@ export default function SongEditPage() {
       )}
 
       {isImportModalOpen && (
-        <div className="fixed inset-0 bg-zinc-950/60 backdrop-blur-md z-[11000] flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-zinc-950/60 backdrop-blur-md z-[200000] flex items-center justify-center p-4">
           <div className="bg-white rounded-xl p-5 w-full max-w-xl border shadow-2xl space-y-4">
             
             <div className="flex justify-between items-center">
-              <h4 className="text-base font-black">Import / Edit Plain Text</h4>
+              <h4 className="text-base font-black">
+                {fetchedLyricsOptions ? "Select Lyrics Version" : "Import / Edit Plain Text"}
+              </h4>
               
-              <button 
-                type="button" 
-                onClick={handleSmartLyricsFetch} 
-                disabled={isFetchingLyrics} 
-                className="px-3 py-1.5 text-[10px] font-black text-purple-600 bg-purple-50 border border-purple-200 hover:bg-purple-100 rounded-lg shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5"
-              >
-                {isFetchingLyrics ? "⏳ Searching..." : "✨ Smart Fetch"}
-              </button>
+              {!fetchedLyricsOptions && (
+                <button 
+                  type="button" 
+                  onClick={handleSmartLyricsFetch} 
+                  disabled={isFetchingLyrics} 
+                  className="px-3 py-1.5 text-[10px] font-black text-purple-600 bg-purple-50 border border-purple-200 hover:bg-purple-100 rounded-lg shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5"
+                >
+                  {isFetchingLyrics ? "⏳ Searching..." : "✨ Smart Fetch"}
+                </button>
+              )}
             </div>
 
-            <textarea 
-              rows={16} 
-              value={pastedRawLyricsText} 
-              placeholder="Paste plain track text format layout sections (e.g. [Verse 1] lines)..." 
-              className="w-full text-[13px] leading-relaxed p-4 border border-zinc-200 bg-zinc-50/50 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-mono resize-none transition-all shadow-inner" 
-              onChange={e => setPastedRawLyricsText(e.target.value)} 
-            />
-            
-            <div className="grid grid-cols-2 gap-2">
-              <button 
-                type="button" 
-                className="py-3 bg-zinc-100 text-zinc-700 hover:bg-zinc-200 transition-colors text-xs font-black rounded-lg" 
-                onClick={() => {
-                  if (pastedRawLyricsText !== initialModalText) {
-                    if (!window.confirm("You have unsaved text changes. Discard?")) return;
-                  }
-                  setIsImportModalOpen(false);
-                }}
-              >
-                Cancel
-              </button>
-              
-              <button 
-                type="button" 
-                disabled={pastedRawLyricsText === initialModalText || !pastedRawLyricsText.trim()}
-                className="py-3 bg-blue-600 text-white hover:bg-blue-700 transition-colors text-xs font-black rounded-lg shadow-md disabled:opacity-50 disabled:cursor-not-allowed" 
-                onClick={executeRawLyricsImportAction}
-              >
-                {initialModalText.trim() ? "Apply Modifications" : "Parse & Import"}
-              </button>
-            </div>
+            {fetchedLyricsOptions ? (
+              // ✅ NEW: The Rich Options Selection View
+              <div className="space-y-3 max-h-[55vh] overflow-y-auto custom-scrollbar pr-2 animate-in fade-in zoom-in-95 duration-200">
+                {fetchedLyricsOptions.map((opt, idx) => (
+                  <button 
+                    key={idx}
+                    type="button"
+                    disabled={isScrapingSelection}
+                    // ✅ SURGICAL FIX: Fire the Step 2 Scrape function!
+                    onClick={() => handleSelectLyricsCard(opt)}
+                    className={`w-full text-left p-3.5 border border-zinc-200 rounded-xl transition-all group shadow-sm bg-zinc-50/50 flex gap-4 items-center ${
+                      isScrapingSelection ? 'opacity-50 cursor-wait' : 'hover:bg-purple-50 hover:border-purple-300'
+                    }`}
+                  >
+                    {/* Thumbnail formatting */}
+                    {opt.thumbnail ? (
+                       <img src={opt.thumbnail} alt="cover" className="w-16 h-16 rounded-md object-cover shadow-sm shrink-0 bg-zinc-200 border border-zinc-200" />
+                    ) : (
+                       <div className="w-16 h-16 rounded-md bg-zinc-200 border border-zinc-300 flex items-center justify-center shrink-0 shadow-sm text-zinc-400 text-xl">🎵</div>
+                    )}
+                    
+                    <div className="flex-1 min-w-0">
+                      <div className="flex justify-between items-start mb-0.5">
+                        <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded shadow-sm ${idx === 0 ? 'text-purple-600 bg-purple-100' : 'text-zinc-600 bg-zinc-200'}`}>
+                          {isScrapingSelection ? "Extracting..." : opt.type || "Alternative Version"}
+                        </span>
+                      </div>
+                      <h5 className="font-black text-zinc-900 text-[15px] tracking-tight truncate">{opt.title}</h5>
+                      <p className="text-[11px] font-bold text-zinc-500 truncate">{opt.artist}</p>
+                    </div>
+                  </button>
+                ))}
+                
+                <button 
+                  type="button"
+                  onClick={() => setFetchedLyricsOptions(null)}
+                  className="w-full py-3.5 bg-zinc-100 text-zinc-700 font-black text-[11px] uppercase tracking-wider rounded-xl hover:bg-zinc-200 transition-colors mt-2"
+                >
+                  Cancel Selection
+                </button>
+              </div>
+            ) : (
+              // 🔄 The Original Text Area View
+              <>
+                <textarea 
+                  rows={16} 
+                  value={pastedRawLyricsText} 
+                  placeholder="Paste plain track text format layout sections (e.g. [Verse 1] lines)..." 
+                  className="w-full text-[13px] leading-relaxed p-4 border border-zinc-200 bg-zinc-50/50 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-mono resize-none transition-all shadow-inner" 
+                  onChange={e => setPastedRawLyricsText(e.target.value)} 
+                />
+                
+                <div className="grid grid-cols-2 gap-2">
+                  <button 
+                    type="button" 
+                    className="py-3 bg-zinc-100 text-zinc-700 hover:bg-zinc-200 transition-colors text-xs font-black rounded-lg" 
+                    onClick={() => {
+                      if (pastedRawLyricsText !== initialModalText) {
+                        if (!window.confirm("You have unsaved text changes. Discard?")) return;
+                      }
+                      setIsImportModalOpen(false);
+                      setFetchedLyricsOptions(null); // Clear options on hard close
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  
+                  <button 
+                    type="button" 
+                    disabled={pastedRawLyricsText === initialModalText || !pastedRawLyricsText.trim()}
+                    className="py-3 bg-blue-600 text-white hover:bg-blue-700 transition-colors text-xs font-black rounded-lg shadow-md disabled:opacity-50 disabled:cursor-not-allowed" 
+                    onClick={executeRawLyricsImportAction}
+                  >
+                    {initialModalText.trim() ? "Apply Modifications" : "Parse & Import"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -2593,34 +2864,91 @@ export default function SongEditPage() {
       )}
       
       {youtubeVideoId && (
-        <div className={`fixed bottom-[75px] left-4 right-4 md:left-1/2 md:-translate-x-1/2 md:w-[400px] z-[150000] bg-white/95 backdrop-blur-xl border border-zinc-200 shadow-[0_12px_40px_rgba(0,0,0,0.12)] rounded-full p-2.5 transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
-          chordMode !== "Off" || chordPickerConfig.isOpen ? 'translate-y-[200%] opacity-0 pointer-events-none' : 'translate-y-0 opacity-100'
-        }`}>
-          <div className="flex items-center gap-3">
-            
-            <button 
-              type="button"
-              className="w-11 h-11 bg-zinc-900 text-white rounded-full flex items-center justify-center shadow-md hover:scale-105 active:scale-95 transition-all shrink-0"
-              onClick={() => {
-                if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-                
-                initAudioContext();
+        <div 
+          onPointerDown={handlePlayerPointerDown}
+          onPointerMove={handlePlayerPointerMove}
+          onPointerUp={handlePlayerPointerUp}
+          onPointerCancel={handlePlayerPointerUp}
+          className={`fixed left-0 right-0 md:mx-auto md:w-[500px] z-[150000] overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] select-none ${
+            chordMode !== "Off" || chordPickerConfig.isOpen ? 'opacity-0 pointer-events-none' : ''
+          }`}
+          style={{
+            // Handle swipe drag or global scroll hiding
+            transform: playerDragY !== 0 
+              ? `translateY(${playerDragY}px)` 
+              : (!isPlayerExpanded && isScrollingDown ? 'translateY(150px)' : 'translateY(0px)'),
+            // Morphing Container Size & Position
+            height: isPlayerExpanded ? '100dvh' : '54px',
+            bottom: isPlayerExpanded ? '0px' : '63px',
+            backgroundColor: isPlayerExpanded ? '#0f0f0f' : 'rgba(255, 255, 255, 0.95)',
+            borderTop: isPlayerExpanded ? '1px solid transparent' : '1px solid #e4e4e7',
+            borderRadius: isPlayerExpanded ? '0px' : '0.75rem',
+            boxShadow: isPlayerExpanded ? 'none' : '0 -4px 20px rgba(0,0,0,0.08)'
+          }}
+        >
+          {/* DOCKED CLICK CATCHER (Expands the player) */}
+          {!isPlayerExpanded && (
+            <div className="absolute inset-0 z-0 cursor-pointer" onClick={() => setIsPlayerExpanded(true)} />
+          )}
 
-                if (ytPlaying) ytPlayerRef.current.pauseVideo();
-                else ytPlayerRef.current.playVideo();
-              }}
-            >
-              {ytPlaying ? (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
-              ) : (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" className="ml-1"><path d="M5 3l14 9-14 9V3z"/></svg>
-              )}
+          {/* DOCKED BACKGROUND PROGRESS BAR */}
+          <div className={`absolute bottom-0 left-0 right-0 h-[2px] bg-zinc-200/50 transition-opacity duration-300 pointer-events-none ${isPlayerExpanded ? 'opacity-0' : 'opacity-100'}`}>
+            <div className="h-full bg-zinc-900 transition-all duration-200 ease-linear" style={{ width: `${ytDuration ? (ytCurrentTime / ytDuration) * 100 : 0}%` }} />
+          </div>
+
+          {/* TOP BAR (Fullscreen Only) */}
+          <div className={`absolute top-0 left-0 right-0 flex justify-between items-center px-6 pt-safe mt-4 transition-all duration-500 z-10 ${isPlayerExpanded ? 'opacity-100 translate-y-0 delay-100' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
+            <button type="button" onClick={(e) => { e.stopPropagation(); setIsPlayerExpanded(false); }} className="p-2 -ml-2 rounded-full hover:bg-white/10 text-white transition-colors cursor-pointer">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6"/></svg>
             </button>
+            <span className="text-[10px] font-black uppercase tracking-widest text-zinc-400">Now Playing</span>
+            <div className="w-11"></div> 
+          </div>
 
-            <span className="text-[11px] font-bold text-zinc-500 font-mono w-8 text-right shrink-0">
-              {formatTime(ytCurrentTime)}
-            </span>
+          {/* MORPHING THUMBNAIL */}
+          <div 
+            className="absolute z-10 overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-zinc-800 pointer-events-none"
+            style={{
+               bottom: isPlayerExpanded ? 'calc(25dvh + 130px)' : '8px',
+               left: isPlayerExpanded ? '50%' : '12px',
+               width: isPlayerExpanded ? 'calc(100vw - 48px)' : '38px',
+               maxWidth: isPlayerExpanded ? '384px' : '38px',
+               height: isPlayerExpanded ? 'calc(100vw - 48px)' : '38px',
+               maxHeight: isPlayerExpanded ? '384px' : '38px',
+               transform: isPlayerExpanded ? 'translateX(-50%)' : 'translateX(0)',
+               borderRadius: isPlayerExpanded ? '12px' : '4px',
+               boxShadow: isPlayerExpanded ? '0 20px 40px rgba(0,0,0,0.4)' : 'none'
+            }}
+          >
+            <img src={`https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg`} alt="cover" className="w-full h-full object-cover opacity-90" />
+          </div>
 
+          {/* MORPHING TEXT */}
+          <div 
+            className="absolute z-10 flex flex-col justify-center transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] pointer-events-none"
+            style={{
+               bottom: isPlayerExpanded ? 'calc(25dvh + 50px)' : '8px',
+               left: isPlayerExpanded ? '50%' : '62px',
+               width: isPlayerExpanded ? 'calc(100vw - 48px)' : 'calc(100% - 120px)',
+               maxWidth: isPlayerExpanded ? '384px' : 'none',
+               height: isPlayerExpanded ? '60px' : '38px',
+               transform: isPlayerExpanded ? 'translateX(-50%)' : 'translateX(0)',
+               textAlign: isPlayerExpanded ? 'center' : 'left'
+            }}
+          >
+            <h2 className={`font-black truncate transition-colors duration-500 ${isPlayerExpanded ? 'text-2xl text-white tracking-tight mb-1' : 'text-[13px] text-zinc-900 leading-tight'}`}>
+              {formTitle || "Unknown Track"}
+            </h2>
+            <p className={`font-bold truncate transition-colors duration-500 ${isPlayerExpanded ? 'text-sm text-zinc-400' : 'text-[11px] text-zinc-500 leading-tight'}`}>
+              {formArtist || "Unknown Artist"}
+            </p>
+          </div>
+
+          {/* FULLSCREEN SCRUBBER (Fade in/out) */}
+          <div 
+            className={`absolute left-[10%] w-[80%] max-w-sm mx-auto transition-all duration-500 z-20 ${isPlayerExpanded ? 'bottom-[20dvh] opacity-100' : 'bottom-[10dvh] opacity-0 pointer-events-none'}`}
+            style={{ left: '50%', transform: 'translateX(-50%)' }}
+          >
             <input 
               type="range" 
               min={0} max={ytDuration || 100} step="0.1"
@@ -2628,18 +2956,46 @@ export default function SongEditPage() {
               onChange={(e) => {
                 const t = parseFloat(e.target.value);
                 setYtCurrentTime(t);
-                if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-                  ytPlayerRef.current.seekTo(t, true);
-                }
+                if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') ytPlayerRef.current.seekTo(t, true);
               }}
-              className="flex-1 h-2 bg-zinc-200 rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-zinc-900 [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-110 transition-all"
+              className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all mb-2"
             />
-            
-            <span className="text-[11px] font-bold text-zinc-500 font-mono w-8 shrink-0 pr-2">
-              {formatTime(ytDuration)}
-            </span>
-
+            <div className="flex justify-between text-[11px] font-mono font-bold text-zinc-400 pointer-events-none">
+              <span>{formatTime(ytCurrentTime)}</span>
+              <span>-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
+            </div>
           </div>
+
+          {/* MORPHING PLAY BUTTON */}
+          <button 
+            type="button"
+            className="absolute z-30 flex items-center justify-center transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] cursor-pointer outline-none"
+            style={{
+               bottom: isPlayerExpanded ? '8dvh' : '7px',
+               left: isPlayerExpanded ? '50%' : 'calc(100% - 48px)',
+               transform: isPlayerExpanded ? 'translateX(-50%)' : 'translateX(0)',
+               width: isPlayerExpanded ? '84px' : '40px',
+               height: isPlayerExpanded ? '84px' : '40px',
+               backgroundColor: isPlayerExpanded ? '#ffffff' : 'transparent',
+               color: '#18181b', // Always dark icon
+               borderRadius: '9999px',
+               boxShadow: isPlayerExpanded ? '0 0 40px rgba(255,255,255,0.15)' : 'none'
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
+              initAudioContext();
+              if (ytPlaying) ytPlayerRef.current.pauseVideo();
+              else ytPlayerRef.current.playVideo();
+            }}
+          >
+            {ytPlaying ? (
+              <svg className={`transition-all duration-500 ${isPlayerExpanded ? 'w-[34px] h-[34px]' : 'w-[22px] h-[22px]'}`} viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+            ) : (
+              <svg className={`transition-all duration-500 ${isPlayerExpanded ? 'w-[34px] h-[34px] ml-2' : 'w-[22px] h-[22px] ml-1'}`} viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
+            )}
+          </button>
+
         </div>
       )}
 

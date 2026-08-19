@@ -89,21 +89,34 @@ export function useHardwareClock(config: HardwareClockConfig) {
       
       if (!currentSection) { c.handleAdvanceToNextSetlistTrack(); return; }
 
+      
+
       const beatSpeedMsCurrent = (60 / (song.tempo || 75)) * 1000;
       const timings = song.section_timings?.[currentSection.section_name] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
       const sectionMultiplier = (timings.repeats || 0) + 1; 
       const headBeats = (timings.head_m || 0) * 4;
       const tailBeats = (timings.tail_m || 0) * 4;
       
-      let totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
-      let baseLoopBeats = totalCoreBeats / sectionMultiplier;
+      // ============================================================================
+      // ✅ SURGICAL FIX: The Math Paradox is Solved.
+      // timings.measures is the length of ONE PASS. The total core beats is that base multiplied by repeats!
+      // ============================================================================
+      let baseLoopBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
+      let totalCoreBeats = baseLoopBeats * sectionMultiplier;
 
-      const lineTimingsObj = timings.line_timings;
+      // ✅ Also ensure JSON strings from Supabase are safely converted so custom line overrides don't fail silently
+      let lineTimingsObj = timings.line_timings;
+      if (typeof lineTimingsObj === 'string') { 
+        try { lineTimingsObj = JSON.parse(lineTimingsObj); } catch(e){} 
+      }
+      
       const currentAstNode = c.astTreeRef.current[idx];
-      const parsedLinesCount = currentAstNode?.lines?.length || 1; 
+      const parsedLinesCount = currentAstNode?.lines?.length || 1;
 
       let calculatedBaseLoopBeats = 0;
       const lineBeatsArray: number[] = [];
+      
+      
       
       if (lineTimingsObj && Object.keys(lineTimingsObj).length > 0) {
         for (let i = 0; i < parsedLinesCount; i++) {
@@ -273,8 +286,13 @@ export function useHardwareClock(config: HardwareClockConfig) {
         }
       } else {
         const safeLinesCount = Math.max(1, parsedLinesCount); 
+        
+        // ✅ SURGICAL FIX: Pure mathematical pass mapping! 
+        // safeBaseLoopBeats is exactly ONE pass (e.g. 32 beats). 
+        // Modulo (%) forces the index to loop flawlessly back to Line 1 when the pass repeats!
         const beatsPerLine = safeBaseLoopBeats / safeLinesCount; 
         const beatWithinCurrentLoop = cappedCoreBeat % safeBaseLoopBeats;
+        
         targetLineIdx = Math.floor(beatWithinCurrentLoop / beatsPerLine);
         if (targetLineIdx >= safeLinesCount) targetLineIdx = safeLinesCount - 1;
       }

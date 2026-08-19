@@ -82,21 +82,34 @@ export function VolumeMixerModal({
     return (
       <div className="flex flex-col items-center bg-[#333336] p-2 sm:p-3 rounded-lg border border-[#222] shadow-xl w-[90px] sm:w-[100px] shrink-0">
         <div className="h-48 relative flex justify-center items-center my-3 w-full">
-          <div className="absolute left-1 top-0 bottom-0 flex flex-col justify-between text-[8px] text-zinc-500 font-mono h-full py-2 select-none">
+          <div className="absolute left-1 top-0 bottom-0 flex flex-col justify-between text-[8px] text-zinc-500 font-mono h-full py-2 select-none pointer-events-none">
             <span>12</span><span>6</span><span>0</span><span>-5</span><span>-10</span><span>-24</span>
           </div>
           
+          {/* ✅ EXACT CODEPEN SPEC: Pure native CSS. No Tailwind interference. Signature Blue. */}
           <input 
-            type="range" min="0" max="1" step="0.01" value={val} 
+            type="range" min="0" max="1" step="0.2" value={val} 
             onChange={(e) => setVal(parseFloat(e.target.value))}
-            style={{ WebkitAppearance: 'slider-vertical' }} 
-            className="h-full w-5 cursor-pointer appearance-none bg-black rounded-full shadow-inner z-10" 
+            style={{ 
+              WebkitAppearance: 'slider-vertical',
+              appearance: 'slider-vertical',
+              width: '100%', 
+              height: '100%',
+              background: 'transparent',
+              outline: 'none',
+              margin: 0,
+              accentColor: '#2563eb' // Signature blue-600
+            } as any} 
+            className="cursor-pointer z-10" 
           />
           
-          <div className="absolute right-1 top-0 bottom-0 flex flex-col justify-between h-full py-2 opacity-80 select-none">
-            {[...Array(6)].map((_, i) => (
-              <div key={i} className={`w-1.5 h-1.5 rounded-sm ${val > (1 - (i*0.2)) && !isMuted && (!anySoloActive || isSoloed) ? 'bg-green-400 shadow-[0_0_5px_#4ade80]' : 'bg-[#1a1a1a]'}`} />
-            ))}
+          <div className="absolute right-1 top-0 bottom-0 flex flex-col justify-between h-full py-2 opacity-80 select-none pointer-events-none">
+            {[...Array(6)].map((_, i) => {
+              const isLightOn = val >= (1 - (i * 0.2)) - 0.01 && !isMuted && (!anySoloActive || isSoloed);
+              return (
+                <div key={i} className={`w-1.5 h-1.5 rounded-sm ${isLightOn ? 'bg-green-400 shadow-[0_0_5px_#4ade80]' : 'bg-[#1a1a1a]'}`} />
+              );
+            })}
           </div>
         </div>
 

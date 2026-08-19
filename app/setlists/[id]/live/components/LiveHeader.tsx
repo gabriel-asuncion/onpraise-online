@@ -22,6 +22,7 @@ interface LiveHeaderProps {
   isSoloMode?: boolean; // ✅ Added flag for Solo Practice Room
   isSimplifiedMode?: boolean;
   wakeUpAudioEngine?: () => void; // ✅ SURGICAL FIX: Accept the direct wake-up function
+  localClickVolume?: number; // ✅ ADDED: Accept the mixer volume
   
 }
 
@@ -31,7 +32,8 @@ export function LiveHeader({
   setIsSettingsModalOpen, handleToggleFlowPlaybackState, displayedOnlineUsers,
   tracksList, currentTrackIndex, handleUserSelectTrackBadge,
   backdropProgressRef, accentProgressBarRef, isSoloMode = false, isSimplifiedMode = false, // ✅ Added here
-  wakeUpAudioEngine // ✅ Add it to the destructured props
+  wakeUpAudioEngine, localClickVolume = 1.0 // ✅ Default to 1.0 if missing
+  
 }: LiveHeaderProps) {
   
   // ✅ Encapsulated Title Overflow Logic
@@ -61,6 +63,52 @@ export function LiveHeader({
     window.addEventListener('resize', checkTitleOverflow);
     return () => { clearTimeout(timer); window.removeEventListener('resize', checkTitleOverflow); };
   }, [activeSong?.title]);
+
+// ============================================================================
+  // ✅ SURGICAL FIX: Store live volume in a ref to bypass React's closure trap!
+  // ============================================================================
+  const liveVolumeRef = useRef(localClickVolume);
+  useEffect(() => {
+    liveVolumeRef.current = localClickVolume;
+  }, [localClickVolume]);
+
+  // ✅ Physically links the audio to the visual flashes
+  useEffect(() => {
+    if (!isPlayingFlow) return;
+
+    const observers: MutationObserver[] = [];
+
+    metronomeRefs.current.forEach((node, index) => {
+      if (!node) return;
+
+      const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          if (mutation.attributeName === "class") {
+            const newClasses = (mutation.target as HTMLElement).className || "";
+            const oldClasses = mutation.oldValue || "";
+
+            const isNowActive = newClasses.includes("text-white");
+            const wasActive = oldClasses.includes("text-white");
+
+            // If the visual JUST turned on, fire the cached .wav file
+            if (isNowActive && !wasActive) {
+              const soundKey = index === 0 ? "metronome_blip_1" : "metronome_blip_2";
+              // ✅ Read the LIVE volume from the ref!
+              playZeroLatencyAudio(soundKey, liveVolumeRef.current);
+            }
+          }
+        });
+      });
+
+      // Watch this exact visual block for class changes
+      observer.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class"] });
+      observers.push(observer);
+    });
+
+    return () => {
+      observers.forEach(obs => obs.disconnect());
+    };
+  }, [isPlayingFlow, metronomeRefs]);
 
   
 

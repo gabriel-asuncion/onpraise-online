@@ -602,6 +602,7 @@ export default function SoloPracticeRoomPage() {
           backdropProgressRef={backdropProgressRef} accentProgressBarRef={accentProgressBarRef}
           isSoloMode={true} // ✅ Instantly strips away the lobby and track switcher clutter!
           wakeUpAudioEngine={initAudioContext}
+          localClickVolume={localClickVolume}
         />
       )}
 

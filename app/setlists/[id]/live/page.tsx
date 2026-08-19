@@ -868,30 +868,36 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
     sections.forEach((section, sIdx) => {
       sectionStartBeats.push(currentAbsoluteBeat);
-      const timings = activeSong.section_timings?.[section.section_name] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
-      const sectionMultiplier = (timings.repeats || 0) + 1;
-      const headBeats = (timings.head_m || 0) * 4;
-      const tailBeats = (timings.tail_m || 0) * 4;
       
-      let totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
-      let baseLoopBeats = totalCoreBeats / sectionMultiplier;
+      let rawTimings = activeSong?.section_timings?.[section.section_name];
+      if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
+      const timings = rawTimings || {};
+
+      const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
+      const headBeats = (Number(timings.head_m) || 0) * 4;
+      const tailBeats = (Number(timings.tail_m) || 0) * 4;
+      
+      // ✅ THE ABSOLUTE TRUTH: The master settings dictate the exact loop length
+      const baseLoopBeats = ((Number(timings.measures) || 4) * 4) + (Number(timings.beats) || 0);
       
       const parsedLinesCount = memoizedSongAstTree[sIdx]?.lines.length || 1;
       let hasLineOverrides = false; 
       const lineBeatsMap: number[] = [];
       
-      if (timings.line_timings && Object.keys(timings.line_timings).length > 0) {
-        let sumBaseLoopBeats = 0;
+      let lineTimingsObj = timings.line_timings;
+      if (typeof lineTimingsObj === 'string') { try { lineTimingsObj = JSON.parse(lineTimingsObj); } catch(e){} }
+
+      if (lineTimingsObj && Object.keys(lineTimingsObj).length > 0) {
+        hasLineOverrides = true;
         for (let i = 0; i < parsedLinesCount; i++) {
-          const t = timings.line_timings[String(i)] || { measures: 0, beats: 0 };
-          const lineMult = (t.repeats || 0) + 1; 
-          const lineBeats = ((t.measures * 4) + (t.beats || 0)) * lineMult;
-          lineBeatsMap.push(lineBeats); 
-          sumBaseLoopBeats += lineBeats;
-        }
-        if (sumBaseLoopBeats > 0) { 
-          hasLineOverrides = true; 
-          baseLoopBeats = sumBaseLoopBeats; 
+          const t = lineTimingsObj[String(i)];
+          if (t) {
+            const lineMult = (Number(t.repeats) || 0) + 1; 
+            const lineBeats = ((Number(t.measures) * 4) + (Number(t.beats) || 0)) * lineMult;
+            lineBeatsMap.push(lineBeats); 
+          } else {
+            lineBeatsMap.push(0); // Safe fallback for Ghost Data
+          }
         }
       }
 
@@ -899,15 +905,30 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           let remaining = totalBeatsToStamp;
           while (remaining > 0) { 
             const mLen = remaining >= 4 ? 4 : remaining; 
-            for (let b = 1; b <= mLen; b++) { map.push({ absoluteBeatIndex: currentAbsoluteBeat, measureBeatIndex: b, measureLength: mLen, sectionIndex: sIdx, isDownbeat: b === 1 }); currentAbsoluteBeat++; }
+            for (let b = 1; b <= mLen; b++) { 
+              map.push({ absoluteBeatIndex: currentAbsoluteBeat, measureBeatIndex: b, measureLength: mLen, sectionIndex: sIdx, isDownbeat: b === 1 }); 
+              currentAbsoluteBeat++; 
+            }
             remaining -= mLen; 
           }
       };
 
       stampBeats(headBeats);
       for (let r = 0; r < sectionMultiplier; r++) { 
-        if (hasLineOverrides) { lineBeatsMap.forEach(b => stampBeats(b)); } 
-        else { stampBeats(baseLoopBeats); } 
+        let beatsStamped = 0;
+        if (hasLineOverrides) { 
+           lineBeatsMap.forEach(b => {
+              if (b > 0) { stampBeats(b); beatsStamped += b; }
+           }); 
+        } 
+        
+        // ✅ SURGICAL FIX: The Auto-Padder!
+        // If the line timings are broken or missing, automatically pad the remaining beats 
+        // to match the Master M setting. This guarantees the clock NEVER shrinks and crashes!
+        const missingBeats = baseLoopBeats - beatsStamped;
+        if (missingBeats > 0) {
+           stampBeats(missingBeats);
+        }
       }
       stampBeats(tailBeats);
     });
@@ -924,27 +945,24 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }, [onlineUsers, localPresenceUser]);
 
   const getSectionDurationString = (sectionName: string, sectionIdx?: number) => {
-    const timings = activeSong?.section_timings?.[sectionName] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
-    const sectionMultiplier = (timings.repeats || 0) + 1;
+    let rawTimings = activeSong?.section_timings?.[sectionName];
+    if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
+    const timings = rawTimings || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
     
-    let totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
-
-    if (sectionIdx !== undefined && timings.line_timings && memoizedSongAstTree[sectionIdx]) {
-        let calcBaseLoop = 0;
-        for (let i = 0; i < memoizedSongAstTree[sectionIdx].lines.length; i++) { 
-           const t = timings.line_timings[String(i)] || { measures: 0, beats: 0 };
-           const lineMult = (t.repeats || 0) + 1; 
-           calcBaseLoop += ((t.measures * 4) + (t.beats || 0)) * lineMult;
-        }
-        if (calcBaseLoop > 0) {
-          totalCoreBeats = calcBaseLoop * sectionMultiplier;
-        }
-    }
+    // ✅ Strictly enforce the Master Repeat & Measure settings
+    const sectionMultiplier = (Number(timings.repeats) || 0) + 1; 
+    const basePassBeats = ((Number(timings.measures) || 4) * 4) + (Number(timings.beats) || 0);
     
-    let totalBeats = totalCoreBeats + ((timings.head_m || 0) * 4) + ((timings.tail_m || 0) * 4);
+    const totalCoreBeats = basePassBeats * sectionMultiplier;
+    const headBeats = (Number(timings.head_m) || 0) * 4;
+    const tailBeats = (Number(timings.tail_m) || 0) * 4;
+    
+    let totalBeats = totalCoreBeats + headBeats + tailBeats;
     if (totalBeats <= 0) totalBeats = 16; 
     
-    const totalSeconds = Math.round((totalBeats * (60000 / (activeSong?.tempo || 75))) / 1000);
+    const tempo = Number(activeSong?.tempo) || 75;
+    const totalSeconds = Math.round((totalBeats * (60000 / tempo)) / 1000);
+    
     return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
   };
 
@@ -963,6 +981,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           tracksList={tracksList} currentTrackIndex={currentTrackIndex} handleUserSelectTrackBadge={handleUserSelectTrackBadge}
           backdropProgressRef={backdropProgressRef} accentProgressBarRef={accentProgressBarRef}
           isSimplifiedMode={isSimplifiedMode} // ✅ SURGICAL ADDITION
+          localClickVolume={localClickVolume}
         />
       )}
 
