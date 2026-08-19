@@ -27,6 +27,8 @@ import { CompiledSectionToken, CompiledBeatMap, BeatNode, ArrangementSection, So
 import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote } from "../../setlists/[id]/live/utils/music-math";
 import { normalizeSectionNameToAudioFile } from "../../setlists/[id]/live/utils/setlist-helpers"; 
 
+const { initAudioContext } = useWebAudioEngine();
+
 const supabase = createClient();
 
 export default function SoloPracticeRoomPage() {
@@ -599,6 +601,7 @@ export default function SoloPracticeRoomPage() {
           tracksList={mockedSoloTrackList as any} currentTrackIndex={0} handleUserSelectTrackBadge={() => {}}
           backdropProgressRef={backdropProgressRef} accentProgressBarRef={accentProgressBarRef}
           isSoloMode={true} // ✅ Instantly strips away the lobby and track switcher clutter!
+          wakeUpAudioEngine={initAudioContext}
         />
       )}
 

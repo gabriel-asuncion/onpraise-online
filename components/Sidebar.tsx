@@ -60,6 +60,7 @@ export default function Sidebar() {
   // ✅ SURGICAL ADDITION: Mobile Nav Visibility States
   const [isNavVisible, setIsNavVisible] = useState(true);
   const [isPlaymodeActive, setIsPlaymodeActive] = useState(false);
+  const [isUiFocused, setIsUiFocused] = useState(false); // ✅ ADDED THIS
 
   useEffect(() => {
     let lastScrollY = 0;
@@ -91,9 +92,15 @@ export default function Sidebar() {
     const handlePlaymodeSignal = (e: any) => setIsPlaymodeActive(e.detail);
     window.addEventListener("onpraise-playmode", handlePlaymodeSignal);
 
+    // ✅ SURGICAL ADDITION: Immersive Focus Listener
+    // Updated to use the dedicated focus state instead of fighting the scroll state!
+    const handleFocusState = (e: any) => setIsUiFocused(e.detail); 
+    window.addEventListener("onpraise-ui-focus", handleFocusState);
+
     return () => {
       window.removeEventListener("scroll", handleScroll, { capture: true });
       window.removeEventListener("onpraise-playmode", handlePlaymodeSignal);
+      window.removeEventListener("onpraise-ui-focus", handleFocusState);
     };
   }, []);
 
@@ -319,7 +326,8 @@ export default function Sidebar() {
       {/* 2. MOBILE VIEWPORT BOTTOM TRAY NAV BAR (Hidden on Desktop) */}
       {/* ======================================================= */}
       <nav className={`fixed bottom-0 left-0 right-0 h-16 bg-white/95 backdrop-blur-md border-t border-zinc-200/80 flex items-center justify-around px-2 pb-safe shadow-lg md:hidden z-[100000] select-none transition-transform duration-300 ease-in-out ${
-        (!isNavVisible || isPlaymodeActive) ? "translate-y-full" : "translate-y-0"
+        /* ✅ SURGICAL FIX: Now it hides if scrolled down, in playmode, OR in focus mode */
+        (!isNavVisible || isPlaymodeActive || isUiFocused) ? "translate-y-full" : "translate-y-0"
       }`}>
         {navItems.map((item, idx) => {
           const isActive = pathname.startsWith(item.activePattern);

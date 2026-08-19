@@ -53,5 +53,11 @@ export const playGuideCue = (rawSectionName: string) => {
 export const getAudioContext = () => globalAudioContext;
 
 export function useWebAudioEngine() {
-  return { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext };
+  return { 
+    initAudioContext, // ✅ Ensure this is exported!
+    fetchAndDecodeAudio, 
+    playZeroLatencyAudio, 
+    playGuideCue, 
+    getAudioContext 
+  };
 }

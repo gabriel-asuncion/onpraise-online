@@ -7,6 +7,7 @@ import { useEngine } from "../context/EngineContext";
 import { getAllSongs } from "../../utils/supabase/actions";
 import GlobalLoader from '../../components/GlobalLoader';
 
+
 // ✅ SURGICAL FIX: Standardized Discord-Style Tokens
 const KEYWORD_SUGGESTIONS_CATALOG = [
   { token: ":artist:", hint: "Filter by author or band name" },
@@ -329,11 +330,17 @@ export default function SongsListPage() {
                       Pending Approval
                     </span>
                   )}
-                  {song.youtube_url && song.youtube_url.trim() !== "" && (
-                    <span className="inline-block px-1.5 py-0.5 bg-red-50 text-red-600 text-[8px] font-black uppercase tracking-widest rounded border border-red-100 shadow-sm flex items-center gap-1">
-                      <span className="text-[9px]">▶</span> YouTube
-                    </span>
-                  )}
+                  {/* Replace your old badge code with this block */}
+        {song.youtube_url && (
+          <div className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md flex items-center gap-1.5 shadow-sm border ${
+            song.is_youtube_sync_validated 
+              ? 'bg-green-50 text-green-700 border-green-200' 
+              : 'bg-red-50 text-red-600 border-red-100'
+          }`}>
+            <span className={song.is_youtube_sync_validated ? "text-green-500" : "text-red-500"}>▶</span>
+            {song.is_youtube_sync_validated ? 'Youtube Sync' : 'Youtube Included'}
+          </div>
+        )}
                 </div>
                 
                 <h4 className="font-bold text-[16px] text-zinc-900 tracking-tight" style={{ fontFamily: "Georgia, serif" }}>

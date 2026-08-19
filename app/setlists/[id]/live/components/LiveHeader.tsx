@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { SongRecord, SetlistTrackItem } from "../types/setlist";
+import { playZeroLatencyAudio } from "../hooks/useWebAudioEngine"; // Adjust relative path as needed
 
 interface LiveHeaderProps {
   activeSong: SongRecord | null;
@@ -20,6 +21,7 @@ interface LiveHeaderProps {
   accentProgressBarRef: React.MutableRefObject<HTMLDivElement | null>;
   isSoloMode?: boolean; // ✅ Added flag for Solo Practice Room
   isSimplifiedMode?: boolean;
+  wakeUpAudioEngine?: () => void; // ✅ SURGICAL FIX: Accept the direct wake-up function
   
 }
 
@@ -28,7 +30,8 @@ export function LiveHeader({
   isPlayingFlow, currentBeat, currentMeasureLength, metronomeRefs,
   setIsSettingsModalOpen, handleToggleFlowPlaybackState, displayedOnlineUsers,
   tracksList, currentTrackIndex, handleUserSelectTrackBadge,
-  backdropProgressRef, accentProgressBarRef, isSoloMode = false, isSimplifiedMode = false // ✅ Added here
+  backdropProgressRef, accentProgressBarRef, isSoloMode = false, isSimplifiedMode = false, // ✅ Added here
+  wakeUpAudioEngine // ✅ Add it to the destructured props
 }: LiveHeaderProps) {
   
   // ✅ Encapsulated Title Overflow Logic
@@ -58,6 +61,8 @@ export function LiveHeader({
     window.addEventListener('resize', checkTitleOverflow);
     return () => { clearTimeout(timer); window.removeEventListener('resize', checkTitleOverflow); };
   }, [activeSong?.title]);
+
+  
 
   return (
     <div id="fixed-live-header" className="w-full bg-white border-b border-zinc-200 flex-shrink-0 z-50 shadow-sm px-4 md:px-8 py-3.5 landscape:py-2 relative overflow-hidden">
@@ -131,7 +136,15 @@ export function LiveHeader({
             </div>
 
             <button type="button" onClick={() => setIsSettingsModalOpen(true)} className="h-8 w-8 rounded-lg bg-zinc-50 border border-zinc-200 text-zinc-600 font-extrabold text-xs flex items-center justify-center shadow-sm cursor-pointer hover:bg-zinc-100"><img src="/assets/settings.svg" alt="Settings" className="w-3 h-3 opacity-60" /></button>
-            <button type="button" onClick={handleToggleFlowPlaybackState} className={`h-8 px-5 rounded-lg border text-[11px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${!localPresenceUser?.isMD ? "bg-zinc-100 border-zinc-200 text-zinc-500 cursor-pointer shadow-inner" : isPlayingFlow ? "bg-red-600 border-red-500 text-white ring-2 ring-red-500/20 cursor-pointer shadow-md" : "bg-blue-600 border-blue-500 text-white shadow-sm cursor-pointer"}`}>
+            {/* ✅ SURGICAL FIX: Directly call the wake-up function! */}
+            <button 
+              type="button" 
+              onClick={() => {
+                if (wakeUpAudioEngine) wakeUpAudioEngine(); // Breaks the browser silence lock!
+                handleToggleFlowPlaybackState();
+              }} 
+              className={`h-8 px-5 rounded-lg border text-[11px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${!localPresenceUser?.isMD ? "bg-zinc-100 border-zinc-200 text-zinc-500 cursor-pointer shadow-inner" : isPlayingFlow ? "bg-red-600 border-red-500 text-white ring-2 ring-red-500/20 cursor-pointer shadow-md" : "bg-blue-600 border-blue-500 text-white shadow-sm cursor-pointer"}`}
+            >
               {!localPresenceUser?.isMD ? (<><img src="/assets/lock.svg" alt="Locked" className="w-3 h-3 opacity-60" /> <span>Locked</span></>) : isPlayingFlow ? "⏹" : "▶"}
             </button>
           </div>
