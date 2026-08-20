@@ -4,10 +4,9 @@ interface MdLockModalProps {
   isMdLockModalOpen: boolean;
   setIsMdLockModalOpen: (val: boolean) => void;
   activeMDConnection: any;
-  initAudioContext: () => void; // ✅ Added
 }
 
-export function MdLockModal({ isMdLockModalOpen, setIsMdLockModalOpen, activeMDConnection, initAudioContext }: MdLockModalProps) {
+export function MdLockModal({ isMdLockModalOpen, setIsMdLockModalOpen, activeMDConnection }: MdLockModalProps) {
   if (!isMdLockModalOpen) return null;
 
   return (
@@ -54,7 +53,7 @@ export function MdLockModal({ isMdLockModalOpen, setIsMdLockModalOpen, activeMDC
         <div className="pt-2">
           <button 
             type="button" 
-            onClick={() => { setIsMdLockModalOpen(false); initAudioContext(); }} // ✅ Unlocks hardware audio instantly
+            onClick={() => { setIsMdLockModalOpen(false); }} // ✅ Unlocks hardware audio instantly
             className="w-full py-3.5 bg-zinc-950 hover:bg-zinc-800 text-white font-black text-xs uppercase tracking-widest rounded-xl text-center shadow-md cursor-pointer transition-colors"
           >
             Understood

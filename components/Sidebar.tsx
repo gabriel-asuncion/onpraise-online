@@ -149,8 +149,8 @@ export default function Sidebar() {
       .single();
 
     if (data?.join_code) {
-      // ✅ SURGICAL FIX: Generate a full URL with the invite parameter
-      const inviteUrl = `${window.location.origin}/login?invite=${data.join_code.toUpperCase()}`;
+      // ✅ SURGICAL FIX: Point directly to the root '/' where your actual login component lives!
+      const inviteUrl = `${window.location.origin}/?invite=${data.join_code.toUpperCase()}`;
       navigator.clipboard.writeText(inviteUrl);
       
       setCopyText("Link Copied! ✅");

@@ -56,7 +56,13 @@ export default function EventsManagerPage() {
   // Create Event Modal States
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [eventTitle, setEventTitle] = useState("");
-  const [eventDate, setEventDate] = useState("2026-06-12");
+  const [eventDate, setEventDate] = useState(() => {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`; // Outputs exactly "2026-08-20" today
+  });
   const [eventServiceType, setEventServiceType] = useState("Divine Service");
   const [eventDesc, setEventDesc] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);

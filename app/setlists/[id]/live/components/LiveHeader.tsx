@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { SongRecord, SetlistTrackItem } from "../types/setlist";
-import { playZeroLatencyAudio } from "../hooks/useWebAudioEngine"; // Adjust relative path as needed
+import { useWebAudioEngine } from "../hooks/useWebAudioEngine";
 
 interface LiveHeaderProps {
   activeSong: SongRecord | null;
@@ -22,7 +22,8 @@ interface LiveHeaderProps {
   isSoloMode?: boolean; // ✅ Added flag for Solo Practice Room
   isSimplifiedMode?: boolean;
   wakeUpAudioEngine?: () => void; // ✅ SURGICAL FIX: Accept the direct wake-up function
-  localClickVolume?: number; // ✅ ADDED: Accept the mixer volume
+  playZeroLatencyAudio?: (key: string, volume: number) => void; // ✅ Accept the metronome player function
+  localClickVolume?: number;
   
 }
 
@@ -31,15 +32,29 @@ export function LiveHeader({
   isPlayingFlow, currentBeat, currentMeasureLength, metronomeRefs,
   setIsSettingsModalOpen, handleToggleFlowPlaybackState, displayedOnlineUsers,
   tracksList, currentTrackIndex, handleUserSelectTrackBadge,
-  backdropProgressRef, accentProgressBarRef, isSoloMode = false, isSimplifiedMode = false, // ✅ Added here
-  wakeUpAudioEngine, localClickVolume = 1.0 // ✅ Default to 1.0 if missing
-  
+  backdropProgressRef, accentProgressBarRef, isSoloMode = false, isSimplifiedMode = false,
+  wakeUpAudioEngine, localClickVolume = 1.0 
 }: LiveHeaderProps) {
+
+  // ✅ SURGICAL FIX: LiveHeader fully owns the Audio Engine now!
+  const { playZeroLatencyAudio, fetchAndDecodeAudio } = useWebAudioEngine();
+
+  // ✅ THE MISSING PIECE: Preload the sound files into memory when the header mounts
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const sounds = ["blip", "bell", "block", "glass"];
+      sounds.forEach(snd => {
+        fetchAndDecodeAudio(`/sound_files/metronome_${snd}_1.wav`, `metronome_${snd}_1`);
+        fetchAndDecodeAudio(`/sound_files/metronome_${snd}_2.wav`, `metronome_${snd}_2`);
+      });
+    }
+  }, [fetchAndDecodeAudio]);
   
   // ✅ Encapsulated Title Overflow Logic
   const [isTitleOverflowing, setIsTitleOverflowing] = useState(false);
   const titleContainerRef = useRef<HTMLDivElement>(null);
   const titleTextRef = useRef<HTMLHeadingElement>(null);
+  
 
   useEffect(() => {
     const checkTitleOverflow = () => {
@@ -93,7 +108,6 @@ export function LiveHeader({
             // If the visual JUST turned on, fire the cached .wav file
             if (isNowActive && !wasActive) {
               const soundKey = index === 0 ? "metronome_blip_1" : "metronome_blip_2";
-              // ✅ Read the LIVE volume from the ref!
               playZeroLatencyAudio(soundKey, liveVolumeRef.current);
             }
           }

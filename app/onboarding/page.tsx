@@ -56,34 +56,41 @@ export default function OnboardingPage() {
   const [joinCode, setJoinCode] = useState<string>("");
   const [joinError, setJoinError] = useState<string>("");
   
-  // ✅ SURGICAL FIX: Auto-join states
-  const [isAutoJoining, setIsAutoJoining] = useState(false);
+  // ✅ SURGICAL FIX: Magic Link Verification States
+  const [isVerifyingLink, setIsVerifyingLink] = useState(false);
+  const [stagedMagicTeam, setStagedMagicTeam] = useState<{name: string, code: string} | null>(null);
 
-  // 1. Unpack the backpack when the page loads
   useEffect(() => {
-    const stashedCode = localStorage.getItem("onpraise_pending_invite");
-    if (stashedCode) {
-      setJoinCode(stashedCode);
-      setIsAutoJoining(true);
-      localStorage.removeItem("onpraise_pending_invite"); // Clean up
-    }
-  }, []);
+    async function verifyStashedLink() {
+      const stashedCode = localStorage.getItem("onpraise_pending_invite");
+      if (!stashedCode) return;
+      
+      setIsVerifyingLink(true);
+      localStorage.removeItem("onpraise_pending_invite"); // Clean up immediately
 
-  // 2. Fire the join action ONLY when they step into the Team Selection view
-  useEffect(() => {
-    if (step === 2 && isAutoJoining && joinCode) {
-      const timer = setTimeout(() => {
-        handleJoinTeam(joinCode);
-      }, 1500); // 1.5s delay to show off the cool loading animation
-      return () => clearTimeout(timer);
-    }
-  }, [step, isAutoJoining, joinCode]);
+      // Fetch the actual team name from the database using the stashed code
+      const { data } = await supabase
+        .from("teams")
+        .select("name")
+        .eq("join_code", stashedCode.toLowerCase().trim())
+        .maybeSingle();
 
-  // ✅ SURGICAL FIX: Allow the function to accept our override code
+      if (data) {
+        setStagedMagicTeam({ name: data.name, code: stashedCode });
+      } else {
+        setJoinError("The invite link expired or is invalid.");
+      }
+      setIsVerifyingLink(false);
+    }
+
+    verifyStashedLink();
+  }, [supabase]);
+
+  // ✅ SURGICAL FIX: Allow the function to accept our staged override code
   async function handleJoinTeam(overrideCode?: string) {
     setJoinError("");
     
-    // Use the override code if passed, otherwise use what they typed
+    // Use the override code if passed, otherwise use what they typed manually
     const activeCode = typeof overrideCode === 'string' ? overrideCode : joinCode;
     
     if (!activeCode.trim()) {
@@ -334,22 +341,54 @@ export default function OnboardingPage() {
           {/* STEP 2: CHOOSE TEAM */}
           {step === 2 && (
             <div className="animate-in fade-in slide-in-from-right-4 duration-300">
-              <div className="text-center space-y-2 mb-8">
-                <div className="w-12 h-12 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-md text-xl">
-                  🏛️
-                </div>
-                <h2 className="text-2xl font-black text-zinc-900 tracking-tight">Enter your Church ID</h2>
-                <p className="text-xs font-bold text-zinc-500">Ask your Music Director for your 10-character join code.</p>
-              </div>
-
-              {/* ✅ SURGICAL FIX: Show the Magic Link progress state! */}
-              {isAutoJoining ? (
-                <div className="flex flex-col items-center justify-center py-8">
+              
+              {isVerifyingLink ? (
+                <div className="flex flex-col items-center justify-center py-12">
                   <div className="w-12 h-12 border-4 border-blue-600/30 border-t-blue-600 rounded-full animate-spin mb-4" />
-                  <p className="text-[11px] font-black tracking-widest text-zinc-800 uppercase animate-pulse">Applying Magic Link...</p>
+                  <p className="text-[11px] font-black tracking-widest text-zinc-800 uppercase animate-pulse">Verifying Link...</p>
                 </div>
-              ) : (
+              ) : stagedMagicTeam ? (
+                // ✅ SURGICAL FIX: THE NEW MAGIC LINK CONFIRMATION VIEW
                 <>
+                  <div className="text-center space-y-2 mb-8">
+                    <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-inner text-3xl">
+                      ⛪
+                    </div>
+                    <h2 className="text-2xl font-black text-zinc-900 tracking-tight">Joining {stagedMagicTeam.name}</h2>
+                    <p className="text-xs font-bold text-zinc-500 max-w-[280px] mx-auto leading-relaxed mt-2">
+                      If this is not the correct group, request another invite code from your Music Director.
+                    </p>
+                  </div>
+                  
+                  <div className="flex gap-3 mt-8">
+                    <button
+                      type="button"
+                      onClick={() => setStagedMagicTeam(null)} // Reverts them to manual entry if they cancel
+                      className="flex-1 py-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm active:scale-95"
+                    >
+                      Back
+                    </button>
+                    
+                    <button
+                      type="button"
+                      onClick={() => handleJoinTeam(stagedMagicTeam.code)}
+                      className="flex-1 py-4 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-md active:scale-95"
+                    >
+                      Continue
+                    </button>
+                  </div>
+                </>
+              ) : (
+                // 🔄 THE STANDARD MANUAL ENTRY UI (Fallback)
+                <>
+                  <div className="text-center space-y-2 mb-8">
+                    <div className="w-12 h-12 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-md text-xl">
+                      🏛️
+                    </div>
+                    <h2 className="text-2xl font-black text-zinc-900 tracking-tight">Enter your Church ID</h2>
+                    <p className="text-xs font-bold text-zinc-500">Ask your Music Director for your 10-character join code.</p>
+                  </div>
+
                   <div className="space-y-4 mb-8">
                     <div>
                       <input
@@ -370,7 +409,7 @@ export default function OnboardingPage() {
                     <button
                       type="button"
                       onClick={handleSkipTeamSelection}
-                      className="flex-1 py-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm"
+                      className="flex-1 py-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm active:scale-95"
                     >
                       Skip For Now
                     </button>
@@ -379,7 +418,7 @@ export default function OnboardingPage() {
                       type="button"
                       onClick={() => handleJoinTeam()}
                       disabled={joinCode.trim().length < 10}
-                      className={`flex-1 py-4 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm ${
+                      className={`flex-1 py-4 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm active:scale-95 ${
                         joinCode.trim().length === 10
                           ? "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer"
                           : "bg-zinc-500 hover:bg-zinc-600 text-white/50 cursor-not-allowed"

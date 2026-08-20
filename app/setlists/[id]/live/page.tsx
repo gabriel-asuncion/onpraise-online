@@ -44,13 +44,16 @@ export default function SetlistPerformanceRoomPage() {
 
   const { simulatedUserId, simulatedRole, activeRole } = useEngine(); // ✅ Added activeRole
   const { isSynced, getGlobalTime } = useTimesync();
+  
 
   // ✅ SURGICAL FIX: Calculates if the current user hierarchy can edit the song
   const canEditSong = ["admin", "moderator", "musician"].includes(activeRole);
 
   useWakeLock();
-  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext } = useWebAudioEngine();
   
+  // ✅ SURGICAL FIX: Bring back fetchAndDecodeAudio
+  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio } = useWebAudioEngine();
+
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
     isSimplifiedMode, setIsSimplifiedMode, lineSpacing, setLineSpacing,
@@ -69,6 +72,25 @@ export default function SetlistPerformanceRoomPage() {
     activeDisplayKey, setActiveDisplayKey,
     mountTargetSetlistTrackIndex
   } = useSetlistData(setlistId, supabase);
+
+  // ============================================================================
+  // ✅ SURGICAL FIX: RESTORED AUDIO PRELOADERS
+  // The audio engine needs these files in memory to actually make sound!
+  // ============================================================================
+
+  useEffect(() => {
+    if (typeof window === "undefined" || tracksList.length === 0) return;
+    const uniqueFiles = new Set<string>();
+    tracksList.forEach(track => {
+      const structure = track.custom_structure || [];
+      structure.forEach(section => {
+        const fileName = normalizeSectionNameToAudioFile(section.section_name);
+        if (fileName) uniqueFiles.add(fileName);
+      });
+    });
+    uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${fileName}.wav`, fileName));
+  }, [tracksList, fetchAndDecodeAudio]);
+  // ============================================================================
 
   const {
     onlineUsers, setOnlineUsers, localPresenceUser, setLocalPresenceUser, localPresenceUserRef,
@@ -187,6 +209,49 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   const metronomeRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
   const scheduledClicksRef = useRef<{ source: AudioBufferSourceNode, audioTime: number }[]>([]);
   
+  // ✅ SURGICAL FIX: Restored the precise audio scheduler with a Synthesizer Fallback!
+  const triggerMetronomeSound = (beatNum: number, time: number = 0) => {
+    if (!isMetronomeSoundEnabledRef.current) return;
+    
+    const type = metronomeSoundTypeRef?.current || "blip";
+    const volume = localClickVolumeRef?.current !== undefined ? localClickVolumeRef.current : 1.0;
+    const targetKey = beatNum === 1 ? `metronome_${type}_1` : `metronome_${type}_2`;
+    
+    // 1. Attempt to play the downloaded .wav file
+    const source = playZeroLatencyAudio(targetKey, volume, time);
+    
+    if (source) {
+      scheduledClicksRef.current.push({ source, audioTime: time });
+      source.onended = () => {
+        const idx = scheduledClicksRef.current.findIndex(s => s.source === source);
+        if (idx > -1) scheduledClicksRef.current.splice(idx, 1);
+      };
+    } else {
+      // 🚨 2. BULLETPROOF WORKAROUND: Synthesize the click if files are missing!
+      // If the .wav file is 404 or didn't load, we generate a beep dynamically using raw math.
+      const audioCtx = getAudioContext();
+      if (audioCtx && audioCtx.state === "running") {
+        const osc = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+
+        // Downbeat (Beat 1) gets a higher pitch (1200Hz), upbeats get a lower pitch (800Hz)
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(beatNum === 1 ? 1200 : 800, time);
+
+        // Create a sharp, percussive click envelope
+        gainNode.gain.setValueAtTime(0, time);
+        gainNode.gain.linearRampToValueAtTime(volume * 0.8, time + 0.002); // Attack
+        gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.05);   // Decay
+
+        osc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        osc.start(time);
+        osc.stop(time + 0.05); // Stop the oscillator after 50ms to save memory
+      }
+    }
+  };
+  
 
   useEffect(() => { playingTrackIndexRef.current = playingTrackIndex; }, [playingTrackIndex]);
   useEffect(() => { queuedTrackIndexRef.current = queuedTrackIndex; }, [queuedTrackIndex]);
@@ -204,30 +269,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }, [loading]);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      // ✅ Loads all 4 custom sound variations into the Web Audio cache instantly
-      const sounds = ["blip", "bell", "block", "glass"];
-      sounds.forEach(snd => {
-        fetchAndDecodeAudio(`/sound_files/metronome_${snd}_1.wav`, `metronome_${snd}_1`);
-        fetchAndDecodeAudio(`/sound_files/metronome_${snd}_2.wav`, `metronome_${snd}_2`);
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || tracksList.length === 0) return;
-    const uniqueFiles = new Set<string>();
-    tracksList.forEach(track => {
-      const structure = track.custom_structure || [];
-      structure.forEach(section => {
-        const fileName = normalizeSectionNameToAudioFile(section.section_name);
-        if (fileName) uniqueFiles.add(fileName);
-      });
-    });
-    uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${fileName}.wav`, fileName));
-  }, [tracksList]);
-
-  useEffect(() => {
     if (isPlayingFlow && !showSyncBack) {
       const activeLineId = `line-${currentSectionIndex}-${activeLineIndex}`;
       const targetLine = document.getElementById(activeLineId);
@@ -242,23 +283,12 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
   useEffect(() => {
     let reqId: number;
-    const testAudioRef = { current: 1 };
     const testVisualRef = { current: 1 };
     
     if (isTestingSync) {
-      initAudioContext();
       const startTime = performance.now();
       const tick = (timestamp: number) => {
         const elapsed = timestamp - startTime;
-        const audioBeat = Math.floor(elapsed / 500) % 4 + 1; 
-        if (audioBeat !== testAudioRef.current) {
-           testAudioRef.current = audioBeat;
-           triggerMetronomeSound(audioBeat);
-           if (isDoubleMetronomeEnabledRef.current) {
-             const audioCtx = getAudioContext();
-             if (audioCtx) triggerMetronomeSound(2, audioCtx.currentTime + 0.25);
-           }
-        }
         const visElapsed = elapsed - audioLatencyOffsetMs;
         const visBeat = Math.floor(Math.max(0, visElapsed) / 500) % 4 + 1;
         if (visBeat !== testVisualRef.current) {
@@ -272,7 +302,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
        setTestVisualBeat(1);
     }
     return () => { if (reqId) cancelAnimationFrame(reqId); };
-  }, [isTestingSync, audioLatencyOffsetMs, isMetronomeSoundEnabled]);
+  }, [isTestingSync, audioLatencyOffsetMs]);
 
   useEffect(() => { if (!isSettingsModalOpen) setIsTestingSync(false); }, [isSettingsModalOpen]);
 
@@ -365,22 +395,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     }
   };
 
-  const triggerMetronomeSound = (beatNum: number, time: number = 0) => {
-    if (!isMetronomeSoundEnabledRef.current) return;
-    // ✅ Dynamically injects the selected sound type into the audio key string!
-    const type = metronomeSoundTypeRef.current;
-    const targetKey = beatNum === 1 ? `metronome_${type}_1` : `metronome_${type}_2`;
-    
-    const source = playZeroLatencyAudio(targetKey, localClickVolumeRef.current, time);
-    if (source) {
-      scheduledClicksRef.current.push({ source, audioTime: time });
-      source.onended = () => {
-        const idx = scheduledClicksRef.current.findIndex(s => s.source === source);
-        if (idx > -1) scheduledClicksRef.current.splice(idx, 1);
-      };
-    }
-  };
-
   const beatMapRef = useRef<CompiledBeatMap>({ totalBeats: 0, nodes: [], sectionStartBeats: [] });
 
   // ✅ Core Supabase Transmitter
@@ -400,8 +414,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       const targetTrackIdx = payload.trackIndex !== undefined ? payload.trackIndex : currentTrackIndexRef.current;
       isPlayingRef.current = true; setIsPlayingFlow(true);
       isYtBackingTrackStartRef.current = payload.isYtSource || false;
-      
-      // ✅ Followers now defer ALL YouTube logic to executeJumpNow so it perfectly matches the MD's "Hold and Fire" sequence.
       executeJumpNow(targetTrackIdx, payload.sectionIndex, payload.mdSectionStartTime, true);
     }
     else if (payload.action === "STOP") { executeLocalResetSequence(); } 
@@ -419,7 +431,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     else if (payload.action === "TRACK_CHANGE") { mountTargetSetlistTrackIndex(payload.trackIndex); }
     else if (payload.action === "QUEUE") { setQueuedTrackIndex(payload.trackIndex); setQueuedSectionIndex(payload.sectionIndex); }
     else if (payload.action === "HEARTBEAT" && !localPresenceUserRef.current?.isMD) {
-      if (audioContextStartTimeRef.current !== null && mdSectionStartTimeRef.current !== null && isPlayingRef.current) {
+      if (mdSectionStartTimeRef.current !== null && isPlayingRef.current) {
         const { mdAbsoluteBeat, mdGlobalBeatTime, mdSectionIndex } = payload;
         if (mdSectionIndex === currentSectionIndexRef.current) {
           const beatSpeedMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
@@ -429,18 +441,11 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           const driftMs = mdSectionStartTimeRef.current - mdImpliedStartMs;
           if (Math.abs(driftMs) > 15) {
             mdSectionStartTimeRef.current = mdImpliedStartMs;
-            const audioCtx = getAudioContext();
-            if (audioCtx) {
-               const timeUntilStartSecs = (mdImpliedStartMs - getGlobalTime()) / 1000;
-               const theoreticalSongStartOffset = sectionStartAbsoluteBeat * (beatSpeedMs / 1000); 
-               audioContextStartTimeRef.current = (audioCtx.currentTime + timeUntilStartSecs) - theoreticalSongStartOffset;
-            }
           }
         }
       }
     }
    else if (payload.action === "MD_TAKEOVER") {
-      // 🛡️ Engage Shield: Log the exact millisecond the instant broadcast arrived
       latestMdBroadcastRef.current = { mdId: payload.newMdId, timestamp: Date.now() };
       setOnlineUsers(prev => prev.map(u => ({ ...u, isMD: u.id === payload.newMdId })));
 
@@ -453,7 +458,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       }
     }
     else if (payload.action === "MD_RELEASE") {
-      // 🛡️ Engage Shield: Log the release
       latestMdBroadcastRef.current = { mdId: null, timestamp: Date.now() };
       setOnlineUsers(prev => prev.map(u => u.id === payload.releasedMdId ? { ...u, isMD: false } : u));
       executeLocalResetSequence(); 
@@ -503,10 +507,12 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     isPlayingFlow, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
     audioLatencyOffsetMs, isYtBackingTrackStartRef, countdownValueRef, setCountdownValue,
-    backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef, playGuideCue,
-    queuedSectionIndexRef, queuedTrackIndexRef, audioContextStartTimeRef, getAudioContext, triggerMetronomeSound,
+    backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
+    queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
+    // ✅ SURGICAL FIX: Feed the audio engine into the clock
+    playGuideCue, getAudioContext, triggerMetronomeSound, audioContextStartTimeRef, scheduledClicksRef,
     getYoutubeTime: () => {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isYtBufferingRef.current) {
         return ytPlayerRef.current.getCurrentTime();
@@ -586,12 +592,9 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         const beatSpeedSecs = 60 / (activeSongRef.current?.tempo || 75);
         const theoreticalSongStartOffset = targetAbsoluteBeat * beatSpeedSecs;
         
-        // ✅ SURGICAL FIX: Let the YouTube Intro play!
-        // If it's Section 0, start the video at 0:00. Otherwise, jump to the section's exact start time.
         const ytOffsetSecs = (activeSongRef.current?.youtube_sync_offset_ms || 0) / 1000;
         const ytSeekTargetSecs = targetSectionIdx === 0 ? 0 : (ytOffsetSecs + theoreticalSongStartOffset);
 
-        // ✅ Mathematically delay the metronome's absolute ZERO time so it waits patiently for the intro
         if (isYtBackingTrackStartRef.current) {
           audioContextStartTimeRef.current = absoluteHardwareTimeAtJump + ytOffsetSecs - ytSeekTargetSecs;
         } else {
@@ -610,8 +613,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           } catch(e) {}
         }
         
-        // ✅ SURGICAL FIX: The "Drummer" Count-in
-        // Plays 4 perfect clicks matching the song's tempo right before Beat 1
+        // ✅ SURGICAL FIX: Restored the 4-click Count-in!
         if (timeUntilJumpMs >= 4000) {
           const countInSpeed = 60 / (activeSongRef.current?.tempo || 75);
           triggerMetronomeSound(2, absoluteHardwareTimeAtJump - (countInSpeed * 4));
@@ -621,8 +623,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         }
       }
     }
-
-    // ✅ SURGICAL ADDITION: The Telemetry Logger
+    
     if (localPresenceUserRef.current?.isMD && isRecordingRef.current && playingSectionsRef.current.length > 0) {
       const track = tracksListRef.current[targetTrackIdx];
       const section = playingSectionsRef.current[targetSectionIdx];
@@ -632,26 +633,18 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
               title: track.songs?.title || "Unknown Song",
               label: `[${jumpReasonRef.current}] - ${section.section_name}`
           };
-          // Push to top, limit to 100
           const newHistory = [newItem, ...rehearsalHistoryRef.current].slice(0, 100);
-          setRehearsalHistory(newHistory); // Optimistic UI
-          supabase
-            .from('setlists')
-            .update({ rehearsal_history: newHistory })
-            .eq('id', setlistId)
-            .then(({ error }) => {
-                if (error) console.error("Failed to save telemetry to Supabase:", error.message);
-            });
+          setRehearsalHistory(newHistory); 
+          supabase.from('setlists').update({ rehearsal_history: newHistory }).eq('id', setlistId).then();
       }
     }
-    jumpReasonRef.current = "Auto Play"; // Reset baseline tracker
+    jumpReasonRef.current = "Auto Play";
 
     currentSectionIndexRef.current = targetSectionIdx; setCurrentSectionIndex(targetSectionIdx);
     lastAudioBeatRef.current = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0; 
     lastBeatRef.current = 0; lastVisualBeatRef.current = 0;
     setQueuedTrackIndex(null); setQueuedSectionIndex(null); pendingQuantizedJumpRef.current = null;
-    scheduledClicksRef.current.forEach(click => { try { click.source.stop(); click.source.disconnect(); } catch(e) {} });
-    scheduledClicksRef.current = []; hasPlayedCueRef.current = false; 
+    hasPlayedCueRef.current = false; 
     
     setShowSyncBack(false);
 
@@ -666,8 +659,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   function executeLocalResetSequence() {
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    scheduledClicksRef.current.forEach(click => { try { click.source.stop(); click.source.disconnect(); } catch(e) {} });
-    scheduledClicksRef.current = [];
     if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
     currentSectionIndexRef.current = 0; lastBeatRef.current = 0; activeLineIndexRef.current = 0;
     setCurrentSectionIndex(0); updateMetronomeUI(1, false); setActiveLineIndex(0);
@@ -708,7 +699,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }
 
   function handleToggleFlowPlaybackState() {
-    initAudioContext();
     if (!localPresenceUser?.isMD) { setIsMdLockModalOpen(true); return; }
     if (isPlayingFlow) {
       if (playClickTimeoutRef.current) { clearTimeout(playClickTimeoutRef.current); playClickTimeoutRef.current = null; }
@@ -717,7 +707,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     } else {
       if (sections.length === 0 || !activeSong) return;
 
-      // ✅ SURGICAL FIX: Cleaned up dead code and enforced the safe start for both YT and Metronome
       if (playClickTimeoutRef.current) {
         clearTimeout(playClickTimeoutRef.current); playClickTimeoutRef.current = null;
         executeStartSequence(true, undefined, isYoutubeSyncEnabled && !!youtubeVideoId); 
@@ -738,7 +727,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   function handleSectionInteractiveSelection(index: number) {
     if (!localPresenceUser?.isMD && (onlineUsers.find(u => u.isMD && u.id !== localPresenceUser?.id) !== undefined)) return; 
     
-    // ✅ Tag the telemetry engine before jumping
     jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play"; 
 
     if (!isPlayingFlow) {
@@ -758,15 +746,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
           jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
           pendingQuantizedJumpRef.current = { trackIndex: currentTrackIndex, sectionIndex: index, jumpTime };
-          const audioCtx = getAudioContext();
-          if (audioCtx) {
-            const audioJumpTime = audioCtx.currentTime + ((jumpTime - getGlobalTime()) / 1000);
-            scheduledClicksRef.current.forEach(click => { if (click.audioTime >= audioJumpTime - 0.05) { try { click.source.stop(); click.source.disconnect(); } catch(e) {} } });
-            scheduledClicksRef.current = scheduledClicksRef.current.filter(click => click.audioTime < audioJumpTime - 0.05);
-          }
           setQueuedTrackIndex(currentTrackIndex); setQueuedSectionIndex(index);
-          if (sectionsRef.current[index]) playGuideCue(sectionsRef.current[index].section_name);
-          hasPlayedCueRef.current = true; 
         } else { executeJumpNow(currentTrackIndex, index, jumpTime); }
         sendSupabaseBroadcast({ action: "JUMP", trackIndex: currentTrackIndex, sectionIndex: index, mdSectionStartTime: jumpTime });
       }, 250);
@@ -1202,7 +1182,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       <MdLockModal 
         isMdLockModalOpen={isMdLockModalOpen} setIsMdLockModalOpen={setIsMdLockModalOpen} 
         activeMDConnection={onlineUsers.find(u => u.isMD && u.id !== localPresenceUser?.id)} 
-        initAudioContext={initAudioContext} 
       />
 
       <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>

@@ -7,9 +7,6 @@ import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import GlobalLoader from '../../../../components/GlobalLoader';
 
-// ✅ SURGICAL FIX: The EXACT path to your existing audio engine based on your folder structure
-import { initAudioContext, playZeroLatencyAudio, getAudioContext, fetchAndDecodeAudio } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
-
 // =======================================================
 // --- TRANSPOSTITION & DIATONIC CONSTANT BLUEPRINTS -----
 // =======================================================
@@ -367,15 +364,6 @@ export default function SongEditPage() {
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const sounds = ["blip"]; 
-      sounds.forEach(snd => {
-        fetchAndDecodeAudio(`/sound_files/metronome_${snd}_1.wav`, `metronome_${snd}_1`);
-        fetchAndDecodeAudio(`/sound_files/metronome_${snd}_2.wav`, `metronome_${snd}_2`);
-      });
-    }
-  }, []);
 
   useEffect(() => {
     const updateScrubber = () => {
@@ -393,20 +381,8 @@ export default function SongEditPage() {
   }, [ytPlaying]);
   
   const ytPlayerRef = useRef<any>(null);
-  const isTestingSyncRef = useRef<boolean>(false);
-  const testLastScheduledBeatRef = useRef<number>(-1); 
-
+  // ✅ SURGICAL FIX: Declare the ref so the YouTube player logic can use it!
   const isYtPlayerReadyRef = useRef<boolean>(false);
-
-  const [isTestingActive, setIsTestingActive] = useState(false);
-  const liveTimeDisplayRef = useRef<HTMLSpanElement>(null);
-  const testTimerRafRef = useRef<number | null>(null);
-
-  const liveTempoRef = useRef(formTempo);
-  const liveOffsetRef = useRef(formYoutubeSyncOffset);
-
-  useEffect(() => { liveTempoRef.current = formTempo; }, [formTempo]);
-  useEffect(() => { liveOffsetRef.current = formYoutubeSyncOffset; }, [formYoutubeSyncOffset]);
 
   useEffect(() => {
     if (!formYoutubeUrl.trim()) {
@@ -962,10 +938,6 @@ export default function SongEditPage() {
               try { setYtDuration(event.target.getDuration() || 0); } catch(e){}
             } else if (event.data === 2 || event.data === 0) { 
               setYtPlaying(false);
-              if (event.data === 0) {
-                 setIsTestingActive(false);
-                 isTestingSyncRef.current = false;
-              }
             }
           },
           'onError': (error: any) => console.error("YT Error:", error.data)
@@ -981,13 +953,6 @@ export default function SongEditPage() {
     initPlayer();
     
     return () => {
-      setIsTestingActive(false);
-      isTestingSyncRef.current = false;
-      if (testTimerRafRef.current) {
-        cancelAnimationFrame(testTimerRafRef.current);
-        testTimerRafRef.current = null;
-      }
-
       if (ytPlayerRef.current && typeof ytPlayerRef.current.destroy === 'function') {
         try { ytPlayerRef.current.destroy(); } catch(e) {}
         ytPlayerRef.current = null;
@@ -1014,86 +979,6 @@ export default function SongEditPage() {
     };
   }, [chordMode, chordPickerConfig.isOpen, sectionAdjustmentsConfig.isOpen, sectionModalConfig.isOpen]);
 
-  const handleTestYoutubeSync = () => {
-    initAudioContext(); 
-
-    if (!isYtPlayerReadyRef.current || !ytPlayerRef.current || typeof ytPlayerRef.current.seekTo !== 'function') {
-      console.warn("YouTube Player is still initializing."); return;
-    }
-
-    try {
-      ytPlayerRef.current.seekTo(0, true);
-      ytPlayerRef.current.playVideo();
-    } catch(e) {}
-
-    setIsTestingActive(true);
-    isTestingSyncRef.current = true;
-
-    let testAnchorVideoTime: number | null = null;
-    let testAnchorAudioTime: number | null = null;
-
-    const trackTime = () => {
-      if (!isTestingSyncRef.current || !ytPlayerRef.current || typeof ytPlayerRef.current.getPlayerState !== 'function') {
-        return;
-      }
-
-      const playerState = ytPlayerRef.current.getPlayerState();
-      
-      if (playerState === 1 || playerState === 3) {
-        const currentVideoTime = ytPlayerRef.current.getCurrentTime() || 0;
-        
-        const globalCtx = getAudioContext();
-        if (!globalCtx) return;
-        const audioTimeNow = globalCtx.currentTime;
-
-        const offsetSecs = liveOffsetRef.current / 1000;
-        const bpm = parseInt(liveTempoRef.current) || 75;
-        const beatDurationSecs = 60 / bpm;
-
-        if (testAnchorVideoTime === null || testAnchorAudioTime === null) {
-          testAnchorVideoTime = currentVideoTime;
-          testAnchorAudioTime = audioTimeNow;
-          testLastScheduledBeatRef.current = Math.floor((currentVideoTime - offsetSecs) / beatDurationSecs) - 1;
-        }
-
-        const expectedVideoTime = testAnchorVideoTime! + (audioTimeNow - testAnchorAudioTime!);
-        if (Math.abs(expectedVideoTime - currentVideoTime) > 0.150) {
-          testAnchorVideoTime = currentVideoTime;
-          testAnchorAudioTime = audioTimeNow;
-          testLastScheduledBeatRef.current = Math.floor((currentVideoTime - offsetSecs) / beatDurationSecs) - 1;
-        }
-
-        let nextBeatIndex = testLastScheduledBeatRef.current + 1;
-        let nextBeatVideoTime = offsetSecs + (nextBeatIndex * beatDurationSecs);
-
-        while (nextBeatVideoTime < currentVideoTime + 0.5) {
-          if (nextBeatVideoTime >= currentVideoTime && nextBeatIndex >= 0) {
-            const timeUntilBeat = nextBeatVideoTime - currentVideoTime;
-            const playTime = audioTimeNow + timeUntilBeat;
-
-            const soundKey = nextBeatIndex % 4 === 0 ? "metronome_blip_1" : "metronome_blip_2";
-            playZeroLatencyAudio(soundKey, 1.0, playTime);
-          }
-          testLastScheduledBeatRef.current = nextBeatIndex;
-          nextBeatIndex++;
-          nextBeatVideoTime = offsetSecs + (nextBeatIndex * beatDurationSecs);
-        }
-
-        if (liveTimeDisplayRef.current) {
-          const ms = Math.floor(currentVideoTime * 1000);
-          liveTimeDisplayRef.current.innerText = `${ms} ms`;
-        }
-      } else {
-        testAnchorVideoTime = null;
-        testAnchorAudioTime = null;
-      }
-
-      testTimerRafRef.current = requestAnimationFrame(trackTime);
-    };
-
-    if (testTimerRafRef.current) cancelAnimationFrame(testTimerRafRef.current);
-    testTimerRafRef.current = requestAnimationFrame(trackTime);
-  };
 
   const handleCaptureSyncPoint = () => {
     if (isYtPlayerReadyRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
@@ -1845,14 +1730,8 @@ export default function SongEditPage() {
                         <div className="flex-1">
                           <div className="flex items-center justify-between mb-1 pr-1">
                             <label className="text-[9px] font-black text-zinc-400 uppercase tracking-widest block">Downbeat Offset (ms)</label>
-                            <span 
-                              ref={liveTimeDisplayRef} 
-                              className={`text-[9px] font-mono font-black text-red-600 bg-red-100 px-1.5 py-0.5 rounded shadow-inner transition-opacity duration-200 ${isTestingActive ? 'opacity-100' : 'opacity-0'}`}
-                            >
-                              0 ms
-                            </span>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 max-w-[200px]">
                             <input 
                               type="number" 
                               value={formYoutubeSyncOffset} 
@@ -1861,25 +1740,6 @@ export default function SongEditPage() {
                             />
                             <button type="button" onClick={handleCaptureSyncPoint} className="px-3 py-2 bg-zinc-200 hover:bg-zinc-300 text-zinc-700 font-black text-[9px] uppercase tracking-wider rounded-lg shrink-0 transition-colors">Capture</button>
                           </div>
-                        </div>
-                        <div className="flex items-end shrink-0 w-full sm:w-auto">
-                          <button 
-                            type="button" 
-                            onClick={() => {
-                              if (isTestingActive) {
-                                setIsTestingActive(false);
-                                isTestingSyncRef.current = false;
-                                if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') {
-                                  ytPlayerRef.current.pauseVideo();
-                                }
-                              } else {
-                                handleTestYoutubeSync();
-                              }
-                            }} 
-                            className={`w-full sm:w-auto px-5 py-2 font-black text-[10px] uppercase tracking-wider rounded-lg shadow-sm active:scale-95 transition-all ${isTestingActive ? 'bg-zinc-800 hover:bg-zinc-900 text-white' : 'bg-red-600 hover:bg-red-700 text-white'}`}
-                          >
-                            {isTestingActive ? "Stop Timing" : "Test Timing"}
-                          </button>
                         </div>
                       </div>
                     </div>
@@ -2842,7 +2702,7 @@ export default function SongEditPage() {
             // Handle swipe drag or global scroll hiding
             transform: playerDragY !== 0 
               ? `translateY(${playerDragY}px)` 
-              : (!isPlayerExpanded && isScrollingDown ? 'translateY(150px)' : 'translateY(0px)'),
+              : (!isPlayerExpanded && isScrollingDown ? 'translateY(63px)' : 'translateY(0px)'),
             // Morphing Container Size & Position
             height: isPlayerExpanded ? '100dvh' : '54px',
             bottom: isPlayerExpanded ? '0px' : '63px',
@@ -2950,7 +2810,6 @@ export default function SongEditPage() {
             onClick={(e) => {
               e.stopPropagation();
               if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-              initAudioContext();
               if (ytPlaying) ytPlayerRef.current.pauseVideo();
               else ytPlayerRef.current.playVideo();
             }}

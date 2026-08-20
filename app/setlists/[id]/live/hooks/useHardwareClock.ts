@@ -21,12 +21,8 @@ export interface HardwareClockConfig {
   accentProgressBarRef: React.MutableRefObject<HTMLDivElement | null>;
   simplifiedProgressBarRef: React.MutableRefObject<HTMLDivElement | null>;
   hasPlayedCueRef: React.MutableRefObject<boolean>;
-  playGuideCue: (name: string) => void;
   queuedSectionIndexRef: React.MutableRefObject<number | null>;
   queuedTrackIndexRef: React.MutableRefObject<number | null>;
-  audioContextStartTimeRef: React.MutableRefObject<number | null>;
-  getAudioContext: () => AudioContext | null;
-  triggerMetronomeSound: (beat: number, time: number) => void;
   isDoubleMetronomeEnabledRef: React.MutableRefObject<boolean>;
   lastAudioBeatRef: React.MutableRefObject<number>;
   lastVisualBeatRef: React.MutableRefObject<number>;
@@ -38,7 +34,7 @@ export interface HardwareClockConfig {
   getYoutubeTime: () => number | null;
   executeJumpNow: (trackIdx: number, secIdx: number, time: number, isInitialStart?: boolean) => void;
   localPresenceUserRef: React.MutableRefObject<any>;
-  sendSupabaseBroadcast: (payload: any) => void; // ✅ Restored Supabase hook
+  sendSupabaseBroadcast: (payload: any) => void;
   updateMetronomeUI: (beat: number, isPlaying: boolean, measureLength?: number) => void;
   activeLineIndexRef: React.MutableRefObject<number>;
   setActiveLineIndex: (idx: number) => void;
@@ -47,6 +43,13 @@ export interface HardwareClockConfig {
   pauseOffsetMsRef: React.MutableRefObject<number>;
   animationFrameRef: React.MutableRefObject<number | null>;
   playingTrackIndexRef: React.MutableRefObject<number>;
+  
+  // ✅ Restored the precision Audio Engine links!
+  playGuideCue: (name: string) => void;
+  getAudioContext: () => AudioContext | null;
+  triggerMetronomeSound: (beat: number, time: number) => void;
+  audioContextStartTimeRef: React.MutableRefObject<number | null>;
+  scheduledClicksRef: React.MutableRefObject<{ source: AudioBufferSourceNode, audioTime: number }[]>;
 }
 
 export function useHardwareClock(config: HardwareClockConfig) {
@@ -89,22 +92,15 @@ export function useHardwareClock(config: HardwareClockConfig) {
       
       if (!currentSection) { c.handleAdvanceToNextSetlistTrack(); return; }
 
-      
-
       const beatSpeedMsCurrent = (60 / (song.tempo || 75)) * 1000;
       const timings = song.section_timings?.[currentSection.section_name] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
       const sectionMultiplier = (timings.repeats || 0) + 1; 
       const headBeats = (timings.head_m || 0) * 4;
       const tailBeats = (timings.tail_m || 0) * 4;
       
-      // ============================================================================
-      // ✅ SURGICAL FIX: The Math Paradox is Solved.
-      // timings.measures is the length of ONE PASS. The total core beats is that base multiplied by repeats!
-      // ============================================================================
       let baseLoopBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
       let totalCoreBeats = baseLoopBeats * sectionMultiplier;
 
-      // ✅ Also ensure JSON strings from Supabase are safely converted so custom line overrides don't fail silently
       let lineTimingsObj = timings.line_timings;
       if (typeof lineTimingsObj === 'string') { 
         try { lineTimingsObj = JSON.parse(lineTimingsObj); } catch(e){} 
@@ -115,8 +111,6 @@ export function useHardwareClock(config: HardwareClockConfig) {
 
       let calculatedBaseLoopBeats = 0;
       const lineBeatsArray: number[] = [];
-      
-      
       
       if (lineTimingsObj && Object.keys(lineTimingsObj).length > 0) {
         for (let i = 0; i < parsedLinesCount; i++) {
@@ -149,18 +143,12 @@ export function useHardwareClock(config: HardwareClockConfig) {
         const sectionElapsedSecs = ytTimeSecs - ytOffsetSecs - theoreticalSongStartOffsetSecs;
         elapsedMs = sectionElapsedSecs * 1000;
 
-        // ✅ SURGICAL FIX: "Rubber Band" Sync Correction
-        // If the browser was slow to fire playVideo(), or if YouTube buffered mid-song, 
-        // the hardware clock will mathematically drift from the video. We detect the drift here.
         const audioCtx = c.getAudioContext();
         if (c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
           const theoreticalSongElapsed = audioCtx.currentTime - c.audioContextStartTimeRef.current;
           const actualSongElapsed = ytTimeSecs - ytOffsetSecs;
           const driftSecs = theoreticalSongElapsed - actualSongElapsed;
 
-          // If YouTube drifts by more than 150ms from our flawless hardware clock,
-          // instantly snap the hardware anchor back to perfectly match YouTube.
-          // (We use 150ms to ignore standard iframe API micro-jitter so the metronome stays smooth).
           if (Math.abs(driftSecs) > 0.150) {
             c.audioContextStartTimeRef.current = audioCtx.currentTime - actualSongElapsed;
           }
@@ -169,7 +157,6 @@ export function useHardwareClock(config: HardwareClockConfig) {
         elapsedMs = c.getGlobalTime() - c.mdSectionStartTimeRef.current;
       }
       
-      // ✅ SURGICAL FIX: Show the 5-second visual countdown for ALL users and ALL tracks
       if (elapsedMs < -500) {
         const secondsLeft = Math.ceil(Math.abs(elapsedMs) / 1000);
         if (secondsLeft <= 5 && secondsLeft > 0) {
@@ -195,6 +182,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
       const msRemaining = totalDurationMs - visualElapsedMs;
       const fourBeatsMs = beatSpeedMsCurrent * 4;
 
+      // ✅ Restored Guide Cues
       if (!c.hasPlayedCueRef.current && msRemaining > 0 && msRemaining <= fourBeatsMs) {
         c.hasPlayedCueRef.current = true; 
         const nextSecIndex = (c.queuedSectionIndexRef.current !== null) ? c.queuedSectionIndexRef.current : idx + 1;
@@ -202,6 +190,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
         if (targetSec) c.playGuideCue(targetSec.section_name);
       }
 
+      // ✅ Restored Sample-Accurate Audio Lookahead Loop
       const audioCtx = c.getAudioContext();
       if (c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
         const lookaheadSecs = 0.200;
@@ -239,7 +228,6 @@ export function useHardwareClock(config: HardwareClockConfig) {
             const localBeatCount = c.lastAudioBeatRef.current - sectionStartBeat;
             const exactGlobalBeatTime = c.mdSectionStartTimeRef.current + (localBeatCount * beatSpeedSecs * 1000);
             
-            // ✅ Sends reliably through Supabase Websocket
             c.sendSupabaseBroadcast({ 
                 action: "HEARTBEAT", 
                 mdAbsoluteBeat: c.lastAudioBeatRef.current, 
@@ -286,10 +274,6 @@ export function useHardwareClock(config: HardwareClockConfig) {
         }
       } else {
         const safeLinesCount = Math.max(1, parsedLinesCount); 
-        
-        // ✅ SURGICAL FIX: Pure mathematical pass mapping! 
-        // safeBaseLoopBeats is exactly ONE pass (e.g. 32 beats). 
-        // Modulo (%) forces the index to loop flawlessly back to Line 1 when the pass repeats!
         const beatsPerLine = safeBaseLoopBeats / safeLinesCount; 
         const beatWithinCurrentLoop = cappedCoreBeat % safeBaseLoopBeats;
         
