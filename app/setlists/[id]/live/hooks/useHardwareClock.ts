@@ -44,12 +44,12 @@ export interface HardwareClockConfig {
   animationFrameRef: React.MutableRefObject<number | null>;
   playingTrackIndexRef: React.MutableRefObject<number>;
   
-  // ✅ Restored the precision Audio Engine links!
-  playGuideCue: (name: string) => void;
-  getAudioContext: () => AudioContext | null;
-  triggerMetronomeSound: (beat: number, time: number) => void;
-  audioContextStartTimeRef: React.MutableRefObject<number | null>;
-  scheduledClicksRef: React.MutableRefObject<{ source: AudioBufferSourceNode, audioTime: number }[]>;
+  // ✅ SURGICAL FIX: Made Audio props OPTIONAL so the Song Edit page doesn't crash!
+  playGuideCue?: (name: string) => void;
+  getAudioContext?: () => AudioContext | null;
+  triggerMetronomeSound?: (beat: number, time: number) => void;
+  audioContextStartTimeRef?: React.MutableRefObject<number | null>;
+  scheduledClicksRef?: React.MutableRefObject<{ source: AudioBufferSourceNode, audioTime: number }[]>;
 }
 
 export function useHardwareClock(config: HardwareClockConfig) {
@@ -143,8 +143,9 @@ export function useHardwareClock(config: HardwareClockConfig) {
         const sectionElapsedSecs = ytTimeSecs - ytOffsetSecs - theoreticalSongStartOffsetSecs;
         elapsedMs = sectionElapsedSecs * 1000;
 
-        const audioCtx = c.getAudioContext();
-        if (c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
+        // ✅ Safely checking for optional audio context
+        const audioCtx = c.getAudioContext ? c.getAudioContext() : null;
+        if (c.audioContextStartTimeRef && c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
           const theoreticalSongElapsed = audioCtx.currentTime - c.audioContextStartTimeRef.current;
           const actualSongElapsed = ytTimeSecs - ytOffsetSecs;
           const driftSecs = theoreticalSongElapsed - actualSongElapsed;
@@ -182,17 +183,17 @@ export function useHardwareClock(config: HardwareClockConfig) {
       const msRemaining = totalDurationMs - visualElapsedMs;
       const fourBeatsMs = beatSpeedMsCurrent * 4;
 
-      // ✅ Restored Guide Cues
       if (!c.hasPlayedCueRef.current && msRemaining > 0 && msRemaining <= fourBeatsMs) {
         c.hasPlayedCueRef.current = true; 
         const nextSecIndex = (c.queuedSectionIndexRef.current !== null) ? c.queuedSectionIndexRef.current : idx + 1;
         const targetSec = secs[nextSecIndex];
-        if (targetSec) c.playGuideCue(targetSec.section_name);
+        // ✅ Safely checking for optional cue player
+        if (targetSec && c.playGuideCue) c.playGuideCue(targetSec.section_name);
       }
 
-      // ✅ Restored Sample-Accurate Audio Lookahead Loop
-      const audioCtx = c.getAudioContext();
-      if (c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
+      // ✅ Safely checking for optional audio context
+      const audioCtx = c.getAudioContext ? c.getAudioContext() : null;
+      if (c.audioContextStartTimeRef && c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
         const lookaheadSecs = 0.200;
         const beatSpeedSecs = beatSpeedMsCurrent / 1000;
         const currentAudioTime = audioCtx.currentTime;
@@ -211,9 +212,12 @@ export function useHardwareClock(config: HardwareClockConfig) {
           }
           if (absoluteBeatIndex < mapNodes.length) {
             const beatNode = mapNodes[absoluteBeatIndex];
-            c.triggerMetronomeSound(beatNode.isDownbeat ? 1 : 2, nextBeatTime + audioOffsetSecs);
-            if (config.isDoubleMetronomeEnabledRef.current) {
-              c.triggerMetronomeSound(2, nextBeatTime + audioOffsetSecs + (beatSpeedSecs / 2));
+            // ✅ Safely checking for optional metronome trigger
+            if (c.triggerMetronomeSound) {
+              c.triggerMetronomeSound(beatNode.isDownbeat ? 1 : 2, nextBeatTime + audioOffsetSecs);
+              if (config.isDoubleMetronomeEnabledRef.current) {
+                c.triggerMetronomeSound(2, nextBeatTime + audioOffsetSecs + (beatSpeedSecs / 2));
+              }
             }
           }
           c.lastAudioBeatRef.current++;
