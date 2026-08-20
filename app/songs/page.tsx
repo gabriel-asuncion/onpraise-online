@@ -7,6 +7,8 @@ import { useEngine } from "../context/EngineContext";
 import { getAllSongs } from "../../utils/supabase/actions";
 import GlobalLoader from '../../components/GlobalLoader';
 
+// ✅ NEW: Import your smart scanner
+import { getSongContentType, SongContentType } from "../setlists/[id]/live/utils/setlist-helpers";
 
 // ✅ SURGICAL FIX: Standardized Discord-Style Tokens
 const KEYWORD_SUGGESTIONS_CATALOG = [
@@ -17,6 +19,32 @@ const KEYWORD_SUGGESTIONS_CATALOG = [
   { token: ":theme:", hint: "Filter by set categories or preset themes" },
   { token: ":lyrics:", hint: "Scan song line rows for exact phrases" }
 ];
+
+// ✅ NEW: The UI Badge Component
+const ContentTypeBadge = ({ type }: { type: SongContentType }) => {
+  if (type === "Empty") return null;
+
+  let colorClasses = "bg-zinc-100 text-zinc-500 border-zinc-200"; 
+  let icon = "";
+
+  if (type === "Chords + Lyrics") {
+    colorClasses = "bg-purple-50 text-purple-700 border-purple-200";
+    icon = "🎸+📝";
+  } else if (type === "Chords") {
+    colorClasses = "bg-amber-50 text-amber-700 border-amber-200";
+    icon = "🎸";
+  } else if (type === "Lyrics") {
+    colorClasses = "bg-blue-50 text-blue-700 border-blue-200";
+    icon = "📝";
+  }
+
+  return (
+    <span className={`px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-widest border flex items-center gap-1 shadow-sm shrink-0 ${colorClasses}`}>
+      <span className="text-[10px] leading-none">{icon}</span>
+      {type}
+    </span>
+  );
+};
 
 export default function SongsListPage() {
   const supabase = createClient();
@@ -315,6 +343,10 @@ export default function SongsListPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 content-start w-full">
         {paginatedSongs.map(song => {
           const isBookmarked = bookmarkedSongIds.includes(song.id);
+          
+          // ✅ NEW: Scan the song dynamically
+          const contentType = getSongContentType(song.chordpro_content);
+
           return (
             <div 
               key={song.id} 
@@ -325,22 +357,26 @@ export default function SongsListPage() {
                 
                 {/* ✅ SURGICAL FIX: Dynamic Status Badges Row */}
                 <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+                  
+                  {/* The New Content Type Badge */}
+                  <ContentTypeBadge type={contentType} />
+
                   {song.approval_status === 'pending' && (
                     <span className="inline-block px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[8px] font-black uppercase tracking-widest rounded border border-amber-200 shadow-sm">
                       Pending Approval
                     </span>
                   )}
-                  {/* Replace your old badge code with this block */}
-        {song.youtube_url && (
-          <div className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md flex items-center gap-1.5 shadow-sm border ${
-            song.is_youtube_sync_validated 
-              ? 'bg-green-50 text-green-700 border-green-200' 
-              : 'bg-red-50 text-red-600 border-red-100'
-          }`}>
-            <span className={song.is_youtube_sync_validated ? "text-green-500" : "text-red-500"}>▶</span>
-            {song.is_youtube_sync_validated ? 'Youtube Sync' : 'Youtube Included'}
-          </div>
-        )}
+                  
+                  {song.youtube_url && (
+                    <div className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md flex items-center gap-1.5 shadow-sm border ${
+                      song.is_youtube_sync_validated 
+                        ? 'bg-green-50 text-green-700 border-green-200' 
+                        : 'bg-red-50 text-red-600 border-red-100'
+                    }`}>
+                      <span className={song.is_youtube_sync_validated ? "text-green-500" : "text-red-500"}>▶</span>
+                      {song.is_youtube_sync_validated ? 'Youtube Sync' : 'Youtube Included'}
+                    </div>
+                  )}
                 </div>
                 
                 <h4 className="font-bold text-[16px] text-zinc-900 tracking-tight" style={{ fontFamily: "Georgia, serif" }}>

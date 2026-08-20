@@ -57,3 +57,53 @@ export const getSectionColorClass = (name: string): string => {
   if (lower.includes('intro') || lower.includes('outro')) return 'border-[#a7f1d0] text-[#69c79e] bg-[#f0fdf6]';
   return 'border-zinc-300 text-zinc-500 bg-zinc-50';
 };
+
+export type SongContentType = "Chords + Lyrics" | "Chords" | "Lyrics" | "Empty";
+
+export const getSongContentType = (chordproContent?: string | null): SongContentType => {
+  // If the database column is literally empty/null, fail gracefully
+  if (!chordproContent || typeof chordproContent !== "string" || !chordproContent.trim()) {
+    return "Empty";
+  }
+
+  // Split into an array of lines (handles both \n and \r\n safely)
+  const lines = chordproContent.split(/\r?\n/);
+  
+  let hasChords = false;
+  let hasLyrics = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // 1. Skip Section Headers (e.g., "[Verse 1]" or "[Chorus] (M: 4, B: 0)")
+    // This perfectly ignores the whole line if it's just a header.
+    if (/^\[[^\]]+\](?:\s*\([^)]+\))?$/.test(trimmed)) {
+      continue;
+    }
+
+    // 2. Check for inline chords (any remaining brackets on a content line)
+    if (/\[[^\]]+\]/.test(trimmed)) {
+      hasChords = true;
+    }
+
+    // 3. Check for actual lyric text
+    // Strip out the chords, comments, and all punctuation to see if letters/numbers remain.
+    // \u00C0-\u024F ensures foreign/accented characters aren't accidentally erased.
+    const plainText = trimmed
+      .replace(/\[[^\]]+\]/g, "")
+      .replace(/\{[^}]+\}/g, "")
+      .replace(/[^a-zA-Z0-9\u00C0-\u024F]/g, "");
+
+    if (plainText.length > 0) {
+      hasLyrics = true;
+    }
+  }
+
+  // Calculate the final matrix state
+  if (hasChords && hasLyrics) return "Chords + Lyrics";
+  if (hasChords && !hasLyrics) return "Chords";
+  if (!hasChords && hasLyrics) return "Lyrics";
+  
+  return "Empty";
+};

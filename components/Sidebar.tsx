@@ -138,7 +138,7 @@ export default function Sidebar() {
     }
   }
 
-  // ✅ PHASE 3 FIX: Copy current team's join code
+  // ✅ PHASE 3 FIX: Copy current team's join code as a Magic Invite Link
   async function handleCopyJoinCode() {
     if (!userTeamId) return;
     
@@ -149,8 +149,11 @@ export default function Sidebar() {
       .single();
 
     if (data?.join_code) {
-      navigator.clipboard.writeText(data.join_code.toUpperCase());
-      setCopyText("Copied! ✅");
+      // ✅ SURGICAL FIX: Generate a full URL with the invite parameter
+      const inviteUrl = `${window.location.origin}/login?invite=${data.join_code.toUpperCase()}`;
+      navigator.clipboard.writeText(inviteUrl);
+      
+      setCopyText("Link Copied! ✅");
       setTimeout(() => setCopyText("Copy Code"), 2000);
     }
   }

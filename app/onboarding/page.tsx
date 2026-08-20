@@ -55,11 +55,33 @@ export default function OnboardingPage() {
 
   const [joinCode, setJoinCode] = useState<string>("");
   const [joinError, setJoinError] = useState<string>("");
+  
+  // ✅ SURGICAL FIX: State to handle the auto-join UI
+  const [isAutoJoining, setIsAutoJoining] = useState(false);
 
-  async function handleJoinTeam() {
+  useEffect(() => {
+    // ✅ SURGICAL FIX: Unpack the backpack when they arrive
+    const stashedCode = localStorage.getItem("onpraise_pending_invite");
+    
+    if (stashedCode) {
+      setJoinCode(stashedCode);
+      setIsAutoJoining(true);
+      localStorage.removeItem("onpraise_pending_invite"); // Clean up
+      
+      // Auto-submit after a brief delay so they see the magic happening
+      setTimeout(() => {
+        handleJoinTeam(stashedCode);
+      }, 1500);
+    }
+  }, []);
+
+  async function handleJoinTeam(overrideCode?: string) {
     setJoinError("");
     
-    if (!joinCode.trim()) {
+    // Use the passed code if it exists, otherwise fallback to standard input
+    const activeCode = typeof overrideCode === 'string' ? overrideCode : joinCode;
+    
+    if (!activeCode.trim()) {
       setJoinError("Please enter a valid join code.");
       return;
     }
@@ -74,7 +96,7 @@ export default function OnboardingPage() {
     const { data: teamData, error: teamError } = await supabase
       .from("teams")
       .select("id, name")
-      .eq("join_code", joinCode.toLowerCase().trim())
+      .eq("join_code", activeCode.toLowerCase().trim())
       .maybeSingle();
 
     if (teamError || !teamData) {
@@ -168,6 +190,8 @@ export default function OnboardingPage() {
       setSaving(false);
     }
   };
+  
+
 
   return (
     <main className="relative min-h-screen bg-gradient-to-b from-[#EFF6FF] to-white flex items-center justify-center p-4 select-none overflow-hidden">
@@ -313,44 +337,54 @@ export default function OnboardingPage() {
                 <p className="text-xs font-bold text-zinc-500">Ask your Music Director for your 10-character join code.</p>
               </div>
 
-              <div className="space-y-4 mb-8">
-                <div>
-                  <input
-                    type="text"
-                    value={joinCode}
-                    onChange={(e) => setJoinCode(e.target.value)}
-                    placeholder="e.g. gith-12345"
-                    className="w-full text-center text-lg font-black tracking-widest uppercase border border-zinc-200 rounded-xl p-4 shadow-inner focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-                    maxLength={10}
-                  />
-                  {joinError && (
-                    <p className="text-red-500 text-xs font-bold text-center mt-2 animate-in slide-in-from-top-1">{joinError}</p>
-                  )}
+              {/* ✅ SURGICAL FIX: Show a loading state if the magic link is processing */}
+              {isAutoJoining ? (
+                <div className="flex flex-col items-center justify-center py-8">
+                  <div className="w-12 h-12 border-4 border-blue-600/30 border-t-blue-600 rounded-full animate-spin mb-4" />
+                  <p className="text-xs font-black tracking-widest text-zinc-800 uppercase animate-pulse">Applying Magic Link...</p>
                 </div>
-              </div>
+              ) : (
+                <>
+                  <div className="space-y-4 mb-8">
+                    <div>
+                      <input
+                        type="text"
+                        value={joinCode}
+                        onChange={(e) => setJoinCode(e.target.value)}
+                        placeholder="e.g. gith-12345"
+                        className="w-full text-center text-lg font-black tracking-widest uppercase border border-zinc-200 rounded-xl p-4 shadow-inner focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                        maxLength={10}
+                      />
+                      {joinError && (
+                        <p className="text-red-500 text-xs font-bold text-center mt-2 animate-in slide-in-from-top-1">{joinError}</p>
+                      )}
+                    </div>
+                  </div>
 
-              <div className="flex gap-3 mt-8">
-                <button
-                  type="button"
-                  onClick={handleSkipTeamSelection}
-                  className="flex-1 py-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm"
-                >
-                  Skip For Now
-                </button>
-                
-                <button
-                  type="button"
-                  onClick={handleJoinTeam}
-                  disabled={joinCode.trim().length < 10}
-                  className={`flex-1 py-4 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm ${
-                    joinCode.trim().length === 10
-                      ? "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer"
-                      : "bg-zinc-500 hover:bg-zinc-600 text-white/50 cursor-not-allowed"
-                  }`}
-                >
-                  Continue
-                </button>
-              </div>
+                  <div className="flex gap-3 mt-8">
+                    <button
+                      type="button"
+                      onClick={handleSkipTeamSelection}
+                      className="flex-1 py-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm"
+                    >
+                      Skip For Now
+                    </button>
+                    
+                    <button
+                      type="button"
+                      onClick={() => handleJoinTeam()}
+                      disabled={joinCode.trim().length < 10}
+                      className={`flex-1 py-4 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-sm ${
+                        joinCode.trim().length === 10
+                          ? "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer"
+                          : "bg-zinc-500 hover:bg-zinc-600 text-white/50 cursor-not-allowed"
+                      }`}
+                    >
+                      Continue
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           )}
 

@@ -868,11 +868,27 @@ export default function SongEditPage() {
           setFormSections(prev => prev.map(sec => {
             if (sec.type !== sectionType) return sec;
             const lines = sec.content.split("\n");
-            let realWordCounter = 0;
-            lines[lineIdx] = (lines[lineIdx] || "").replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
-              if (realWordCounter === wordIdx) { realWordCounter++; return `[${formattedFullChordStr}]${match.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "")}`; }
-              realWordCounter++; return match;
-            });
+            let currentLine = lines[lineIdx] || "";
+            const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
+
+            // ✅ SURGICAL FIX: Process Ghost Slots
+            if (wordIdx === -1) {
+                currentLine = `[${formattedFullChordStr}] ${currentLine}`.trim();
+            } else if (wordIdx === -2) {
+                currentLine = `[${formattedFullChordStr}]`;
+            } else if (wordIdx >= matchCount) {
+                currentLine = `${currentLine} [${formattedFullChordStr}]`.trim();
+            } else {
+                let realWordCounter = 0;
+                currentLine = currentLine.replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
+                  if (realWordCounter === wordIdx) { 
+                    realWordCounter++; 
+                    return `[${formattedFullChordStr}]${match.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "")}`; 
+                  }
+                  realWordCounter++; return match;
+                });
+            }
+            lines[lineIdx] = currentLine;
             return { ...sec, content: lines.join("\n") };
           }));
           setChordTargetCoordinate(null);
@@ -884,11 +900,18 @@ export default function SongEditPage() {
         setFormSections(prev => prev.map(sec => {
           if (sec.type !== sectionType) return sec;
           const lines = sec.content.split("\n");
-          let realWordCounter = 0;
-          lines[lineIdx] = (lines[lineIdx] || "").replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
-            if (realWordCounter === wordIdx) { realWordCounter++; return match.replace(/\[[^\]]+\]/g, ""); }
-            realWordCounter++; return match;
-          });
+          let currentLine = lines[lineIdx] || "";
+          const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
+
+          // Ghost slots don't have chords to backspace!
+          if (wordIdx !== -1 && wordIdx !== -2 && wordIdx < matchCount) {
+              let realWordCounter = 0;
+              currentLine = currentLine.replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
+                if (realWordCounter === wordIdx) { realWordCounter++; return match.replace(/\[[^\]]+\]/g, ""); }
+                realWordCounter++; return match;
+              });
+          }
+          lines[lineIdx] = currentLine;
           return { ...sec, content: lines.join("\n") };
         }));
         setChordTargetCoordinate(null);
@@ -1170,11 +1193,27 @@ export default function SongEditPage() {
     setFormSections(prev => prev.map(sec => {
       if (sec.type !== sectionType) return sec;
       const lines = sec.content.split("\n");
-      let realWordCounter = 0;
-      lines[lineIdx] = (lines[lineIdx] || "").replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
-        if (realWordCounter === wordIdx) { realWordCounter++; return `${bracketedTag}${match.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "")}`; }
-        realWordCounter++; return match;
-      });
+      let currentLine = lines[lineIdx] || "";
+      const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
+
+      // ✅ SURGICAL FIX: Process Ghost Slots
+      if (wordIdx === -1) {
+          currentLine = `${bracketedTag} ${currentLine}`.trim();
+      } else if (wordIdx === -2) {
+          currentLine = bracketedTag;
+      } else if (wordIdx >= matchCount) {
+          currentLine = `${currentLine} ${bracketedTag}`.trim();
+      } else {
+          let realWordCounter = 0;
+          currentLine = currentLine.replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
+            if (realWordCounter === wordIdx) { 
+              realWordCounter++; 
+              return `${bracketedTag}${match.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "")}`; 
+            }
+            realWordCounter++; return match;
+          });
+      }
+      lines[lineIdx] = currentLine;
       return { ...sec, content: lines.join("\n") };
     }));
     setChordTargetCoordinate(null); 
@@ -1188,17 +1227,31 @@ export default function SongEditPage() {
     setFormSections(prev => prev.map(sec => {
       if (sec.type !== chordPickerConfig.sectionType) return sec;
       const lines = sec.content.split("\n");
-      let realWordCounter = 0;
-      lines[chordPickerConfig.lineIdx] = (lines[chordPickerConfig.lineIdx] || "").replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
-        if (realWordCounter === chordPickerConfig.wordIdx) {
-          realWordCounter++;
-          const cleanTextWord = match.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "");
-          const compiledBrackets = stagedChordsText.trim().split(/\s+/).filter(Boolean).map(ch => `[${ch.trim()}]`).join("");
-          return `${compiledBrackets}${cleanTextWord}`;
-        }
-        realWordCounter++;
-        return match;
-      });
+      let currentLine = lines[chordPickerConfig.lineIdx] || "";
+      
+      const compiledBrackets = stagedChordsText.trim().split(/\s+/).filter(Boolean).map(ch => `[${ch.trim()}]`).join("");
+      const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
+
+      // ✅ SURGICAL FIX: Process Ghost Slots
+      if (chordPickerConfig.wordIdx === -1) {
+          currentLine = `${compiledBrackets} ${currentLine}`.trim();
+      } else if (chordPickerConfig.wordIdx === -2) {
+          currentLine = compiledBrackets;
+      } else if (chordPickerConfig.wordIdx >= matchCount) {
+          currentLine = `${currentLine} ${compiledBrackets}`.trim();
+      } else {
+          let realWordCounter = 0;
+          currentLine = currentLine.replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
+            if (realWordCounter === chordPickerConfig.wordIdx) {
+              realWordCounter++;
+              const cleanTextWord = match.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "");
+              return `${compiledBrackets}${cleanTextWord}`;
+            }
+            realWordCounter++;
+            return match;
+          });
+      }
+      lines[chordPickerConfig.lineIdx] = currentLine;
       return { ...sec, content: lines.join("\n") };
     }));
 
@@ -1213,15 +1266,21 @@ export default function SongEditPage() {
     setFormSections(prev => prev.map(sec => {
       if (sec.type !== chordPickerConfig.sectionType) return sec;
       const lines = sec.content.split("\n");
-      let realWordCounter = 0;
-      lines[chordPickerConfig.lineIdx] = (lines[chordPickerConfig.lineIdx] || "").replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
-        if (realWordCounter === chordPickerConfig.wordIdx) {
-          realWordCounter++;
-          return match.replace(/\[[^\]]+\]/g, "");
-        }
-        realWordCounter++;
-        return match;
-      });
+      let currentLine = lines[chordPickerConfig.lineIdx] || "";
+      const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
+
+      if (chordPickerConfig.wordIdx !== -1 && chordPickerConfig.wordIdx !== -2 && chordPickerConfig.wordIdx < matchCount) {
+          let realWordCounter = 0;
+          currentLine = currentLine.replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
+            if (realWordCounter === chordPickerConfig.wordIdx) {
+              realWordCounter++;
+              return match.replace(/\[[^\]]+\]/g, "");
+            }
+            realWordCounter++;
+            return match;
+          });
+      }
+      lines[chordPickerConfig.lineIdx] = currentLine;
       return { ...sec, content: lines.join("\n") };
     }));
 
@@ -1562,143 +1621,7 @@ export default function SongEditPage() {
     }
   };
 
-  function renderSymmetricalLivePreviewLine(sectionType: string, contentText: string) {
-    if (!contentText.trim()) return <p className="text-zinc-400 italic text-xs font-semibold py-1">Empty line segment...</p>;
-    
-    return contentText.split("\n").map((line, lineIdx) => {
-      let lineCommentText = "";
-      const wordsArray = line.replace(/\{([^\}]+)\}/g, (m, p1) => { lineCommentText = p1.trim(); return ""; }).match(/(?:\[[^\]]+\]|\S)+/g) || [];
-      
-      return (
-        <div key={lineIdx} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 py-1 px-2 rounded-xl transition-all duration-150 relative">
-          <div className="flex flex-wrap items-end gap-x-2 gap-y-2 py-1 leading-none flex-1">
-            {wordsArray.map((chunk, currentWordIdx) => {
-              const chordRegex = /\[([^\]]+)\]/g; 
-              const extractedChordsList: string[] = []; 
-              let matchResult;
-              while ((matchResult = chordRegex.exec(chunk)) !== null) { extractedChordsList.push(matchResult[1]); }
-              
-              const cleanWordDisplay = chunk.replace(/\[[^\]]+\]/g, "");
-              
-              const isTargetedCoordinate = (chordMode === "Keyboard" && chordTargetCoordinate?.sectionType === sectionType && chordTargetCoordinate?.lineIdx === lineIdx && chordTargetCoordinate?.wordIdx === currentWordIdx) ||
-                                          (chordMode === "Chords" && chordPickerConfig?.sectionType === sectionType && chordPickerConfig?.lineIdx === lineIdx && chordPickerConfig?.wordIdx === currentWordIdx);
-              
-              const hasNotation = extractedChordsList.length > 0;
-
-              return (
-                <div 
-                  key={currentWordIdx} 
-                  style={{ 
-                    WebkitTouchCallout: chordMode === 'Chords' ? 'none' : 'default',
-                    WebkitUserSelect: chordMode === 'Chords' ? 'none' : 'auto',
-                    userSelect: chordMode === 'Chords' ? 'none' : 'auto',
-                    touchAction: chordMode === 'Chords' ? 'none' : 'auto' 
-                  }}
-                  onDragStart={(e) => e.preventDefault()} 
-                  
-                  onPointerDown={(e) => {
-                    if (chordMode !== "Chords") return;
-                    if (e.pointerType === "mouse" && e.button !== 0) return; 
-
-                    holdStartPosRef.current = { x: e.clientX, y: e.clientY };
-                    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
-                    
-                    holdTimerRef.current = setTimeout(() => {
-                      const { x, y } = holdStartPosRef.current;
-                      const mode = x < 140 ? "right" : (window.innerWidth - x < 140 ? "left" : "full");
-                      setWheelState({ isOpen: true, x, y, sectionType, lineIdx, wordIdx: currentWordIdx, mode });
-                      try { if (navigator.vibrate) navigator.vibrate(50); } catch(err){}
-                    }, 400); 
-                  }}
-                  onPointerMove={(e) => {
-                    if (chordMode !== "Chords") return;
-                    if (holdTimerRef.current) {
-                      const dx = Math.abs(e.clientX - holdStartPosRef.current.x);
-                      const dy = Math.abs(e.clientY - holdStartPosRef.current.y);
-                      if (dx > 20 || dy > 20) {
-                        clearTimeout(holdTimerRef.current);
-                        holdTimerRef.current = null;
-                      }
-                    }
-                  }}
-                  onPointerUp={() => { 
-                    if (chordMode !== "Chords") return;
-                    if (holdTimerRef.current) {
-                      clearTimeout(holdTimerRef.current); 
-                      holdTimerRef.current = null;
-                    }
-                  }}
-                  onPointerCancel={() => { 
-                    if (chordMode !== "Chords") return;
-                    if (holdTimerRef.current) {
-                      clearTimeout(holdTimerRef.current);
-                      holdTimerRef.current = null;
-                    }
-                  }}
-                  onContextMenu={(e) => {
-                    if (chordMode === "Chords") e.preventDefault(); 
-                  }}
-                  onClick={(e) => { 
-                    if (Date.now() - justClosedWheelRef.current < 400) {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      return;
-                    }
-
-                    if (chordMode === "Keyboard") { 
-                      e.stopPropagation(); 
-                      setChordTargetCoordinate({ sectionType, lineIdx, wordIdx: currentWordIdx }); 
-                      setCustomChordInputValue(hasNotation ? extractedChordsList[0] : ""); 
-                    } else if (chordMode === "Chords") {
-                      e.stopPropagation();
-                      setMultiSelectedChords([]);
-                      setPickerLayoutView("family");
-                      setStagedChordsText(extractedChordsList.join(" "));
-                      setManualExtensionNumber("");
-                      setChordPickerConfig({
-                        isOpen: true,
-                        sectionType: sectionType,
-                        lineIdx,
-                        wordIdx: currentWordIdx,
-                        cleanWord: cleanWordDisplay || "$word"
-                      });
-                    }
-                  }} 
-                  className={`
-                    flex flex-col items-start relative select-none rounded-lg px-2 py-0.5 transition-all duration-150 cursor-pointer
-                    ${chordMode !== "Off" 
-                      ? hasNotation 
-                        ? 'border border-blue-500 bg-blue-50/40 ring-1 ring-blue-400/20 shadow-sm' 
-                        : 'border border-zinc-200 bg-white hover:bg-zinc-100 hover:border-zinc-300'
-                      : 'border-transparent'}
-                    ${isTargetedCoordinate ? '!bg-blue-600 !text-white ring-2 ring-blue-500/30 !scale-105 z-10' : ''}
-                  `}
-                >
-                  {hasNotation && (
-                    <div className="min-h-[1rem] text-[10px] font-mono font-black flex flex-wrap gap-0.5 mb-0.5 leading-none">
-                      {extractedChordsList.map((ch, cIndex) => (
-                        <span key={cIndex} className={`px-0.5 rounded border font-bold ${isTargetedCoordinate ? 'text-white border-transparent' : 'text-blue-600 bg-blue-100/50 border-blue-200'}`}>
-                          {ch}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className={`text-[13px] font-sans font-bold leading-tight ${isTargetedCoordinate ? 'text-white' : 'text-zinc-800'}`}>
-                    {cleanWordDisplay || " "}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          {lineCommentText && (
-            <div style={{ fontFamily: "'Nothing You Could Do', cursive" }} className="text-[14px] text-zinc-500 italic shrink-0 sm:text-right pl-4">
-              {lineCommentText}
-            </div>
-          )}
-        </div>
-      );
-    });
-  }
+  
 
   const uniqueContentSectionsList = formSections.reduce((acc: SongSectionBlock[], curr) => { if (!acc.some(item => item.type === curr.type)) acc.push(curr); return acc; }, []);
   const filteredThemeCatalogSuggestions = CHRISTIAN_THEMES_PRESETS.filter(th => th.toLowerCase().includes(themeInputSearchValue.toLowerCase()) && !formThemes.includes(th));
@@ -1736,7 +1659,8 @@ export default function SongEditPage() {
   
 
   return (
-    <div ref={editorContentContainerRef} className="h-screen w-full border-b-[57px] overflow-hidden bg-[#f8f9fa] flex flex-col relative animate-in fade-in duration-200">
+    // ✅ SURGICAL FIX: Restored the permanent 57px clearance for the global navigation
+    <div ref={editorContentContainerRef} className="h-screen w-full border-b-[57px] border-[#f8f9fa] overflow-hidden bg-[#f8f9fa] flex flex-col relative animate-in fade-in duration-200">
       <style dangerouslySetInnerHTML={{__html: `@import url('https://fonts.googleapis.com/css2?family=Nothing+You+Could+Do&display=swap');`}} />
 
       {/* --- UNIFIED SEMANTIC STICKY HEADER --- */}
@@ -1820,7 +1744,8 @@ export default function SongEditPage() {
 
       {/* FULL-BLEED WORKSPACE CANVAS */}
       <div 
-        className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full" 
+        // ✅ SURGICAL FIX: Adds 80px of internal padding ONLY when the docked player exists!
+        className={`flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full ${youtubeVideoId ? 'pb-[80px]' : ''}`} 
         onScroll={handleCanvasScroll}
       >
         {editorActiveTab === "details" && (
@@ -1971,12 +1896,14 @@ export default function SongEditPage() {
             <div className="space-y-3">
               {formSections.map((sec) => {
                 const timingTuple = getCentralizedMetricsTuple(sec.type);
-                const processedLines = sec.content.split("\n").map((line) => {
+                // ✅ SURGICAL FIX #1: Stop deleting empty lines!
+                const linesRaw = sec.content === "" ? [""] : sec.content.split("\n");
+                const processedLines = linesRaw.map((line) => {
                   return {
                     rawText: line,
                     cleanText: line.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim()
                   };
-                }).filter(line => line.cleanText.length > 0);
+                });
 
                 const totalLines = processedLines.length;
                 const sectionRepeats = timingTuple.repeats || 0;
@@ -2115,14 +2042,21 @@ export default function SongEditPage() {
                           </div>
                         )}
 
+                        {/* ✅ SURGICAL FIX #2: The Active Rendering Loop */}
                         <div className="space-y-3">
                           {processedLines.map((line, lineIdx) => {
-                            const lineMetrics = currentLinesMetrics[lineIdx];
+                            const lineMetrics = currentLinesMetrics[lineIdx] || { measures: 4, beats: 0 };
                             const wordsArray = line.rawText.replace(/\{([^\}]+)\}/g, "").match(/(?:\[[^\]]+\]|\S)+/g) || [];
 
+                            // ✅ GHOST SLOT TARGETING
+                            const targetWordIdx = wordsArray.length;
+                            const isGhostTargeted = (chordMode === "Keyboard" && chordTargetCoordinate?.sectionType === sec.type && chordTargetCoordinate?.lineIdx === lineIdx && chordTargetCoordinate?.wordIdx === targetWordIdx) ||
+                                                    (chordMode === "Chords" && chordPickerConfig?.sectionType === sec.type && chordPickerConfig?.lineIdx === lineIdx && chordPickerConfig?.wordIdx === targetWordIdx);
+
                             return (
-                              <div key={lineIdx} className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 py-1.5 border-b border-zinc-100/40 last:border-0 group">
+                              <div key={lineIdx} className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 py-1.5 border-b border-zinc-100/40 last:border-0 group min-h-[44px]">
                                 <div className="flex flex-wrap items-end gap-x-1.5 gap-y-2 py-0.5 leading-none flex-1">
+                                  
                                   {wordsArray.map((chunk, currentWordIdx) => {
                                     const chordRegex = /\[([^\]]+)\]/g;
                                     const extractedChordsList: string[] = [];
@@ -2201,9 +2135,41 @@ export default function SongEditPage() {
                                       </div>
                                     );
                                   })}
-                                </div>
 
-        
+                                  {/* ✅ SURGICAL FIX #3: The UI Ghost Slot inside the live engine! */}
+                                  {chordMode !== "Off" && (
+                                    <div 
+                                      key={`ghost-${targetWordIdx}`}
+                                      onClick={(e) => { 
+                                        e.stopPropagation();
+                                        if (chordMode === "Keyboard") { 
+                                          setChordTargetCoordinate({ sectionType: sec.type, lineIdx, wordIdx: targetWordIdx }); 
+                                          setCustomChordInputValue(""); 
+                                        } else if (chordMode === "Chords") {
+                                          setMultiSelectedChords([]);
+                                          setPickerLayoutView("family");
+                                          setStagedChordsText("");
+                                          setManualExtensionNumber("");
+                                          setChordPickerConfig({
+                                            isOpen: true,
+                                            sectionType: sec.type,
+                                            lineIdx,
+                                            wordIdx: targetWordIdx,
+                                            cleanWord: "Empty Slot"
+                                          });
+                                        }
+                                      }}
+                                      className={`flex items-center justify-center h-[26px] min-w-[44px] px-2 border-2 border-dashed rounded-lg transition-all duration-150 cursor-pointer ${
+                                        isGhostTargeted 
+                                          ? 'bg-blue-50 border-blue-500 shadow-md scale-105 z-10 opacity-100' 
+                                          : 'bg-transparent border-zinc-300 opacity-40 hover:opacity-100 hover:border-blue-400 hover:bg-blue-50/30'
+                                      }`}
+                                    >
+                                      <span className={`text-[16px] font-black leading-none pb-0.5 ${isGhostTargeted ? 'text-blue-600' : 'text-zinc-400'}`}>+</span>
+                                    </div>
+                                  )}
+
+                                </div>
                               </div>
                             );
                           })}

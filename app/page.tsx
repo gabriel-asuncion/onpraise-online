@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { createClient } from '../utils/supabase/client';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 
 
@@ -38,8 +38,20 @@ const Blob = ({
 export default function Home() {
   const supabase = createClient();
   const router = useRouter();
+  
+  // ✅ SURGICAL FIX: Grab the parameter from the URL
+  const searchParams = useSearchParams();
+  const inviteCode = searchParams.get("invite");
+
   const [activeSlide, setActiveSlide] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(true);
+
+  // ✅ SURGICAL FIX: Stash the code in local storage BEFORE they leave for Google
+  useEffect(() => {
+    if (inviteCode) {
+      localStorage.setItem("onpraise_pending_invite", inviteCode);
+    }
+  }, [inviteCode]);
 
   // ✅ SURGICAL ADDITION: PWA Install Engine
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
