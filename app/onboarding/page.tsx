@@ -56,29 +56,34 @@ export default function OnboardingPage() {
   const [joinCode, setJoinCode] = useState<string>("");
   const [joinError, setJoinError] = useState<string>("");
   
-  // ✅ SURGICAL FIX: State to handle the auto-join UI
+  // ✅ SURGICAL FIX: Auto-join states
   const [isAutoJoining, setIsAutoJoining] = useState(false);
 
+  // 1. Unpack the backpack when the page loads
   useEffect(() => {
-    // ✅ SURGICAL FIX: Unpack the backpack when they arrive
     const stashedCode = localStorage.getItem("onpraise_pending_invite");
-    
     if (stashedCode) {
       setJoinCode(stashedCode);
       setIsAutoJoining(true);
       localStorage.removeItem("onpraise_pending_invite"); // Clean up
-      
-      // Auto-submit after a brief delay so they see the magic happening
-      setTimeout(() => {
-        handleJoinTeam(stashedCode);
-      }, 1500);
     }
   }, []);
 
+  // 2. Fire the join action ONLY when they step into the Team Selection view
+  useEffect(() => {
+    if (step === 2 && isAutoJoining && joinCode) {
+      const timer = setTimeout(() => {
+        handleJoinTeam(joinCode);
+      }, 1500); // 1.5s delay to show off the cool loading animation
+      return () => clearTimeout(timer);
+    }
+  }, [step, isAutoJoining, joinCode]);
+
+  // ✅ SURGICAL FIX: Allow the function to accept our override code
   async function handleJoinTeam(overrideCode?: string) {
     setJoinError("");
     
-    // Use the passed code if it exists, otherwise fallback to standard input
+    // Use the override code if passed, otherwise use what they typed
     const activeCode = typeof overrideCode === 'string' ? overrideCode : joinCode;
     
     if (!activeCode.trim()) {
@@ -337,11 +342,11 @@ export default function OnboardingPage() {
                 <p className="text-xs font-bold text-zinc-500">Ask your Music Director for your 10-character join code.</p>
               </div>
 
-              {/* ✅ SURGICAL FIX: Show a loading state if the magic link is processing */}
+              {/* ✅ SURGICAL FIX: Show the Magic Link progress state! */}
               {isAutoJoining ? (
                 <div className="flex flex-col items-center justify-center py-8">
                   <div className="w-12 h-12 border-4 border-blue-600/30 border-t-blue-600 rounded-full animate-spin mb-4" />
-                  <p className="text-xs font-black tracking-widest text-zinc-800 uppercase animate-pulse">Applying Magic Link...</p>
+                  <p className="text-[11px] font-black tracking-widest text-zinc-800 uppercase animate-pulse">Applying Magic Link...</p>
                 </div>
               ) : (
                 <>

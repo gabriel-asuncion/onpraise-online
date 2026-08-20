@@ -63,21 +63,33 @@ export default function Home() {
   const [showInstallSuccessModal, setShowInstallSuccessModal] = useState(false);
 
   useEffect(() => {
-    // 1. Check if they already have a cookie when the page mounts
     const checkExistingSession = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
-        router.push('/songs'); // Change '/songs' to your actual dashboard route if different!
+        router.push('/songs'); 
       }
     };
     checkExistingSession();
 
-    // 2. Listen for the exact moment the OAuth callback finishes
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (session) {
         router.push('/songs'); 
       }
     });
+
+    // ============================================================================
+    // ✅ SURGICAL FIX: Bulletproof Raw URL Extraction
+    // Grabs the code directly from the browser window before Next.js wipes it!
+    // ============================================================================
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const inviteCode = params.get("invite");
+      if (inviteCode) {
+        localStorage.setItem("onpraise_pending_invite", inviteCode);
+        // Clean the URL visually so it looks pristine for the user
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    }
 
     return () => {
       authListener.subscription.unsubscribe();
