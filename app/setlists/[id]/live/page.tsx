@@ -960,8 +960,11 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           handleToggleFlowPlaybackState={handleToggleFlowPlaybackState} displayedOnlineUsers={displayedOnlineUsers}
           tracksList={tracksList} currentTrackIndex={currentTrackIndex} handleUserSelectTrackBadge={handleUserSelectTrackBadge}
           backdropProgressRef={backdropProgressRef} accentProgressBarRef={accentProgressBarRef}
-          isSimplifiedMode={isSimplifiedMode} // ✅ SURGICAL ADDITION
+          isSimplifiedMode={isSimplifiedMode}
           localClickVolume={localClickVolume}
+          wakeUpAudioEngine={initAudioContext}
+          // ✅ SURGICAL FIX: Pass the sound preference to the header!
+          metronomeSoundType={metronomeSoundType}
         />
       )}
 
@@ -1049,7 +1052,8 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         isZenMode={isZenMode} setIsZenMode={setIsZenMode}
         
         // ✅ Added the sound state props here
-        metronomeSoundType={metronomeSoundType} setMetronomeSoundType={setMetronomeSoundType}
+        metronomeSoundType={metronomeSoundType} // or metronomeSoundTypeRef.current depending on your hook
+        setMetronomeSoundType={setMetronomeSoundType}
         
         lineSpacing={lineSpacing} setLineSpacing={setLineSpacing} lyricsFontSize={lyricsFontSize} setLyricsFontSize={setLyricsFontSize}
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}

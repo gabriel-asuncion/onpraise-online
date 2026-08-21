@@ -24,7 +24,7 @@ interface LiveHeaderProps {
   wakeUpAudioEngine?: () => void; // ✅ SURGICAL FIX: Accept the direct wake-up function
   playZeroLatencyAudio?: (key: string, volume: number) => void; // ✅ Accept the metronome player function
   localClickVolume?: number;
-  
+  metronomeSoundType?: "blip" | "bell" | "block" | "glass";
 }
 
 export function LiveHeader({
@@ -33,7 +33,8 @@ export function LiveHeader({
   setIsSettingsModalOpen, handleToggleFlowPlaybackState, displayedOnlineUsers,
   tracksList, currentTrackIndex, handleUserSelectTrackBadge,
   backdropProgressRef, accentProgressBarRef, isSoloMode = false, isSimplifiedMode = false,
-  wakeUpAudioEngine, localClickVolume = 1.0 
+  wakeUpAudioEngine, localClickVolume = 1.0,
+  metronomeSoundType = "blip" // ✅ Default to blip if missing
 }: LiveHeaderProps) {
 
   // ✅ SURGICAL FIX: LiveHeader fully owns the Audio Engine now!
@@ -87,6 +88,12 @@ export function LiveHeader({
     liveVolumeRef.current = localClickVolume;
   }, [localClickVolume]);
 
+  // ✅ SURGICAL FIX: Store the live sound type in a ref to bypass the closure trap!
+  const liveSoundTypeRef = useRef(metronomeSoundType);
+  useEffect(() => {
+    liveSoundTypeRef.current = metronomeSoundType;
+  }, [metronomeSoundType]);
+
   // ✅ Physically links the audio to the visual flashes
   useEffect(() => {
     if (!isPlayingFlow) return;
@@ -107,7 +114,12 @@ export function LiveHeader({
 
             // If the visual JUST turned on, fire the cached .wav file
             if (isNowActive && !wasActive) {
-              const soundKey = index === 0 ? "metronome_blip_1" : "metronome_blip_2";
+              // ✅ SURGICAL FIX: Read the currently selected sound from the LIVE ref!
+              const currentSound = liveSoundTypeRef.current;
+              const soundKey = index === 0 
+                ? `metronome_${currentSound}_1` 
+                : `metronome_${currentSound}_2`;
+                
               playZeroLatencyAudio(soundKey, liveVolumeRef.current);
             }
           }

@@ -27,8 +27,6 @@ interface SettingsModalProps {
   setIsMetronomeSoundEnabled: (val: boolean) => void;
   isDoubleMetronomeEnabled: boolean;
   setIsDoubleMetronomeEnabled: (val: boolean) => void;
-  metronomeSoundType: "blip" | "bell" | "block" | "glass";
-  setMetronomeSoundType: (val: "blip" | "bell" | "block" | "glass") => void;
   localClickVolume: number;
   setLocalClickVolume: (val: number) => void;
   audioLatencyOffsetMs: number;
@@ -51,6 +49,8 @@ interface SettingsModalProps {
   recordingStartTime?: number | null;
   isPaused?: boolean;
   recordingAccumulatedMs?: number;
+  metronomeSoundType: "blip" | "bell" | "block" | "glass";
+  setMetronomeSoundType: (val: "blip" | "bell" | "block" | "glass") => void;
 }
 
 export function SettingsModal(props: SettingsModalProps) {
@@ -332,13 +332,16 @@ export function SettingsModal(props: SettingsModalProps) {
         </div>
       </div>
 
-      <VolumeMixerModal 
-        isOpen={isMixerOpen}
+      <VolumeMixerModal
+        isOpen={isMixerOpen} 
         onClose={() => setIsMixerOpen(false)}
-        localClickVolume={localClickVolume}
+        localClickVolume={localClickVolume} 
         setLocalClickVolume={setLocalClickVolume}
-        youtubeVolume={youtubeVolume}
+        youtubeVolume={youtubeVolume} 
         setYoutubeVolume={setYoutubeVolume}
+        // ✅ ADD THESE TWO LINES:
+        metronomeSoundType={metronomeSoundType}
+        setMetronomeSoundType={setMetronomeSoundType}
       />
     </div>
   );
