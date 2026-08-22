@@ -334,56 +334,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }
   
   const metronomeRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
-  const scheduledClicksRef = useRef<{ source: AudioBufferSourceNode, audioTime: number }[]>([]);
-  
-  // ✅ SURGICAL FIX: Restored the precise audio scheduler with a Synthesizer Fallback!
-  const triggerMetronomeSound = (beatNum: number, time: number = 0) => {
-    if (!isMetronomeSoundEnabledRef.current) return;
-
-    // 🚨 THE MASTER/SLAVE AUDIO FIX:
-    // Only the Music Director's device generates the audible click.
-    // Musicians get perfectly synced VISUAL flashes, but their speakers 
-    // are forced silent to prevent the acoustic "echo chamber".
-    if (!localPresenceUserRef.current?.isMD) return;
-
-    const type = metronomeSoundTypeRef?.current || "blip";
-    const volume = localClickVolumeRef?.current !== undefined ? localClickVolumeRef.current : 1.0;
-    const targetKey = beatNum === 1 ? `metronome_${type}_1` : `metronome_${type}_2`;
-    
-    // 1. Attempt to play the downloaded .wav file
-    const source = playZeroLatencyAudio(targetKey, volume, time);
-    
-    if (source) {
-      scheduledClicksRef.current.push({ source, audioTime: time });
-      source.onended = () => {
-        const idx = scheduledClicksRef.current.findIndex(s => s.source === source);
-        if (idx > -1) scheduledClicksRef.current.splice(idx, 1);
-      };
-    } else {
-      // 🚨 2. BULLETPROOF WORKAROUND: Synthesize the click if files are missing!
-      // If the .wav file is 404 or didn't load, we generate a beep dynamically using raw math.
-      const audioCtx = getAudioContext();
-      if (audioCtx && audioCtx.state === "running") {
-        const osc = audioCtx.createOscillator();
-        const gainNode = audioCtx.createGain();
-
-        // Downbeat (Beat 1) gets a higher pitch (1200Hz), upbeats get a lower pitch (800Hz)
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(beatNum === 1 ? 1200 : 800, time);
-
-        // Create a sharp, percussive click envelope
-        gainNode.gain.setValueAtTime(0, time);
-        gainNode.gain.linearRampToValueAtTime(volume * 0.8, time + 0.002); // Attack
-        gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.05);   // Decay
-
-        osc.connect(gainNode);
-        gainNode.connect(audioCtx.destination);
-
-        osc.start(time);
-        osc.stop(time + 0.05); // Stop the oscillator after 50ms to save memory
-      }
-    }
-  };
+ 
   
 
   useEffect(() => { playingTrackIndexRef.current = playingTrackIndex; }, [playingTrackIndex]);
@@ -649,7 +600,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
     // ✅ SURGICAL FIX: Feed the audio engine into the clock
-    playGuideCue, getAudioContext, triggerMetronomeSound, audioContextStartTimeRef, scheduledClicksRef,
+    playGuideCue, getAudioContext, audioContextStartTimeRef,
     getYoutubeTime: () => {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isYtBufferingRef.current) {
         return ytPlayerRef.current.getCurrentTime();
@@ -754,14 +705,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           } catch(e) {}
         }
         
-        // ✅ SURGICAL FIX: Restored the 4-click Count-in!
-        if (timeUntilJumpMs >= 4000) {
-          const countInSpeed = 60 / (activeSongRef.current?.tempo || 75);
-          triggerMetronomeSound(2, absoluteHardwareTimeAtJump - (countInSpeed * 4));
-          triggerMetronomeSound(2, absoluteHardwareTimeAtJump - (countInSpeed * 3));
-          triggerMetronomeSound(2, absoluteHardwareTimeAtJump - (countInSpeed * 2));
-          triggerMetronomeSound(1, absoluteHardwareTimeAtJump - (countInSpeed * 1)); 
-        }
       }
     }
     
