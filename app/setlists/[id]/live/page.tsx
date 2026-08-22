@@ -339,7 +339,13 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   // ✅ SURGICAL FIX: Restored the precise audio scheduler with a Synthesizer Fallback!
   const triggerMetronomeSound = (beatNum: number, time: number = 0) => {
     if (!isMetronomeSoundEnabledRef.current) return;
-    
+
+    // 🚨 THE MASTER/SLAVE AUDIO FIX:
+    // Only the Music Director's device generates the audible click.
+    // Musicians get perfectly synced VISUAL flashes, but their speakers 
+    // are forced silent to prevent the acoustic "echo chamber".
+    if (!localPresenceUserRef.current?.isMD) return;
+
     const type = metronomeSoundTypeRef?.current || "blip";
     const volume = localClickVolumeRef?.current !== undefined ? localClickVolumeRef.current : 1.0;
     const targetKey = beatNum === 1 ? `metronome_${type}_1` : `metronome_${type}_2`;
