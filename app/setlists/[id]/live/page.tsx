@@ -662,7 +662,11 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     isChannelSubscribedRef.current = false;
     
     const lobbyChannel = supabase.channel(`setlist_lobby_${setlistId}`, {
-      config: { broadcast: { ack: false, self: true }, presence: { key: localPresenceUser.connectionId } }
+      config: { 
+        // ✅ SURGICAL FIX: Prevent the server from echoing your own commands back to you!
+        broadcast: { ack: false, self: false }, 
+        presence: { key: localPresenceUser.connectionId } 
+      }
     });
 
     lobbyChannel
