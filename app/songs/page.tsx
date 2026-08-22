@@ -59,8 +59,21 @@ export default function SongsListPage() {
   const canApproveSongs = ["admin", "moderator"].includes(activeRole);
   // const pendingSongsCount = allDatabaseSongs.filter(song => song.approval_status === 'pending').length;
 
+  type SongRecordSummary = {
+    id: string;
+    title?: string;
+    artist?: string;
+    original_key?: string;
+    tempo?: number | string;
+    chordpro_content?: string;
+    approval_status?: string;
+    youtube_url?: string;
+    is_youtube_sync_validated?: boolean;
+    themes?: string;
+  };
+
   const [loading, setLoading] = useState(true);
-  const [allDatabaseSongs, setAllDatabaseSongs] = useState<any[]>([]);
+  const [allDatabaseSongs, setAllDatabaseSongs] = useState<SongRecordSummary[]>([]);
   const [songSearchQuery, setSongSearchQuery] = useState("");
   const [activeFilters, setActiveFilters] = useState<Record<string, string>>({
     artist: "", key: "", lyrics: "", theme: "", bpm: "", bpmRange: ""
@@ -88,6 +101,56 @@ export default function SongsListPage() {
     } catch (e) { console.error("Failed to load songs assets:", e); }
     setLoading(false);
   };
+
+  // ✅ YouTube Search & Intercept States
+  const [ytSearchQuery, setYtSearchQuery] = useState("");
+  const [ytResults, setYtResults] = useState<any[]>([]);
+  const [isSearchingYt, setIsSearchingYt] = useState(false);
+  const [isYtDropdownOpen, setIsYtDropdownOpen] = useState(false);
+
+  // 1. Fetch results from our secure backend
+  const handleSearchYouTube = async (e?: React.FormEvent | React.MouseEvent) => {
+    if (e) e.preventDefault();
+    if (!ytSearchQuery.trim()) return;
+    
+    setIsSearchingYt(true);
+    setIsYtDropdownOpen(true);
+    
+    try {
+      const res = await fetch(`/api/youtube/search?q=${encodeURIComponent(ytSearchQuery)}`);
+      const items = await res.json();
+      setYtResults(items);
+    } catch (err) {
+      console.error("YouTube search failed", err);
+    } finally {
+      setIsSearchingYt(false);
+    }
+  };
+
+  // 2. The Interceptor! Checks for duplicates before auto-filling
+  const handleSelectYouTubeVideo = async (videoId: string, title: string) => {
+    const generatedUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    
+    // Check Supabase to see if any song already uses this exact video ID
+    const { data: existingSong } = await supabase
+      .from('songs')
+      .select('id')
+      .ilike('youtube_url', `%${videoId}%`)
+      .maybeSingle();
+
+    if (existingSong) {
+      // 🚨 DUPLICATE FOUND: Intercept and route them to the existing song!
+      alert(`"${title}" is already in the database! Redirecting you now...`);
+      router.push(`/songs/${existingSong.id}`);
+    } else {
+      // ✅ NO DUPLICATE: Auto-fill the URL input and close the dropdown
+      setYtUrlInput(generatedUrl);
+      setYtSearchQuery("");
+      setYtResults([]);
+      setIsYtDropdownOpen(false);
+    }
+  };
+  
 
   useEffect(() => {
     async function syncActiveUserBookmarksMatrix() {
@@ -141,8 +204,10 @@ export default function SongsListPage() {
       const searchParams = new URLSearchParams({ title: metadata.title || "", artist: metadata.author_name || "", youtube_url: ytUrlInput });
       setIsAddModalOpen(false); setYtUrlInput("");
       router.push(`/songs/new/edit?${searchParams.toString()}`);
-    } catch (err: any) { setYtError(err.message || "An unexpected error occurred."); } 
-    finally { setYtLoading(false); }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "An unexpected error occurred.";
+      setYtError(message);
+    } finally { setYtLoading(false); }
   };
 
   // ✅ SURGICAL FIX: The Interceptor Engine (Instantly creates the chip when typed)
@@ -158,11 +223,13 @@ export default function SongsListPage() {
 
       setActiveFilters(prev => ({ ...prev, [filterKey]: afterToken }));
       setEditingFilter(filterKey);
-      setSongSearchQuery(beforeToken); 
+      setSongSearchQuery(beforeToken);
+      setCurrentPage(1);
       setTimeout(() => document.getElementById(`edit-${filterKey}`)?.focus(), 50);
       return;
     }
     setSongSearchQuery(val);
+    setCurrentPage(1);
   };
 
   const filteredSongs = allDatabaseSongs.filter(song => {
@@ -177,9 +244,9 @@ export default function SongsListPage() {
     if (activeFilters.bpm && String(song.tempo) !== activeFilters.bpm) return false;
     if (activeFilters.bpmRange) {
       const [minStr, maxStr] = activeFilters.bpmRange.split("-");
-      const min = parseInt(minStr) || 0;
-      const max = parseInt(maxStr) || 999;
-      const songTempo = parseInt(song.tempo) || 0;
+      const min = Number.parseInt(minStr ?? "0", 10) || 0;
+      const max = Number.parseInt(maxStr ?? "999", 10) || 999;
+      const songTempo = Number.parseInt(String(song.tempo ?? 0), 10) || 0;
       if (songTempo < min || songTempo > max) return false;
     }
     return true;
@@ -196,9 +263,10 @@ export default function SongsListPage() {
     const rawKey = token.replace(/:/g, "").toLowerCase();
     const filterKey = rawKey === "bpm-range" ? "bpmRange" : rawKey;
     const tokensList = [...typingWordsArray];
-    tokensList.pop(); 
+    tokensList.pop();
     setSongSearchQuery(tokensList.join(" ").trim());
-    
+    setCurrentPage(1);
+
     // Instantly spawn the chip and focus it
     setEditingFilter(filterKey);
     setTimeout(() => document.getElementById(`edit-${filterKey}`)?.focus(), 50);
@@ -215,8 +283,6 @@ export default function SongsListPage() {
     for (let i = startPage; i <= endPage; i++) pages.push(i);
     return pages;
   };
-
-  useEffect(() => { setCurrentPage(1); }, [songSearchQuery, activeFilters]);
 
   // ✅ SURGICAL FIX: The dynamic Chip Renderer (Embeds the input INSIDE the chip!)
   const renderInteractiveChip = (tokenPrefix: string, filterKey: string) => {
@@ -257,13 +323,13 @@ export default function SongsListPage() {
   }
 
   return (
-  <div className="h-[100dvh] w-full overflow-hidden bg-[#f8f9fa] flex flex-col relative animate-in fade-in duration-200">
+  <div className="h-[100dvh] w-full overflow-hidden flex flex-col relative animate-in fade-in duration-200">
     <style dangerouslySetInnerHTML={{__html: `@import url('https://fonts.googleapis.com/css2?family=Nothing+You+Could+Do&display=swap');`}} />
 
     {/* ========================================= */}
     {/* 1. STICKY HEADER & SEARCH BAR BLOCK       */}
     {/* ========================================= */}
-    <header className="sticky top-0 z-[100] flex-shrink-0 w-full bg-[#ffffff] px-4 md:px-8 pt-4 md:pt-8 pb-4 space-y-4 border-b border-zinc-200 shadow-sm">
+    <header className="sticky top-0 z-[100] flex-shrink-0 w-full px-4 md:px-8 pt-4 md:pt-8 pb-4 space-y-4 border-b border-zinc-200 shadow-sm">
       <div className="flex items-center justify-between w-full">
         <div className="flex items-center gap-3 md:gap-4">
           {canEditLibrary && (
@@ -274,7 +340,7 @@ export default function SongsListPage() {
               ＋
             </button>
           )}
-          <h2 className="text-xl md:text-2xl font-bold tracking-tight text-[#111827] truncate" style={{ fontFamily: "Georgia, serif" }}>
+          <h2 className="text-xl md:text-2xl font-bold tracking-tight truncate" style={{ fontFamily: "Georgia, serif" }}>
             Songs Database
           </h2>
         </div>
@@ -362,7 +428,7 @@ export default function SongsListPage() {
                   <ContentTypeBadge type={contentType} />
 
                   {song.approval_status === 'pending' && (
-                    <span className="inline-block px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[8px] font-black uppercase tracking-widest rounded border border-amber-200 shadow-sm">
+                    <span className="inline-block px-1.5 py-0.5 bg-amber-50 text-amber-800 text-[8px] font-black uppercase tracking-widest rounded border border-amber-200 shadow-sm">
                       Pending Approval
                     </span>
                   )}
@@ -463,6 +529,8 @@ export default function SongsListPage() {
       )}
     </main>
 
+
+      
     {/* ========================================= */}
     {/* 3. ADD NEW SONG MODAL                     */}
     {/* ========================================= */}
@@ -492,22 +560,74 @@ export default function SongsListPage() {
           <form onSubmit={handleProcessYoutubeLink} className="space-y-4">
             
             {/* The Smart YouTube Field */}
-            <div className="space-y-3 p-4 bg-zinc-50 border border-zinc-200 rounded-2xl">
-              <label className="text-[11px] font-black uppercase tracking-wider text-zinc-700 block">
-                YouTube Link
+            <div className="space-y-3 p-4 bg-zinc-50 border border-zinc-200 rounded-2xl relative z-50">
+              <label className="text-[11px] font-black uppercase tracking-wider text-zinc-700 block flex justify-between">
+                <span>1. Search YouTube</span>
+                <span className="text-zinc-400">OR PASTE LINK BELOW</span>
               </label>
-              
+
+              {/* SEARCH ROW */}
+              <div className="flex gap-2 relative">
+                 <input
+                  type="text"
+                  value={ytSearchQuery}
+                  onChange={(e) => setYtSearchQuery(e.target.value)}
+                  // Prevents the main form from submitting when hitting Enter to search
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSearchYouTube(); } }}
+                  placeholder="e.g., 'Oceans Hillsong Live'..."
+                  className="flex-1 w-full bg-white border border-zinc-200 rounded-xl px-3 py-2.5 text-xs font-semibold text-zinc-800 outline-none focus:border-blue-500 shadow-inner"
+                />
+                <button
+                  type="button"
+                  onClick={handleSearchYouTube}
+                  disabled={isSearchingYt || !ytSearchQuery.trim()}
+                  className="bg-zinc-800 hover:bg-zinc-900 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-sm transition-colors shrink-0"
+                >
+                  {isSearchingYt ? "..." : "Search"}
+                </button>
+
+                {/* Dropdown Results */}
+                {isYtDropdownOpen && ytResults.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-zinc-200 rounded-2xl shadow-2xl overflow-hidden divide-y divide-zinc-100 max-h-64 overflow-y-auto custom-scrollbar z-[99999]">
+                    {ytResults.map((video) => (
+                      <button
+                        key={video.id.videoId}
+                        type="button"
+                        onClick={() => handleSelectYouTubeVideo(video.id.videoId, video.snippet.title)}
+                        className="w-full flex gap-3 p-3 hover:bg-blue-50 transition-colors text-left group"
+                      >
+                        <img
+                          src={video.snippet.thumbnails.default.url}
+                          alt="thumbnail"
+                          className="w-20 h-14 object-cover rounded-lg bg-zinc-100 shrink-0 border border-zinc-200"
+                        />
+                        <div className="flex flex-col justify-center overflow-hidden">
+                          <span className="text-xs font-bold text-zinc-800 leading-tight line-clamp-2 group-hover:text-blue-600 transition-colors" dangerouslySetInnerHTML={{ __html: video.snippet.title }} />
+                          <span className="text-[9px] font-bold text-zinc-400 mt-1 uppercase tracking-wider truncate">
+                            {video.snippet.channelTitle}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <label className="text-[11px] font-black uppercase tracking-wider text-zinc-700 block mt-2">
+                2. Selected Link
+              </label>
+
               {/* Row 1: Input + Paste Button */}
               <div className="flex gap-2">
-                <input 
-                  type="url" 
+                <input
+                  type="url"
                   placeholder="https://youtube.com/watch?v=..."
                   value={ytUrlInput}
                   onChange={(e) => setYtUrlInput(e.target.value)}
                   disabled={ytLoading}
                   className="flex-1 w-full bg-white border border-zinc-200 rounded-xl px-3 py-2.5 text-xs font-semibold text-zinc-800 outline-none focus:border-blue-500 shadow-inner disabled:opacity-50"
                 />
-                <button 
+                <button
                   type="button"
                   onClick={handlePasteClipboard}
                   disabled={ytLoading}
@@ -519,12 +639,12 @@ export default function SongsListPage() {
               </div>
 
               {/* Row 2: Submit Button */}
-              <button 
+              <button
                 type="submit"
                 disabled={!ytUrlInput.trim() || ytLoading}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-4 py-3 rounded-xl text-xs font-black tracking-wide shadow-md transition-colors active:scale-[0.98] cursor-pointer"
               >
-                {ytLoading ? "SCANNING..." : "CHECK"}
+                {ytLoading ? "SCANNING..." : "CREATE FROM LINK"}
               </button>
 
               {ytError && (

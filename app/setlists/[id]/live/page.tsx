@@ -126,6 +126,122 @@ export default function SetlistPerformanceRoomPage() {
   
   // ✅ SURGICAL ADDITION: Smart Available Sections Fetcher
   const [availableSongSections, setAvailableSongSections] = useState<string[]>([]);
+
+  // ✅ SURGICAL FIX: Swipe Gesture Tracking Refs
+  const touchStartX = useRef<number | null>(null);
+  const touchStartY = useRef<number | null>(null);
+
+  // ✅ SURGICAL FIX: Swipe Navigation Handlers
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0].clientX;
+    touchStartY.current = e.touches[0].clientY;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX.current === null || touchStartY.current === null) return;
+    
+    // Safety check: Don't trigger swipes if a full-screen modal is open
+    if (isSettingsModalOpen || isStructureModalOpen || isTransposerOpen || isRecordModalOpen) return;
+
+    const touchEndX = e.changedTouches[0].clientX;
+    const touchEndY = e.changedTouches[0].clientY;
+
+    const deltaX = touchEndX - touchStartX.current;
+    const deltaY = touchEndY - touchStartY.current;
+
+    // The swipe must be at least 75px wide, and the horizontal movement 
+    // must be at least twice as large as the vertical movement (to ignore sloppy vertical scrolling)
+    if (Math.abs(deltaX) > 75 && Math.abs(deltaX) > Math.abs(deltaY) * 2) {
+      const currentIndex = currentTrackIndexRef.current;
+      
+      if (deltaX > 0) {
+        // Swiped Right -> Previous Song (Left to Right)
+        if (currentIndex > 0) handleUserSelectTrackBadge(currentIndex - 1);
+      } else {
+        // Swiped Left -> Next Song (Right to Left)
+        if (currentIndex < tracksListRef.current.length - 1) handleUserSelectTrackBadge(currentIndex + 1);
+      }
+    }
+
+    touchStartX.current = null;
+    touchStartY.current = null;
+  };
+
+  // =========================================================================
+  // ✅ SURGICAL FIX: PHYSICS-BASED DRAG ENGINE
+  // =========================================================================
+  const [swipeOffsetX, setSwipeOffsetX] = useState(0);
+  const [swipeTransition, setSwipeTransition] = useState(false);
+  
+  const pointerStartX = useRef<number | null>(null);
+  const pointerStartY = useRef<number | null>(null);
+  const isDraggingRef = useRef(false);
+  const isSwipingRef = useRef(false);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    pointerStartX.current = e.clientX;
+    pointerStartY.current = e.clientY;
+    isDraggingRef.current = true;
+    isSwipingRef.current = false;
+    setSwipeTransition(false); // Turn off CSS easing so it sticks perfectly to the finger
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!isDraggingRef.current || pointerStartX.current === null || pointerStartY.current === null) return;
+    
+    // Safety check: Disable drag if modals are open
+    if (isSettingsModalOpen || isStructureModalOpen || isTransposerOpen || isRecordModalOpen) return;
+
+    const deltaX = e.clientX - pointerStartX.current;
+    const deltaY = e.clientY - pointerStartY.current;
+
+    // Lock into swipe mode if they move 15px horizontally and aren't scrolling vertically
+    if (!isSwipingRef.current) {
+      if (Math.abs(deltaX) > 15 && Math.abs(deltaX) > Math.abs(deltaY)) {
+        isSwipingRef.current = true;
+      }
+    }
+
+    if (isSwipingRef.current) {
+      let resistanceDelta = deltaX;
+      const isFirstSong = currentTrackIndexRef.current === 0;
+      const isLastSong = currentTrackIndexRef.current === tracksListRef.current.length - 1;
+      
+      // Apple-style "Rubber Banding" if you try to swipe past the first/last song
+      if ((isFirstSong && deltaX > 0) || (isLastSong && deltaX < 0)) {
+        resistanceDelta = deltaX * 0.25; 
+      }
+      setSwipeOffsetX(resistanceDelta);
+    }
+  };
+
+  // ✅ SURGICAL FIX: Streamlined Carousel Swipe Engine
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (!isDraggingRef.current) return;
+    isDraggingRef.current = false;
+    setSwipeTransition(true); // Turn on CSS easing for the snap animation
+
+    if (isSwipingRef.current) {
+      const deltaX = swipeOffsetX;
+      const threshold = 100; // Require at least 100px of drag force to commit
+      const currentIndex = currentTrackIndexRef.current;
+      
+      if (deltaX > threshold && currentIndex > 0) {
+        // Swiped Right -> Previous Song
+        handleUserSelectTrackBadge(currentIndex - 1);
+      } else if (deltaX < -threshold && currentIndex < tracksListRef.current.length - 1) {
+        // Swiped Left -> Next Song
+        handleUserSelectTrackBadge(currentIndex + 1);
+      }
+      // Always snap back to 0. The CSS translateX formula will automatically 
+      // shift the whole container based on the new currentTrackIndex!
+      setSwipeOffsetX(0); 
+    }
+    
+    isSwipingRef.current = false;
+    pointerStartX.current = null;
+    pointerStartY.current = null;
+  };
   
   useEffect(() => {
     if (!activeSong?.id) {
@@ -196,15 +312,26 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   const pauseOffsetMsRef = useRef<number>(0);
   const lastBeatRef = useRef<number>(1);
   const animationFrameRef = useRef<number | null>(null);
-  const sectionRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
+  // const sectionRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
   const audioContextStartTimeRef = useRef<number | null>(null);
   const astTreeRef = useRef<CompiledSectionToken[]>([]);
   const mdSectionStartTimeRef = useRef<number | null>(null);
 
   const backdropProgressRef = useRef<HTMLDivElement | null>(null);
   const accentProgressBarRef = useRef<HTMLDivElement | null>(null);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  // const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const simplifiedProgressBarRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ SURGICAL FIX: Independent memory arrays for every song in the carousel!
+  const trackScrollRefs = useRef<React.MutableRefObject<HTMLDivElement | null>[]>([]);
+  if (trackScrollRefs.current.length !== tracksList.length) {
+    trackScrollRefs.current = tracksList.map((_, i) => trackScrollRefs.current[i] || { current: null });
+  }
+
+  const trackSectionRefs = useRef<React.MutableRefObject<{ [key: string]: HTMLDivElement | null }>[]>([]);
+  if (trackSectionRefs.current.length !== tracksList.length) {
+    trackSectionRefs.current = tracksList.map((_, i) => trackSectionRefs.current[i] || { current: {} });
+  }
   
   const metronomeRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
   const scheduledClicksRef = useRef<{ source: AudioBufferSourceNode, audioTime: number }[]>([]);
@@ -271,7 +398,11 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   useEffect(() => {
     if (isPlayingFlow && !showSyncBack) {
       const activeLineId = `line-${currentSectionIndex}-${activeLineIndex}`;
-      const targetLine = document.getElementById(activeLineId);
+      
+      // ✅ SURGICAL FIX: Isolate the query to ONLY the active song's container!
+      const activeContainer = trackScrollRefs.current[currentTrackIndex]?.current;
+      const targetLine = activeContainer?.querySelector(`#${activeLineId}`) || document.getElementById(activeLineId);
+      
       if (targetLine) {
         if ((window as any)._autoScrollTimeout) clearTimeout((window as any)._autoScrollTimeout);
         isAutoScrollingRef.current = true;
@@ -279,7 +410,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         (window as any)._autoScrollTimeout = setTimeout(() => { isAutoScrollingRef.current = false; }, 550); 
       }
     }
-  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack]);
+  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack, currentTrackIndex]);
 
   useEffect(() => {
     let reqId: number;
@@ -951,7 +1082,9 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
       
-      {/* ✅ Hide the Header in Zen Mode */}
+      {/* ========================================================================= */}
+      {/* ✅ HEADER: Outside the swipe canvas so it remains perfectly fixed */}
+      {/* ========================================================================= */}
       {!isZenMode && (
         <LiveHeader 
           activeSong={activeSong} activeDisplayKey={activeDisplayKey} currentDriftMs={currentDriftMs}
@@ -963,78 +1096,114 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           isSimplifiedMode={isSimplifiedMode}
           localClickVolume={localClickVolume}
           wakeUpAudioEngine={initAudioContext}
-          // ✅ SURGICAL FIX: Pass the sound preference to the header!
           metronomeSoundType={metronomeSoundType}
-        />
-      )}
-
-      {isSimplifiedMode ? (
-        <SimplifiedStackView 
-          setlistAst={memoizedSetlistAst}
-          memoizedSongAstTree={memoizedSongAstTree} currentSectionIndex={currentSectionIndex} queuedSectionIndex={queuedSectionIndex}
-          queuedTrackIndex={queuedTrackIndex} currentTrackIndex={currentTrackIndex} activeLineIndex={activeLineIndex}
-          chordFormat={chordFormat} activeDisplayKey={activeDisplayKey} getSectionDurationString={getSectionDurationString}
-          simplifiedProgressBarRef={simplifiedProgressBarRef} upcomingTrackItem={tracksList[currentTrackIndex + 1] || null}
-          
-          // ✅ SURGICAL ADDITIONS: Phase 3 Interactivity & Typography 
-          handleSectionInteractiveSelection={handleSectionInteractiveSelection}
-          handleUserSelectTrackBadge={handleUserSelectTrackBadge}
-          showChords={showChords}
-          lyricsFontSize={lyricsFontSize}
-          lineSpacing={lineSpacing}
-        />
-      ) : (
-        <StandardSheetView 
-          memoizedSongAstTree={memoizedSongAstTree} isPlayingFlow={isPlayingFlow} playingTrackIndex={playingTrackIndex}
-          currentTrackIndex={currentTrackIndex} currentSectionIndex={currentSectionIndex} queuedTrackIndex={queuedTrackIndex}
-          queuedSectionIndex={queuedSectionIndex} getSectionDurationString={getSectionDurationString} handleSectionInteractiveSelection={handleSectionInteractiveSelection}
-          sectionRefs={sectionRefs} activeLineIndex={activeLineIndex} showChords={showChords} lyricsFontSize={lyricsFontSize}
-          lineSpacing={lineSpacing} chordFormat={chordFormat} activeDisplayKey={activeDisplayKey} upcomingTrackItem={tracksList[currentTrackIndex + 1] || null}
-          handleUserSelectTrackBadge={handleUserSelectTrackBadge} scrollContainerRef={scrollContainerRef}
-          isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack} 
-        />
-      )}
-
-      {showSyncBack && isPlayingFlow && (
-        <button type="button" onClick={() => {
-          if (currentTrackIndex !== playingTrackIndexRef.current) mountTargetSetlistTrackIndex(playingTrackIndexRef.current);
-          else {
-            const targetElement = isPlayingRef.current ? document.getElementById(`line-${currentSectionIndex}-${activeLineIndex}`) || sectionRefs.current[sections[currentSectionIndex]?.id] : sectionRefs.current[sections[currentSectionIndex]?.id];
-            if (targetElement) { isAutoScrollingRef.current = true; targetElement.scrollIntoView({ behavior: "smooth", block: "center" }); setShowSyncBack(false); setTimeout(() => { isAutoScrollingRef.current = false; }, 550); }
+          activeSectionName={sectionsRef.current[currentSectionIndex]?.section_name || "---"}
+          nextSectionName={
+            (queuedSectionIndexRef.current !== null && queuedTrackIndexRef.current !== null)
+              ? "QUEUED" 
+              : sectionsRef.current[currentSectionIndex + 1]?.section_name || "END"
           }
-        }} className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100000] bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-full shadow-2xl flex items-center gap-1.5 animate-in fade-in slide-in-from-bottom-3 duration-200 cursor-pointer active:scale-95 transition-all border border-blue-500/20">🎯 Sync Back</button>
-      )}
-
-      <ScrubberOverlay 
-        sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={queuedTrackIndex} currentTrackIndex={currentTrackIndex}
-        queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} sectionRefs={sectionRefs} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
-        // ✅ SURGICAL ADDITIONS
-        isSimplifiedMode={isSimplifiedMode}
-        tracksList={tracksList}
-        handleUserSelectTrackBadge={handleUserSelectTrackBadge}
-      />
-
-      {/* ✅ Hide the Scrubber in Zen Mode */}
-      {!isZenMode && (
-        <ScrubberOverlay 
-          sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={queuedTrackIndex} currentTrackIndex={currentTrackIndex}
-          queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} sectionRefs={sectionRefs} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
-          // ✅ SURGICAL ADDITIONS
-          isSimplifiedMode={isSimplifiedMode}
-          tracksList={tracksList}
-          handleUserSelectTrackBadge={handleUserSelectTrackBadge}
+          handleSyncBack={() => setShowSyncBack(false)}
+          showSyncBack={showSyncBack} 
+          // ✅ SURGICAL FIX: Hands the active ref directly to the Header!
+          scrollContainerRef={trackScrollRefs.current[currentTrackIndex]} 
         />
       )}
 
-      {/* ✅ ZEN MODE ELEMENTS */}
+      {/* ========================================================================= */}
+      {/* ✅ HORIZONTAL CAROUSEL CANVAS */}
+      {/* ========================================================================= */}
+      <div 
+        className="flex-1 flex flex-row w-full h-full relative"
+        style={{ 
+          transform: `translateX(calc(${-currentTrackIndex * 100}% + ${swipeOffsetX}px))`, 
+          transition: swipeTransition ? 'transform 0.35s cubic-bezier(0.32, 0.72, 0, 1)' : 'none',
+          overscrollBehaviorX: 'none',
+          // 1. ✅ SURGICAL FIX: explicitly tell the browser to allow vertical scrolling gestures!
+          touchAction: 'pan-y' 
+        }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+      >
+        {memoizedSetlistAst.map((trackAst, idx) => {
+          const isActive = idx === currentTrackIndex;
+          
+          const localScrollRef = trackScrollRefs.current[idx];
+          const localSectionRefs = trackSectionRefs.current[idx];
+
+          return (
+            // 2. ✅ SURGICAL FIX: Added `flex flex-col` so the inner scroll container knows how to shrink!
+            <div key={trackAst.trackId} className="w-full h-full shrink-0 relative flex flex-col">
+              
+              {isSimplifiedMode ? (
+                <SimplifiedStackView
+                  setlistAst={memoizedSetlistAst}
+                  memoizedSongAstTree={isActive ? memoizedSongAstTree : trackAst.ast} 
+                  currentSectionIndex={isActive ? currentSectionIndex : 0} 
+                  queuedSectionIndex={isActive ? queuedSectionIndex : null}
+                  queuedTrackIndex={isActive ? queuedTrackIndex : null} 
+                  currentTrackIndex={idx} 
+                  activeLineIndex={isActive ? activeLineIndex : 0}
+                  chordFormat={chordFormat} 
+                  activeDisplayKey={isActive ? activeDisplayKey : trackAst.displayKey} 
+                  getSectionDurationString={getSectionDurationString}
+                  simplifiedProgressBarRef={isActive ? simplifiedProgressBarRef : { current: null }} 
+                  upcomingTrackItem={tracksList[idx + 1] || null}
+                  handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+                  handleUserSelectTrackBadge={handleUserSelectTrackBadge}
+                  showChords={showChords} lyricsFontSize={lyricsFontSize} lineSpacing={lineSpacing}
+                />
+             ) : (
+                <StandardSheetView 
+                  memoizedSongAstTree={isActive ? memoizedSongAstTree : trackAst.ast} 
+                  isPlayingFlow={isActive ? isPlayingFlow : false} 
+                  playingTrackIndex={playingTrackIndex}
+                  currentTrackIndex={idx} 
+                  currentSectionIndex={isActive ? currentSectionIndex : 0} 
+                  queuedTrackIndex={isActive ? queuedTrackIndex : null}
+                  queuedSectionIndex={isActive ? queuedSectionIndex : null} 
+                  getSectionDurationString={getSectionDurationString} 
+                  handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+                  activeLineIndex={isActive ? activeLineIndex : 0} 
+                  showChords={showChords} lyricsFontSize={lyricsFontSize}
+                  lineSpacing={lineSpacing} chordFormat={chordFormat} 
+                  activeDisplayKey={isActive ? activeDisplayKey : trackAst.displayKey} 
+                  upcomingTrackItem={tracksList[idx + 1] || null}
+                  handleUserSelectTrackBadge={handleUserSelectTrackBadge} 
+                  isAutoScrollingRef={isActive ? isAutoScrollingRef : { current: false }} 
+                  setShowSyncBack={isActive ? setShowSyncBack : () => {}} 
+                  // ✅ Feed the independent refs in
+                  sectionRefs={localSectionRefs} 
+                  scrollContainerRef={localScrollRef}
+                />
+              )}
+
+              {/* The Scrubber slides in and out attached to the active song */}
+              {isActive && !isZenMode && (
+                <ScrubberOverlay 
+                  sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={queuedTrackIndex} currentTrackIndex={currentTrackIndex}
+                  queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
+                  isSimplifiedMode={isSimplifiedMode} tracksList={tracksList} handleUserSelectTrackBadge={handleUserSelectTrackBadge}
+                  // ✅ Feed the independent refs in
+                  sectionRefs={localSectionRefs} 
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ========================================================================= */}
+      {/* ✅ OVERLAYS & MODALS: Locked rigidly to the viewport */}
+      {/* ========================================================================= */}
       {isZenMode && (
          <>
-           {/* ✅ Dedicated Pointer-Events-None Gradient Overlay sitting on top of everything! */}
            <div 
              ref={zenOverlayRef} 
              className="fixed inset-0 pointer-events-none z-[400000] opacity-0"
            />
-           
            <ZenMovableFAB 
              isMD={localPresenceUser?.isMD} 
              isPlayingFlow={isPlayingFlow} 
@@ -1048,13 +1217,9 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       <SettingsModal
         isSettingsModalOpen={isSettingsModalOpen} setIsSettingsModalOpen={setIsSettingsModalOpen} localPresenceUser={localPresenceUser} onlineUsers={onlineUsers} handleToggleMusicDirectorMode={handleToggleMusicDirectorMode}
         showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode}
-        
         isZenMode={isZenMode} setIsZenMode={setIsZenMode}
-        
-        // ✅ Added the sound state props here
-        metronomeSoundType={metronomeSoundType} // or metronomeSoundTypeRef.current depending on your hook
+        metronomeSoundType={metronomeSoundType} 
         setMetronomeSoundType={setMetronomeSoundType}
-        
         lineSpacing={lineSpacing} setLineSpacing={setLineSpacing} lyricsFontSize={lyricsFontSize} setLyricsFontSize={setLyricsFontSize}
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}
         localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume} audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
@@ -1063,7 +1228,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         canEditSong={canEditSong} 
         isRecording={isRecording} setIsRecordModalOpen={setIsRecordModalOpen} 
         recordingStartTime={recordingStartTime}
-        isPaused={isPaused} recordingAccumulatedMs={recordingAccumulatedMs} // ✅ Passed here
+        isPaused={isPaused} recordingAccumulatedMs={recordingAccumulatedMs} 
         isPlayingFlow={isPlayingFlow} router={router} handleOpenTransposerModal={() => setIsTransposerOpen(true)} setIsStructureModalOpen={setIsStructureModalOpen}
       />
 
@@ -1087,7 +1252,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       <AddBlockModal 
         isAddBlockModalOpen={isAddBlockModalOpen} 
         setIsAddBlockModalOpen={setIsAddBlockModalOpen} 
-        // ✅ SURGICAL FIX: Feed the smart database results into the modal
         availableSectionNames={availableSongSections}
         handleModalAppendNewSectionItem={async (name) => {
           if (!activeSong) return;
@@ -1111,75 +1275,32 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       />
 
       <RecordRehearsalModal 
-        isRecordModalOpen={isRecordModalOpen} 
-        setIsRecordModalOpen={setIsRecordModalOpen} 
-        isMD={localPresenceUser?.isMD}
-        isRecording={isRecording}
-        isPaused={isPaused} // ✅ Passed here
-        recordingStartTime={recordingStartTime}
-        recordingAccumulatedMs={recordingAccumulatedMs} // ✅ Passed here
-        history={rehearsalHistory}
+        isRecordModalOpen={isRecordModalOpen} setIsRecordModalOpen={setIsRecordModalOpen} isMD={localPresenceUser?.isMD} isRecording={isRecording}
+        isPaused={isPaused} recordingStartTime={recordingStartTime} recordingAccumulatedMs={recordingAccumulatedMs} history={rehearsalHistory}
         onStartRecording={async () => {
           if (!localPresenceUser?.isMD) return;
-          const now = Date.now();
-          setIsRecording(true);
-          setIsPaused(false);
-          setRecordingStartTime(now);
-          
+          const now = Date.now(); setIsRecording(true); setIsPaused(false); setRecordingStartTime(now);
           const isFreshStart = !isPaused && recordingAccumulatedMs === 0;
           let updatedHistory = rehearsalHistoryRef.current;
-          
-          // ✅ SURGICAL FIX: Log "Session Started" OR "Session Resumed"
-          if (isFreshStart) {
-            updatedHistory = [{ timestamp: now, title: "🎙️ New Recording Session", label: "Session Initiated" }, ...rehearsalHistoryRef.current].slice(0, 100);
-          } else {
-            updatedHistory = [{ timestamp: now, title: "▶️ Session Resumed", label: "Timer continued" }, ...rehearsalHistoryRef.current].slice(0, 100);
-          }
+          if (isFreshStart) { updatedHistory = [{ timestamp: now, title: "🎙️ New Recording Session", label: "Session Initiated" }, ...rehearsalHistoryRef.current].slice(0, 100);
+          } else { updatedHistory = [{ timestamp: now, title: "▶️ Session Resumed", label: "Timer continued" }, ...rehearsalHistoryRef.current].slice(0, 100); }
           setRehearsalHistory(updatedHistory);
-
-          await supabase.from('setlists').update({ 
-            is_recording: true, 
-            is_paused: false, 
-            recording_start_time: now,
-            rehearsal_history: updatedHistory,
-            ...(isFreshStart ? { recording_accumulated_ms: 0 } : {})
-          }).eq('id', setlistId).then();
+          await supabase.from('setlists').update({ is_recording: true, is_paused: false, recording_start_time: now, rehearsal_history: updatedHistory, ...(isFreshStart ? { recording_accumulated_ms: 0 } : {}) }).eq('id', setlistId).then();
         }}
         onPauseRecording={async () => {
           if (!localPresenceUser?.isMD || !recordingStartTime) return;
-          const now = Date.now();
-          const newAccumulated = recordingAccumulatedMs + (now - recordingStartTime);
-          setIsPaused(true);
-          setRecordingAccumulatedMs(newAccumulated);
-
-          // ✅ SURGICAL FIX: Log the Pause event
+          const now = Date.now(); const newAccumulated = recordingAccumulatedMs + (now - recordingStartTime);
+          setIsPaused(true); setRecordingAccumulatedMs(newAccumulated);
           const updatedHistory = [{ timestamp: now, title: "⏸️ Session Paused", label: "Timer halted" }, ...rehearsalHistoryRef.current].slice(0, 100);
           setRehearsalHistory(updatedHistory);
-
-          await supabase.from('setlists').update({ 
-            is_paused: true, 
-            recording_accumulated_ms: newAccumulated,
-            rehearsal_history: updatedHistory
-          }).eq('id', setlistId).then();
+          await supabase.from('setlists').update({ is_paused: true, recording_accumulated_ms: newAccumulated, rehearsal_history: updatedHistory }).eq('id', setlistId).then();
         }}
         onStopRecording={async () => {
           if (!localPresenceUser?.isMD) return;
-          const now = Date.now();
-          setIsRecording(false);
-          setIsPaused(false);
-          setRecordingAccumulatedMs(0);
-
-          // ✅ SURGICAL FIX: Log the Stop event
+          const now = Date.now(); setIsRecording(false); setIsPaused(false); setRecordingAccumulatedMs(0);
           const updatedHistory = [{ timestamp: now, title: "⏹️ Session Ended", label: "Recording finalized" }, ...rehearsalHistoryRef.current].slice(0, 100);
           setRehearsalHistory(updatedHistory);
-
-          await supabase.from('setlists').update({ 
-            is_recording: false, 
-            is_paused: false,
-            recording_start_time: null,
-            recording_accumulated_ms: 0,
-            rehearsal_history: updatedHistory
-          }).eq('id', setlistId).then();
+          await supabase.from('setlists').update({ is_recording: false, is_paused: false, recording_start_time: null, recording_accumulated_ms: 0, rehearsal_history: updatedHistory }).eq('id', setlistId).then();
         }}
       />
 
@@ -1190,12 +1311,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
       <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>
       
-      {/* ✅ SURGICAL FIX: Unified Pre-Roll & Buffering Overlay */}
       {(countdownValue !== null || isYtBuffering) && (
         <div className="fixed inset-0 z-[400000] bg-zinc-950/90 backdrop-blur-md flex flex-col items-center justify-center animate-in fade-in duration-100 select-none touch-none">
           {countdownValue !== null ? (
             <>
-              {/* Prioritize the countdown, but acknowledge buffering if it's happening */}
               <span className={`font-black tracking-widest uppercase mb-4 text-xl md:text-2xl animate-pulse ${isYtBuffering ? 'text-amber-500' : 'text-blue-500'}`}>
                 {isYtBuffering ? "Buffering & Syncing Engine" : "Pre-Warming Sync Engine"}
               </span>
@@ -1205,7 +1324,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
             </>
           ) : (
             <>
-              {/* Fallback to infinity if the countdown finishes but we are still waiting on network lag */}
               <span className="text-red-500 font-black tracking-widest uppercase mb-4 text-xl md:text-2xl animate-pulse">
                 Buffering Backing Track
               </span>

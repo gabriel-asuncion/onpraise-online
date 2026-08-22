@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { createClient } from "../../utils/supabase/client";
 
-type RoleType = "admin" | "moderator" | "musician" | "member" | "none";
+export type RoleType = "admin" | "moderator" | "musician" | "member" | "none";
 
 interface EngineContextProps {
   simulatedRole: RoleType;

@@ -6,13 +6,20 @@ import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
 import GlobalLoader from "../../../components/GlobalLoader";
 
+interface PendingSong {
+  id: string;
+  title: string;
+  artist?: string | null;
+  approval_status?: string;
+}
+
 export default function ApprovalsDashboardPage() {
   const supabase = createClient();
   const router = useRouter();
   const { activeRole } = useEngine();
 
   const [loading, setLoading] = useState(true);
-  const [pendingSongs, setPendingSongs] = useState<any[]>([]);
+  const [pendingSongs, setPendingSongs] = useState<PendingSong[]>([]);
   const [processingId, setProcessingId] = useState<string | null>(null);
 
   // Security Gate: Bounce unauthorized users back to the songs list
@@ -31,7 +38,7 @@ export default function ApprovalsDashboardPage() {
         .order("created_at", { ascending: false });
 
       if (error) throw error;
-      setPendingSongs(data || []);
+      setPendingSongs((data as PendingSong[]) || []);
     } catch (err) {
       console.error("Failed to fetch pending songs:", err);
     } finally {
@@ -41,7 +48,7 @@ export default function ApprovalsDashboardPage() {
 
   useEffect(() => {
     if (activeRole === "admin" || activeRole === "moderator") {
-      fetchPendingSongs();
+      void fetchPendingSongs();
     }
   }, [activeRole]);
 

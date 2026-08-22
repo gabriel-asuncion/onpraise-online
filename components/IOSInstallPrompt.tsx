@@ -1,34 +1,31 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+
+function getPromptState() {
+  if (typeof window === 'undefined') {
+    return { isIOS: false, isStandalone: false, isDismissed: true };
+  }
+
+  const userAgent = window.navigator.userAgent.toLowerCase();
+  const isIOSDevice = /iphone|ipad|ipod/.test(userAgent);
+  const isInstalled =
+    ('standalone' in window.navigator && Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone)) ||
+    window.matchMedia('(display-mode: standalone)').matches;
+  const isDismissed = localStorage.getItem('ios_install_prompt_dismissed') === 'true';
+
+  return { isIOS: isIOSDevice, isStandalone: isInstalled, isDismissed };
+}
 
 export default function IOSInstallPrompt() {
-  const [isIOS, setIsIOS] = useState(false);
-  const [isStandalone, setIsStandalone] = useState(false);
-  const [isDismissed, setIsDismissed] = useState(true); // Default to true to prevent hydration flicker
-
-  useEffect(() => {
-    // 1. Check if the user is on an iOS device (iPhone, iPad, iPod)
-    const userAgent = window.navigator.userAgent.toLowerCase();
-    const isIOSDevice = /iphone|ipad|ipod/.test(userAgent);
-    setIsIOS(isIOSDevice);
-
-    // 2. Check if the app is already installed (standalone mode)
-    const isInstalled = 
-      ('standalone' in window.navigator && (window.navigator as any).standalone) || 
-      window.matchMedia('(display-mode: standalone)').matches;
-    setIsStandalone(isInstalled);
-
-    // 3. Check if the user previously dismissed this exact prompt
-    const dismissed = localStorage.getItem('ios_install_prompt_dismissed') === 'true';
-    setIsDismissed(dismissed);
-  }, []);
+  const { isIOS, isStandalone, isDismissed } = useState(getPromptState)[0];
+  const [, setDismissed] = useState(isDismissed);
 
   // If it's not iOS, or it's already installed, or they dismissed it, render absolutely nothing.
   if (!isIOS || isStandalone || isDismissed) return null;
 
   const handleDismiss = () => {
-    setIsDismissed(true);
+    setDismissed(true);
     localStorage.setItem('ios_install_prompt_dismissed', 'true');
   };
 

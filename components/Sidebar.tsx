@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 // import { usePathname } from "next/navigation";
 import { usePathname, useRouter } from "next/navigation";
@@ -89,12 +89,12 @@ export default function Sidebar() {
     window.addEventListener("scroll", handleScroll, { capture: true, passive: true });
     
     // Listen for the custom Playmode event from the Live page
-    const handlePlaymodeSignal = (e: any) => setIsPlaymodeActive(e.detail);
+    const handlePlaymodeSignal = (e: Event) => setIsPlaymodeActive((e as CustomEvent<boolean>).detail);
     window.addEventListener("onpraise-playmode", handlePlaymodeSignal);
 
     // ✅ SURGICAL ADDITION: Immersive Focus Listener
     // Updated to use the dedicated focus state instead of fighting the scroll state!
-    const handleFocusState = (e: any) => setIsUiFocused(e.detail); 
+    const handleFocusState = (e: Event) => setIsUiFocused((e as CustomEvent<boolean>).detail);
     window.addEventListener("onpraise-ui-focus", handleFocusState);
 
     return () => {
@@ -159,7 +159,7 @@ export default function Sidebar() {
   }
 
   // Sync profile metrics instantly when switching developer identities
-  async function fetchActiveProfileContext() {
+  const fetchActiveProfileContext = useCallback(async () => {
     if (!simulatedUserId) return;
     const { data, error } = await supabase
       .from("profiles")
@@ -173,7 +173,7 @@ export default function Sidebar() {
         ministries: data.ministries || [],
         unavailable_dates: data.unavailable_dates || []
       });
-      
+
       // ✅ Fetch the names of all teams the user belongs to
       if (data.team_id || (data.secondary_team_ids && data.secondary_team_ids.length > 0)) {
         const teamIdsToFetch = [data.team_id, ...(data.secondary_team_ids || [])].filter(Boolean);
@@ -182,7 +182,7 @@ export default function Sidebar() {
             .from("teams")
             .select("id, name")
             .in("id", teamIdsToFetch);
-            
+
           if (teamsData) {
             const map: Record<string, string> = {};
             teamsData.forEach(t => { map[t.id] = t.name; });
@@ -191,11 +191,12 @@ export default function Sidebar() {
         }
       }
     }
-  }
+  }, [simulatedUserId, supabase]);
 
-  useEffect(() => {
-    fetchActiveProfileContext();
-  }, [simulatedUserId, isAccountModalOpen]);
+  const openAccountModal = async () => {
+    await fetchActiveProfileContext();
+    setIsAccountModalOpen(true);
+  };
 
   // ✅ SURGICAL FIX: Compute active selection strings and toggle state dynamically
   const selectedDatesStr: string[] = [];
@@ -305,7 +306,9 @@ export default function Sidebar() {
         <div className="w-full flex justify-center pb-6">
           <button 
             type="button"
-            onClick={() => setIsAccountModalOpen(true)}
+            onClick={() => {
+              void openAccountModal();
+            }}
             className={`w-11 h-11 rounded-full bg-blue-600 text-white font-black text-xs flex items-center justify-center shadow-md border-2 transition-all hover:scale-110 active:scale-95 cursor-pointer ${
               simulatedRole !== "none" ? "border-amber-400 ring-4 ring-amber-400/20" : "border-zinc-100 hover:border-blue-300"
             }`}
@@ -371,7 +374,9 @@ export default function Sidebar() {
         <div className="flex-1 flex items-center justify-center h-full">
           <button 
             type="button"
-            onClick={() => setIsAccountModalOpen(true)}
+            onClick={() => {
+              void openAccountModal();
+            }}
             className={`w-8 h-8 rounded-full bg-blue-600 text-white font-black text-[10px] flex items-center justify-center shadow-sm border transition-all active:scale-95 cursor-pointer ${
               simulatedRole !== "none" ? "border-amber-400 ring-2 ring-amber-400/10" : "border-zinc-100"
             }`}

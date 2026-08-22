@@ -23,7 +23,7 @@ const Blob = ({
     className={`absolute z-0 opacity-70 ${animClass}`} 
     style={{ animationDelay: delay, top, left, right, bottom, width: w }}
   >
-    <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    {/* <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
       <path fill={color} d="M45.7,-76.3C58.9,-69.3,69.1,-55.3,77.5,-41.1C85.9,-26.9,92.5,-12.4,90.4,1.4C88.4,15.2,77.7,28.3,67.6,40.4C57.5,52.5,48,63.6,35.5,70.5C23,77.4,7.5,80.1,-6.9,78C-21.3,75.9,-34.5,69.1,-46.8,60.8C-59.1,52.5,-70.5,42.7,-78.6,30.3C-86.7,17.9,-91.5,2.9,-88.4,-10.8C-85.3,-24.5,-74.3,-36.9,-62,-46.1C-49.7,-55.3,-36.1,-61.3,-23.1,-68.2C-10.1,-75.1,2.3,-82.9,16.4,-82.6C30.5,-82.3,46,-73.9,45.7,-76.3Z" transform="translate(100 100)" />
       {hasEyes && (
         <>
@@ -31,7 +31,7 @@ const Blob = ({
           <circle cx="115" cy="90" r="8" fill="white" className="animate-blink" />
         </>
       )}
-    </svg>
+    </svg> */}
   </div>
 );
 
@@ -116,20 +116,15 @@ export default function Home() {
   };
 
   const handleGoogleLogin = async () => {
-    try {
-      console.log("Attempting Google Login...");
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: { 
-          // ✅ SURGICAL FIX: Send them to the cookie-baker first!
-          redirectTo: `${window.location.origin}/auth/callback` 
-        },
-      });
-      if (error) throw error;
-    } catch (err: any) {
-      alert(`Login Blocked: ${err.message || "Check the console for details."}`);
-      console.error("Google OAuth Error:", err);
-    }
+    const supabase = createClient();
+    
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        // ✅ SURGICAL FIX: Force Google to return to your existing route.ts
+        redirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
   };
 
   // ✅ THE SLIDES ARRAY WITH DENSE, UNIQUE BLOB CLUSTERS
@@ -375,16 +370,9 @@ export default function Home() {
         </div>
       </div>
 
-      {/* FIXED WAVE */}
-      <div className="absolute bottom-0 left-0 w-full z-30 pointer-events-none">
-        <svg viewBox="0 0 1440 320" className="w-full h-auto opacity-70">
-          <path fill="#EFF6FF" fillOpacity="1" d="M0,160L48,165.3C96,171,192,181,288,165.3C384,149,480,107,576,112C672,117,768,171,864,186.7C960,203,1056,181,1152,149.3C1248,117,1344,75,1392,53.3L1440,32L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z"></path>
-        </svg>
-        <div className="w-full h-[120px] bg-[#EFF6FF]" /> 
-      </div>
 
       {/* BUTTONS */}
-      <div className="absolute bottom-0 left-0 w-full z-50 p-6 pb-10 pointer-events-auto flex flex-col items-center justify-center bg-gradient-to-t from-[#EFF6FF] via-[#EFF6FF]/80 to-transparent">
+      <div className="absolute bottom-0 left-0 w-full z-50 p-6 pb-10 pointer-events-auto flex flex-col items-center justify-center">
         
         {/* ✅ SURGICAL ADDITION: Native PWA Install Button */}
         {/* ✅ SHOW THIS IF THEY HAVE NOT INSTALLED IT YET */}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useEngine } from "../app/context/EngineContext";
+import { useEngine, type RoleType } from "../app/context/EngineContext";
 import { createClient } from "../utils/supabase/client";
 
 interface DBProfileRow {
@@ -31,7 +31,7 @@ export default function DevFab() {
   // Master Global User Directory Management Modals
   const [isGlobalModalOpen, setIsGlobalModalOpen] = useState(false);
   const [globalProfiles, setGlobalProfiles] = useState<DBProfileRow[]>([]);
-  const [availableTeams, setAvailableTeams] = useState<any[]>([]); 
+  const [availableTeams, setAvailableTeams] = useState<Array<{ id: string; name: string }>>([]);
   const [loadingProfiles, setLoadingProfiles] = useState(false);
   
   // ✅ ADDED: Search Filter State
@@ -201,8 +201,9 @@ export default function DevFab() {
       setGlobalProfiles(prev => prev.map(p => 
         p.id === userId ? { ...p, role: newRole } : p
       ));
-    } catch (error: any) {
-      alert(`Failed to change role: ${error.message}`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Unknown role update error.";
+      alert(`Failed to change role: ${message}`);
     }
   }
 
@@ -237,7 +238,7 @@ export default function DevFab() {
             <span className="text-zinc-400 font-medium">Access Role</span>
             <select 
               value={simulatedRole} 
-              onChange={(e) => setSimulatedRole(e.target.value as any)}
+              onChange={(e) => setSimulatedRole(e.target.value as RoleType)}
               className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[11px] font-black text-white outline-none cursor-pointer focus:border-blue-500"
             >
               <option value="admin">ADMIN</option>

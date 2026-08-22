@@ -6,7 +6,6 @@ import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext"; 
 import GlobalLoader from '../../../components/GlobalLoader';
 
-// ✅ BROWING THE CORE HOOKS FROM THE LIVE ENGINE
 import { useTimesync } from '../../../hooks/useTimesync';
 import { useWakeLock } from "../../setlists/[id]/live/hooks/useWakeLock";
 import { useWebAudioEngine } from "../../setlists/[id]/live/hooks/useWebAudioEngine";
@@ -14,7 +13,6 @@ import { useLocalPreferences } from "../../setlists/[id]/live/hooks/useLocalPref
 import { useYouTubeSync } from "../../setlists/[id]/live/hooks/useYouTubeSync";
 import { useHardwareClock } from "../../setlists/[id]/live/hooks/useHardwareClock";
 
-// ✅ BORROWING THE CORE UI COMPONENTS FROM THE LIVE ENGINE
 import { LiveHeader } from "../../setlists/[id]/live/components/LiveHeader";
 import { SimplifiedStackView } from "../../setlists/[id]/live/components/SimplifiedStackView";
 import { StandardSheetView } from "../../setlists/[id]/live/components/StandardSheetView";
@@ -37,7 +35,7 @@ export default function SoloPracticeRoomPage() {
   const songId = params?.id as string;
 
   const { getGlobalTime } = useTimesync();
-  const { activeRole } = useEngine(); // ✅ Added to calculate permissions
+  const { activeRole } = useEngine(); 
   useWakeLock();
   
   const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext } = useWebAudioEngine();
@@ -52,7 +50,6 @@ export default function SoloPracticeRoomPage() {
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled
   } = useLocalPreferences();
 
-  // ✅ SOLO STATE (Replaces useSetlistData)
   const [loading, setLoading] = useState(true);
   const [activeSong, setActiveSong] = useState<SongRecord | null>(null);
   const [sections, setSections] = useState<ArrangementSection[]>([]);
@@ -61,8 +58,6 @@ export default function SoloPracticeRoomPage() {
   const activeSongRef = useRef<SongRecord | null>(null);
   const sectionsRef = useRef<ArrangementSection[]>([]);
 
-  // ✅ MOCKED SOLO MD STATE
-  // The local user is always the Dictator in a solo practice room.
   const localPresenceUser = { id: "solo_local", isMD: true, name: "You" };
   const localPresenceUserRef = useRef<any>(localPresenceUser);
 
@@ -93,7 +88,6 @@ export default function SoloPracticeRoomPage() {
   const [activeLineIndex, setActiveLineIndex] = useState<number>(0);
   const [showSyncBack, setShowSyncBack] = useState<boolean>(false);
 
-  // In Solo mode, Track Index is always 0
   const currentTrackIndex = 0;
   const currentTrackIndexRef = useRef(0);
   const [playingTrackIndex, setPlayingTrackIndex] = useState<number>(0);
@@ -118,7 +112,6 @@ export default function SoloPracticeRoomPage() {
   const sectionStartTimeRef = useRef<number>(0);
   const pauseOffsetMsRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
-  const sectionRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
   const audioContextStartTimeRef = useRef<number | null>(null);
   const astTreeRef = useRef<CompiledSectionToken[]>([]);
   const mdSectionStartTimeRef = useRef<number | null>(null);
@@ -126,16 +119,26 @@ export default function SoloPracticeRoomPage() {
 
   const backdropProgressRef = useRef<HTMLDivElement | null>(null);
   const accentProgressBarRef = useRef<HTMLDivElement | null>(null);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const simplifiedProgressBarRef = useRef<HTMLDivElement | null>(null);
+  
+  // ✅ EXACT MATCH: Uses the exact array structure as the Live Page to guarantee the internal refs attach properly[cite: 5]
+  const mockedSoloTrackList = useMemo(() => activeSong ? [{ id: "solo", songs: activeSong, custom_key: activeDisplayKey, custom_structure: sections }] : [], [activeSong, activeDisplayKey, sections]);
+  
+  const trackScrollRefs = useRef<React.MutableRefObject<HTMLDivElement | null>[]>([]);
+  if (trackScrollRefs.current.length !== mockedSoloTrackList.length) {
+    trackScrollRefs.current = mockedSoloTrackList.map((_, i) => trackScrollRefs.current[i] || { current: null });
+  }
+
+  const trackSectionRefs = useRef<React.MutableRefObject<{ [key: string]: HTMLDivElement | null }>[]>([]);
+  if (trackSectionRefs.current.length !== mockedSoloTrackList.length) {
+    trackSectionRefs.current = mockedSoloTrackList.map((_, i) => trackSectionRefs.current[i] || { current: {} });
+  }
   
   const metronomeRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
   const scheduledClicksRef = useRef<{ source: AudioBufferSourceNode, audioTime: number }[]>([]);
 
-  // ✅ SOLO FETCH LOGIC
   useEffect(() => {
     async function fetchSoloSong() {
-      // 1. Fetch the song AND its associated lyrics from the song_sections table
       const { data: song, error } = await supabase
         .from('songs')
         .select('*, song_sections(*)')
@@ -149,28 +152,20 @@ export default function SoloPracticeRoomPage() {
 
         let parsedSections: any[] = [];
         
-        // 2. Map the structure and inject the raw text content from song_sections
         if (song.default_structure && Array.isArray(song.default_structure) && song.default_structure.length > 0) {
            parsedSections = song.default_structure.map((ds: any) => {
               const matchedText = song.song_sections?.find((ss: any) => ss.section_name === ds.section_name);
-              return { 
-                ...ds, 
-                content: ds.content || matchedText?.content || "" 
-              };
+              return { ...ds, content: ds.content || matchedText?.content || "" };
            });
         } else if (song.song_sections && song.song_sections.length > 0) {
-           // Fallback: If no custom structure was saved, just render all available sections
            parsedSections = song.song_sections.map((ss: any) => ({
-              id: ss.id,
-              section_name: ss.section_name,
-              content: ss.content
+              id: ss.id, section_name: ss.section_name, content: ss.content
            }));
         }
 
         setSections(parsedSections);
         sectionsRef.current = parsedSections;
 
-        // Preload standard audio files
         const uniqueFiles = new Set<string>();
         parsedSections.forEach((section: any) => {
           const fileName = normalizeSectionNameToAudioFile(section.section_name);
@@ -178,11 +173,9 @@ export default function SoloPracticeRoomPage() {
         });
         uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${fileName}.wav`, fileName));
 
-        // ✅ SURGICAL FIX: Auto-enable YouTube Sync if the song has a backing track!
         if (song.youtube_url && song.youtube_url.trim() !== "") {
           setIsYoutubeSyncEnabled(true);
         }
-
         setLoading(false);
       } else {
         router.push("/songs");
@@ -217,7 +210,9 @@ export default function SoloPracticeRoomPage() {
   useEffect(() => {
     if (isPlayingFlow && !showSyncBack) {
       const activeLineId = `line-${currentSectionIndex}-${activeLineIndex}`;
-      const targetLine = document.getElementById(activeLineId);
+      const activeContainer = trackScrollRefs.current[currentTrackIndex]?.current;
+      const targetLine = activeContainer?.querySelector(`#${activeLineId}`) || document.getElementById(activeLineId);
+      
       if (targetLine) {
         if ((window as any)._autoScrollTimeout) clearTimeout((window as any)._autoScrollTimeout);
         isAutoScrollingRef.current = true;
@@ -225,9 +220,8 @@ export default function SoloPracticeRoomPage() {
         (window as any)._autoScrollTimeout = setTimeout(() => { isAutoScrollingRef.current = false; }, 550); 
       }
     }
-  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack]);
+  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack, currentTrackIndex]);
 
-  // TESTING ENGINE
   useEffect(() => {
     let reqId: number;
     const testAudioRef = { current: 1 };
@@ -347,9 +341,9 @@ export default function SoloPracticeRoomPage() {
       return null;
     },
     executeJumpNow, localPresenceUserRef, 
-    sendSupabaseBroadcast: () => {}, // Nullified for Solo Mode
+    sendSupabaseBroadcast: () => {}, 
     updateMetronomeUI, activeLineIndexRef, setActiveLineIndex, 
-    handleAdvanceToNextSetlistTrack: () => { handleResetFlowTrigger(); }, // Stops at the end of the song
+    handleAdvanceToNextSetlistTrack: () => { handleResetFlowTrigger(); }, 
     sectionStartTimeRef, pauseOffsetMsRef, animationFrameRef, playingTrackIndexRef
   });
 
@@ -511,7 +505,7 @@ export default function SoloPracticeRoomPage() {
     });
   }, [sections, runtimeSemitoneDelta]);
 
-  beatMapRef.current = useMemo(() => {
+  const beatMap = useMemo(() => {
     const map: BeatNode[] = []; const sectionStartBeats: number[] = []; let currentAbsoluteBeat = 0;
     if (!activeSong || sections.length === 0) return { totalBeats: 0, nodes: [], sectionStartBeats: [] };
 
@@ -522,7 +516,7 @@ export default function SoloPracticeRoomPage() {
       const headBeats = (timings.head_m || 0) * 4;
       const tailBeats = (timings.tail_m || 0) * 4;
       
-      let totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
+      const totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
       let baseLoopBeats = totalCoreBeats / sectionMultiplier;
       
       const parsedLinesCount = memoizedSongAstTree[sIdx]?.lines.length || 1;
@@ -560,7 +554,11 @@ export default function SoloPracticeRoomPage() {
 
     return { totalBeats: currentAbsoluteBeat, nodes: map, sectionStartBeats };
   }, [activeSong, sections, memoizedSongAstTree]);
-  useEffect(() => { astTreeRef.current = memoizedSongAstTree; }, [memoizedSongAstTree]);
+
+  useEffect(() => {
+    beatMapRef.current = beatMap;
+    astTreeRef.current = memoizedSongAstTree;
+  }, [beatMap, memoizedSongAstTree]);
 
   const getSectionDurationString = (sectionName: string, sectionIdx?: number) => {
     const timings = activeSong?.section_timings?.[sectionName] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
@@ -586,12 +584,10 @@ export default function SoloPracticeRoomPage() {
 
   if (loading) return <GlobalLoader message="LOADING SONG..." />;
 
-  // Mocking the Track Tray for 1-to-1 UI Parity
-  const mockedSoloTrackList = activeSong ? [{ id: "solo", songs: activeSong, custom_key: activeDisplayKey, custom_structure: sections }] : [];
-
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
       
+      {/* ✅ EXACT MATCH: Passed props identically to page_4 to ensure internal UI/Scroll hooks function[cite: 5] */}
       {!isZenMode && (
         <LiveHeader 
           activeSong={activeSong} activeDisplayKey={activeDisplayKey} currentDriftMs={null}
@@ -600,61 +596,67 @@ export default function SoloPracticeRoomPage() {
           handleToggleFlowPlaybackState={handleToggleFlowPlaybackState} displayedOnlineUsers={[]}
           tracksList={mockedSoloTrackList as any} currentTrackIndex={0} handleUserSelectTrackBadge={() => {}}
           backdropProgressRef={backdropProgressRef} accentProgressBarRef={accentProgressBarRef}
-          isSoloMode={true} // ✅ Instantly strips away the lobby and track switcher clutter!
-          wakeUpAudioEngine={initAudioContext}
+          isSoloMode={true} 
+          isSimplifiedMode={isSimplifiedMode}
           localClickVolume={localClickVolume}
+          wakeUpAudioEngine={initAudioContext}
+          metronomeSoundType={metronomeSoundType}
+          activeSectionName={sectionsRef.current[currentSectionIndex]?.section_name || "---"}
+          nextSectionName={
+            (queuedSectionIndexRef.current !== null && queuedTrackIndexRef.current !== null)
+              ? "QUEUED" 
+              : sectionsRef.current[currentSectionIndex + 1]?.section_name || "END"
+          }
+          handleSyncBack={() => setShowSyncBack(false)}
+          showSyncBack={showSyncBack} 
+          scrollContainerRef={trackScrollRefs.current[0]}
         />
       )}
 
-      {isSimplifiedMode ? (
-          <SimplifiedStackView 
-            memoizedSongAstTree={memoizedSongAstTree} 
-            currentSectionIndex={currentSectionIndex}
-            queuedSectionIndex={queuedSectionIndex}
-            queuedTrackIndex={null} 
-            currentTrackIndex={0} 
-            activeLineIndex={activeLineIndex}
-            chordFormat={chordFormat} 
-            activeDisplayKey={activeDisplayKey} 
-            getSectionDurationString={getSectionDurationString}
-            // ✅ SURGICAL FIX: Passed the missing progress bar ref
-            simplifiedProgressBarRef={simplifiedProgressBarRef}
-            upcomingTrackItem={null}
-            showChords={showChords}
-            lyricsFontSize={lyricsFontSize}
-            lineSpacing={lineSpacing}
-            handleSectionInteractiveSelection={(idx: number) => {
-              console.log("Section clicked in solo mode:", idx);
-            }}
-            handleUserSelectTrackBadge={(idx: number) => {
-              // Not used in solo mode, but TS requires it
-            }}
-          />
-      ) : (
-        <StandardSheetView 
-          memoizedSongAstTree={memoizedSongAstTree} isPlayingFlow={isPlayingFlow} playingTrackIndex={0}
-          currentTrackIndex={0} currentSectionIndex={currentSectionIndex} queuedTrackIndex={null}
-          queuedSectionIndex={queuedSectionIndex} getSectionDurationString={getSectionDurationString} handleSectionInteractiveSelection={handleSectionInteractiveSelection}
-          sectionRefs={sectionRefs} activeLineIndex={activeLineIndex} showChords={showChords} lyricsFontSize={lyricsFontSize}
-          lineSpacing={lineSpacing} chordFormat={chordFormat} activeDisplayKey={activeDisplayKey} upcomingTrackItem={null}
-          handleUserSelectTrackBadge={() => {}} scrollContainerRef={scrollContainerRef}
-          isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack} 
-        />
-      )}
+      {/* ✅ EXACT MATCH: Restored the flex-row container that wraps the SheetView and Scrubber[cite: 5] */}
+      <div className="flex-1 flex flex-row w-full h-full relative" style={{ overscrollBehaviorX: 'none', touchAction: 'pan-y' }}>
+        <div className="w-full h-full shrink-0 relative flex flex-col">
+          {isSimplifiedMode ? (
+              <SimplifiedStackView 
+                memoizedSongAstTree={memoizedSongAstTree} 
+                currentSectionIndex={currentSectionIndex}
+                queuedSectionIndex={queuedSectionIndex}
+                queuedTrackIndex={null} 
+                currentTrackIndex={0} 
+                activeLineIndex={activeLineIndex}
+                chordFormat={chordFormat} 
+                activeDisplayKey={activeDisplayKey} 
+                getSectionDurationString={getSectionDurationString}
+                simplifiedProgressBarRef={simplifiedProgressBarRef}
+                upcomingTrackItem={null}
+                showChords={showChords}
+                lyricsFontSize={lyricsFontSize}
+                lineSpacing={lineSpacing}
+                handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+                handleUserSelectTrackBadge={() => {}}
+              />
+          ) : (
+            <StandardSheetView 
+              memoizedSongAstTree={memoizedSongAstTree} isPlayingFlow={isPlayingFlow} playingTrackIndex={0}
+              currentTrackIndex={0} currentSectionIndex={currentSectionIndex} queuedTrackIndex={null}
+              queuedSectionIndex={queuedSectionIndex} getSectionDurationString={getSectionDurationString} handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+              sectionRefs={trackSectionRefs.current[0]} activeLineIndex={activeLineIndex} showChords={showChords} lyricsFontSize={lyricsFontSize}
+              lineSpacing={lineSpacing} chordFormat={chordFormat} activeDisplayKey={activeDisplayKey} upcomingTrackItem={null}
+              handleUserSelectTrackBadge={() => {}} scrollContainerRef={trackScrollRefs.current[0]}
+              isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack} 
+            />
+          )}
 
-      {showSyncBack && isPlayingFlow && (
-        <button type="button" onClick={() => {
-          const targetElement = isPlayingRef.current ? document.getElementById(`line-${currentSectionIndex}-${activeLineIndex}`) || sectionRefs.current[sections[currentSectionIndex]?.id] : sectionRefs.current[sections[currentSectionIndex]?.id];
-          if (targetElement) { isAutoScrollingRef.current = true; targetElement.scrollIntoView({ behavior: "smooth", block: "center" }); setShowSyncBack(false); setTimeout(() => { isAutoScrollingRef.current = false; }, 550); }
-        }} className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100000] bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-full shadow-2xl flex items-center gap-1.5 animate-in fade-in slide-in-from-bottom-3 duration-200 cursor-pointer active:scale-95 transition-all border border-blue-500/20">🎯 Sync Back</button>
-      )}
-
-      {!isZenMode && (
-        <ScrubberOverlay 
-          sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={null} currentTrackIndex={0}
-          queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} sectionRefs={sectionRefs} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
-        />
-      )}
+          {/* ✅ EXACT MATCH: ScrubberOverlay now sits side-by-side inside the scroll wrapper[cite: 5] */}
+          {!isZenMode && (
+            <ScrubberOverlay 
+              sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={null} currentTrackIndex={0}
+              queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} sectionRefs={trackSectionRefs.current[0]} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
+              isSimplifiedMode={isSimplifiedMode} tracksList={mockedSoloTrackList as any} handleUserSelectTrackBadge={() => {}}
+            />
+          )}
+        </div>
+      </div>
 
       {isZenMode && (
          <>
@@ -676,7 +678,6 @@ export default function SoloPracticeRoomPage() {
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
         isYoutubeSyncEnabled={isYoutubeSyncEnabled} setIsYoutubeSyncEnabled={setIsYoutubeSyncEnabled} youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}
         canEditSong={["admin", "moderator", "musician"].includes(activeRole)} 
-        // ✅ SURGICAL FIX: Dummy values to satisfy TypeScript in the Solo room!
         isRecording={false}
         setIsRecordModalOpen={() => {}} 
         isPlayingFlow={isPlayingFlow} router={router as any} handleOpenTransposerModal={() => setIsTransposerOpen(true)} setIsStructureModalOpen={() => {}}

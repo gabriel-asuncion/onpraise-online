@@ -402,9 +402,19 @@ export default function EventCockpitPage() {
     if (activeRole !== "admin" || !selectedNewSongId) return;
     const songToAdd = allDatabaseSongs.find(s => s.id === selectedNewSongId);
     if (!songToAdd) return;
-    const optimisticItem: SetlistSongItem = { id: `temp-${Date.now()}`, sequence_order: stagedSetlistSongs.length + 1, start_time: "08:30", assigned_user_ids: [], parent_group: null, group_name: null, songs: songToAdd };
-    setStagedSetlistSongs(prev => [...prev, optimisticItem]);
-    setHasSetlistChanges(true); setSelectedNewSongId(""); setSongSearchQuery(""); setIsSongDropdownOpen(false);
+    
+    const newOrder = setlistSongs.length + 1;
+    // 1. Optimistic UI Update
+    const optimisticItem: SetlistSongItem = { id: `temp-${Date.now()}`, sequence_order: newOrder, start_time: "08:30", assigned_user_ids: [], parent_group: null, group_name: null, songs: songToAdd };
+    setSetlistSongs(prev => [...prev, optimisticItem]);
+    setSelectedNewSongId(""); setSongSearchQuery(""); setIsSongDropdownOpen(false);
+
+    // 2. Background Auto-Save
+    await supabase.from('setlist_songs').insert({ 
+      setlist_id: selectedSetlistId, song_id: songToAdd.id, sequence_order: newOrder, start_time: "08:30" 
+    });
+    // 3. Re-fetch to replace the temp ID with the real database UUID
+    await fetchLiveSetlistTracks(selectedSetlistId); 
   }
 
   async function saveSetlistChanges() {
@@ -429,36 +439,66 @@ export default function EventCockpitPage() {
     setIsDeploying(false);
   }
 
-  function handleSaveTimeSelection() {
+  async function handleSaveTimeSelection() {
     if (!timePickerTargetItemId) return;
     let finalHour = parseInt(selectedHour, 10);
     if (selectedPeriod === "PM" && finalHour !== 12) finalHour += 12;
     if (selectedPeriod === "AM" && finalHour === 12) finalHour = 0;
     const formatted24hTime = `${String(finalHour).padStart(2, "0")}:${selectedMinute}`;
-    setStagedSetlistSongs(prev => prev.map(s => s.id === timePickerTargetItemId ? { ...s, start_time: formatted24hTime } : s));
-    setHasSetlistChanges(true); setIsTimePickerOpen(false); setTimePickerTargetItemId(null);
+    
+    // 1. Optimistic UI Update
+    setSetlistSongs(prev => prev.map(s => s.id === timePickerTargetItemId ? { ...s, start_time: formatted24hTime } : s));
+    const targetId = timePickerTargetItemId;
+    setIsTimePickerOpen(false); setTimePickerTargetItemId(null);
+
+    // 2. Background Auto-Save
+    if (!targetId.startsWith('temp-')) {
+      await supabase.from('setlist_songs').update({ start_time: formatted24hTime }).eq('id', targetId);
+    }
   }
 
   // Drag and drop sequencing
   function handleDragStart(index: number) { if (activeRole === "admin") setDraggedSongIndex(index); }
+  
   function handleDragOver(e: React.DragEvent, targetIndex: number) {
     e.preventDefault();
     if (draggedSongIndex === null || draggedSongIndex === targetIndex || activeRole !== "admin") return;
-    const reorderedSongs = [...stagedSetlistSongs];
+    const reorderedSongs = [...setlistSongs];
     const [removed] = reorderedSongs.splice(draggedSongIndex, 1);
     reorderedSongs.splice(targetIndex, 0, removed);
-    setStagedSetlistSongs(reorderedSongs.map((song, i) => ({ ...song, sequence_order: i + 1 })));
+    // Optimistic UI Update (Fires continuously while dragging)
+    setSetlistSongs(reorderedSongs.map((song, i) => ({ ...song, sequence_order: i + 1 })));
     setDraggedSongIndex(targetIndex);
-    setHasSetlistChanges(true);
+  }
+
+  async function handleDragEnd() {
+    setDraggedSongIndex(null);
+    if (activeRole !== "admin") return;
+    
+    // Background Auto-Save (Fires concurrent updates for the new sequence)
+    const promises = setlistSongs
+      .filter(s => !s.id.startsWith('temp-'))
+      .map(song => supabase.from('setlist_songs').update({ sequence_order: song.sequence_order }).eq('id', song.id));
+      
+    await Promise.all(promises);
   }
 
   function handleToggleCheckboxSelect(id: string) { setSelectedForGroup(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); }
 
-  function applyGroupTransformation() {
+  async function applyGroupTransformation() {
     if (selectedForGroup.length === 0 || activeRole !== "admin") return;
     const finalGroupName = customGroupName.trim() || null;
-    const updatedSongs = stagedSetlistSongs.map(song => selectedForGroup.includes(song.id) ? { ...song, group_name: finalGroupName, group_color: selectedGroupColor } : song);
-    setStagedSetlistSongs(updatedSongs); setHasSetlistChanges(true); setSelectedForGroup([]); setCustomGroupName("");
+    const selectedIds = [...selectedForGroup];
+    
+    // 1. Optimistic UI Update
+    const updatedSongs = setlistSongs.map(song => selectedIds.includes(song.id) ? { ...song, group_name: finalGroupName, group_color: selectedGroupColor } : song);
+    setSetlistSongs(updatedSongs); 
+    setSelectedForGroup([]); setCustomGroupName("");
+
+    // 2. Background Auto-Save
+    await supabase.from('setlist_songs')
+      .update({ group_name: finalGroupName, group_color: selectedGroupColor })
+      .in('id', selectedIds.filter(id => !id.startsWith('temp-')));
   }
 
   const songFilteredDatabaseSongs = allDatabaseSongs.filter(s => s.title.toLowerCase().includes(songSearchQuery.toLowerCase()));
@@ -527,7 +567,27 @@ export default function EventCockpitPage() {
             </div>
           </div>
           <div className="ml-3 flex items-center shrink-0" onClick={e => e.stopPropagation()}>
-            {activeRole === "admin" && ( <button onClick={() => setStagedSetlistSongs(prev => prev.filter(s => s.id !== item.id)) } className="w-8 h-8 rounded-full bg-red-50 text-red-500 hover:bg-red-100 flex items-center justify-center transition-colors">✕</button> )}
+            {activeRole === "admin" && ( 
+              <button 
+                onClick={async () => {
+                  // 1. Optimistic UI Update: Instantly remove it from the visual lists
+                  setStagedSetlistSongs(prev => prev.filter(s => s.id !== item.id));
+                  setSetlistSongs(prev => prev.filter(s => s.id !== item.id)); // Sync the base state
+                  
+                  // 2. Background Auto-Save: Instantly delete it from Supabase
+                  if (!item.id.startsWith('temp-')) {
+                    const { error } = await supabase.from('setlist_songs').delete().eq('id', item.id);
+                    if (error) {
+                      console.error("Auto-save delete failed:", error.message);
+                      // Optional: You could fetchLiveSetlistTracks here to revert the UI on failure
+                    }
+                  }
+                }} 
+                className="w-8 h-8 rounded-full bg-red-50 text-red-500 hover:bg-red-100 flex items-center justify-center transition-colors"
+              >
+                ✕
+              </button> 
+            )}
           </div>
         </div>
       );
@@ -828,13 +888,7 @@ export default function EventCockpitPage() {
               {parentBlockRowsRenderer(treeBlocks, isEditingSetlist)}
             </div>
 
-            <div className={`bg-white border-t p-4 px-6 flex items-center justify-between transition-all duration-300 ${hasSetlistChanges && activeRole === "admin" ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'}`}>
-              <p className="text-xs font-bold text-zinc-500">Setlist track variations changes staged</p>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={() => { fetchLiveSetlistTracks(selectedSetlistId); setHasSetlistChanges(false); setSelectedForGroup([]); }} className="px-4 py-2 text-xs font-bold text-zinc-400">Discard</button>
-                <button type="button" onClick={saveSetlistChanges} disabled={isDeploying} className="px-5 py-2 text-xs font-black text-white bg-blue-600 rounded-xl shadow-md">Save Layout</button>
-              </div>
-            </div>
+            
           </div>
         </div>
       )}

@@ -29,6 +29,8 @@ export interface SetlistTrackItem {
   custom_key?: string; 
   custom_structure?: ArrangementSection[] | null;
   songs: SongRecord | null;
+  group_name?: string | null;
+  group_color?: string | null;
 }
 
 export interface ArrangementSection {

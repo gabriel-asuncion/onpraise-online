@@ -49,24 +49,24 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #18181b;
+  --card-foreground: #fafafa;
+  --popover: #18181b;
+  --popover-foreground: #fafafa;
+  --primary: #3b82f6;
+  --primary-foreground: #fafafa;
+  --secondary: #27272a;
+  --secondary-foreground: #fafafa;
+  --muted: #27272a;
+  --muted-foreground: #a1a1aa;
+  --accent: #1e3a8a;
+  --accent-foreground: #bfdbfe;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: rgba(148, 163, 184, 0.22);
+  --input: rgba(148, 163, 184, 0.22);
+  --ring: rgba(37, 99, 235, 0.7);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -84,24 +84,24 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #18181b;
+  --card-foreground: #fafafa;
+  --popover: #18181b;
+  --popover-foreground: #fafafa;
+  --primary: #3b82f6;
+  --primary-foreground: #fafafa;
+  --secondary: #27272a;
+  --secondary-foreground: #fafafa;
+  --muted: #27272a;
+  --muted-foreground: #a1a1aa;
+  --accent: #1e3a8a;
+  --accent-foreground: #bfdbfe;
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --ring: rgba(37, 99, 235, 0.8);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -121,10 +121,290 @@
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
-  }
   html {
+    color-scheme: dark;
+    background: var(--background);
     @apply font-sans;
   }
+  body {
+    @apply bg-background text-foreground;
+    background: var(--background);
+    min-height: 100vh;
+    color: var(--foreground);
+  }
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+body [class*="bg-white"],
+body [class*="bg-[#f8f9fa]"],
+body [class*="bg-[#f3f4f6]"] {
+  background-color: #18181b !important;
+}
+
+body [class*="bg-zinc-50"],
+body [class*="bg-zinc-100"],
+body [class*="bg-zinc-200"],
+body [class*="bg-zinc-300"],
+body [class*="bg-slate-900"],
+body [class*="bg-slate-800"] {
+  background-color: #27272a !important;
+}
+
+body [class*="bg-zinc-900"] {
+  background-color: #18181b !important;
+}
+
+body [class*="text-zinc-900"],
+body [class*="text-zinc-800"],
+body [class*="text-zinc-700"],
+body [class*="text-zinc-950"],
+body [class*="text-slate-900"],
+body [class*="text-slate-800"],
+body [class*="text-slate-700"] {
+  color: #fafafa !important;
+}
+
+body [class*="text-zinc-500"],
+body [class*="text-slate-500"] {
+  color: #71717a !important;
+}
+
+body [class*="text-zinc-400"],
+body [class*="text-zinc-300"],
+body [class*="text-zinc-600"],
+body [class*="text-slate-400"],
+body [class*="text-slate-600"] {
+  color: #a1a1aa !important;
+}
+
+body [class*="border-zinc-200"],
+body [class*="border-zinc-100"],
+body [class*="border-zinc-400"],
+body [class*="border-zinc-500"],
+body [class*="border-zinc-600"],
+body [class*="border-slate-700"],
+body [class*="border-slate-600"] {
+  border-color: #27272a !important;
+}
+
+body [class*="border-zinc-300"],
+body [class*="border-zinc-400"],
+body [class*="border-zinc-500"],
+body [class*="border-zinc-600"],
+body [class*="border-slate-700"],
+body [class*="border-slate-600"] {
+  border-color: #3f3f46 !important;
+}
+
+body [class*="divide-zinc-100"],
+body [class*="divide-zinc-200"] {
+  border-color: rgba(148, 163, 184, 0.18) !important;
+}
+
+body .shadow-sm,
+body .shadow-md,
+body .shadow-lg,
+body .shadow-xl,
+body .shadow-2xl,
+body .shadow {
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.38) !important;
+}
+
+body .bg-blue-600,
+body .bg-blue-500,
+body .hover\:bg-blue-600:hover,
+body .hover\:bg-blue-500:hover {
+  background-color: #3b82f6 !important;
+}
+
+body .text-blue-600,
+body .text-blue-500,
+body .hover\:text-blue-600:hover {
+  color: #60a5fa !important;
+}
+
+body .border-blue-500,
+body .border-blue-600 {
+  border-color: #3f3f46 !important;
+}
+
+body .bg-white\/10,
+body .bg-white\/20,
+body .bg-white\/30,
+body .bg-white\/40,
+body .bg-white\/50,
+body .bg-white\/80,
+body .bg-white\/95 {
+  background-color: rgba(24, 24, 27, 0.92) !important;
+}
+
+body .text-white {
+  color: #f8fafc !important;
+}
+
+body .bg-transparent {
+  background: transparent !important;
+}
+
+body .backdrop-blur-md,
+body .backdrop-blur-xl,
+body .backdrop-blur-sm {
+  backdrop-filter: blur(12px);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.7);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(96, 165, 250, 0.72);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* =======================================================
+   DARK MODE EXCEPTIONS & UI COMPONENT OVERRIDES (V2)
+   ======================================================= */
+
+/* 1. PASTEL BACKGROUNDS -> Deep Translucent "Neon" Backgrounds */
+body [class*="bg-blue-50"], body [class*="bg-blue-100"] {
+  background-color: rgba(30, 58, 138, 0.3) !important; /* blue-900/30 */
+}
+body [class*="bg-red-50"], body [class*="bg-red-100"] {
+  background-color: rgba(127, 29, 29, 0.3) !important; /* red-900/30 */
+}
+body [class*="bg-emerald-50"], body [class*="bg-emerald-100"] {
+  background-color: rgba(6, 78, 59, 0.3) !important; /* emerald-900/30 */
+}
+body [class*="bg-purple-50"], body [class*="bg-purple-100"] {
+  background-color: rgba(88, 28, 135, 0.3) !important; /* purple-900/30 */
+}
+body [class*="bg-indigo-50"], body [class*="bg-indigo-100"] {
+  background-color: rgba(49, 46, 129, 0.3) !important; /* indigo-900/30 */
+}
+body [class*="bg-slate-50"], body [class*="bg-slate-100"] {
+  background-color: rgba(39, 39, 42, 0.5) !important; /* zinc-800/50 */
+}
+
+/* 2. PENDING APPROVAL & HOLLOW BADGES */
+/* Strips the solid background to match the hollow UI badge style (Chords/YouTube) */
+body [class*="bg-amber-50"], body [class*="bg-amber-100"], body [class*="bg-[#fef3c7]"] {
+  background-color: transparent !important;
+  border: 1px solid rgba(245, 158, 11, 0.5) !important;
+}
+
+/* 3. LYRICS FIX -> Remove blue alternating backgrounds */
+/* Forces alternating lyric row colors to be transparent, but respects the active line highlight! */
+body [class*="odd:bg-blue-"], 
+body [class*="even:bg-blue-"] {
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* 4. DOCKED PLAYER VS GLOBAL NAV DISTINCTION */
+/* Pushes the Global Nav to true black so it sits at the absolute bottom */
+body nav.fixed.bottom-0 {
+  background-color: #09090b !important; 
+  border-top: 1px solid #27272a !important;
+}
+/* Elevates the Docked LiveHeader slightly above it with a lighter surface and shadow */
+body .fixed.z-\[150000\], body .fixed.z-\[100\] {
+  background-color: #18181b !important;
+  border-top: 1px solid #3f3f46 !important;
+  box-shadow: 0 -15px 40px rgba(0,0,0,0.8) !important;
+}
+
+/* 5. FULLSCREEN HEADER ACTIVE TRACK BORDER */
+/* Replaces the harsh 1px blue shadow with a sleek glowing active state */
+body [class*="shadow-[0_0_0_1px_rgba(59,130,246,1)]"] {
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.6) !important;
+  background-color: rgba(59, 130, 246, 0.1) !important;
+  border-color: transparent !important;
+}
+
+/* 6. TEXT COLORS -> Brightened for Dark Mode Contrast */
+body [class*="text-blue-600"], body [class*="text-blue-700"] {
+  color: #60a5fa !important; /* blue-400 */
+}
+body [class*="text-amber-500"], body [class*="text-amber-600"], body [class*="text-amber-700"], body [class*="text-[#b45309]"] {
+  color: #fbbf24 !important; /* amber-400 */
+}
+body [class*="text-red-500"], body [class*="text-red-600"], body [class*="text-red-700"] {
+  color: #f87171 !important; /* red-400 */
+}
+body [class*="text-emerald-500"], body [class*="text-emerald-600"], body [class*="text-emerald-700"] {
+  color: #34d399 !important; /* emerald-400 */
+}
+body [class*="text-purple-500"], body [class*="text-purple-600"], body [class*="text-purple-700"] {
+  color: #c084fc !important; /* purple-400 */
+}
+body [class*="text-indigo-500"], body [class*="text-indigo-600"], body [class*="text-indigo-700"] {
+  color: #818cf8 !important; /* indigo-400 */
+}
+
+/* 7. BORDER COLORS -> Darkened Translucent Borders */
+body [class*="border-blue-100"], body [class*="border-blue-200"] {
+  border-color: rgba(30, 58, 138, 0.6) !important; /* blue-800/60 */
+}
+body [class*="border-amber-100"], body [class*="border-amber-200"] {
+  border-color: rgba(146, 64, 14, 0.6) !important; /* amber-800/60 */
+}
+body [class*="border-red-100"], body [class*="border-red-200"] {
+  border-color: rgba(153, 27, 27, 0.6) !important; /* red-800/60 */
+}
+body [class*="border-emerald-100"], body [class*="border-emerald-200"] {
+  border-color: rgba(6, 78, 59, 0.6) !important; /* emerald-800/60 */
+}
+body [class*="border-purple-100"], body [class*="border-purple-200"] {
+  border-color: rgba(107, 33, 168, 0.6) !important; /* purple-800/60 */
+}
+body [class*="border-indigo-100"], body [class*="border-indigo-200"] {
+  border-color: rgba(55, 48, 163, 0.6) !important; /* indigo-800/60 */
+}
+
+/* 8. BLOB LOADERS -> Monochromatic Dark Blue Shades */
+body .animate-morph-squish path, 
+body .animate-pulse-ghost path {
+  fill: rgba(30, 58, 138, 0.4) !important; 
+}
+body svg path[fill="#10B981"], body svg path[fill="#ef4444"], body svg path[fill="#f59e0b"] { 
+  fill: rgba(30, 58, 138, 0.7) !important; 
+}
+body svg path[fill="#34D399"], body svg path[fill="#8b5cf6"], body svg path[fill="#6366f1"] { 
+  fill: rgba(30, 58, 138, 0.4) !important; 
+}
+body svg path[fill="#A7F3D0"], body svg path[fill="#cbd5e1"], body svg path[fill="#fca5a5"] { 
+  fill: rgba(30, 58, 138, 0.2) !important; 
+}
+
+/* 9. GRADIENTS -> Kill Light Mode Fades */
+body [class*="from-white"], body [class*="from-zinc-50"] {
+  --tw-gradient-from: #18181b !important; 
+  --tw-gradient-to: rgba(24, 24, 27, 0) !important;
+  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+}
+body [class*="to-zinc-50"], body [class*="to-zinc-100"], body [class*="to-white"] {
+  --tw-gradient-to: #18181b !important; 
 }

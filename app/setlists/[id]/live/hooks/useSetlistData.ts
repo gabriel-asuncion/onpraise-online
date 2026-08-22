@@ -41,7 +41,7 @@ export function useSetlistData(setlistId: string, supabase: any) {
 
         const primaryResponse = await supabase
           .from("setlist_songs")
-          .select("id, sequence_order, start_time, custom_key, custom_structure, songs (*)")
+          .select("id, sequence_order, start_time, custom_key, custom_structure, group_name, group_color, songs (*)")
           .eq("setlist_id", setlistId)
           .order("sequence_order", { ascending: true });
 
@@ -49,7 +49,7 @@ export function useSetlistData(setlistId: string, supabase: any) {
         if (primaryResponse.error) {
           const fallbackResponse = await supabase
             .from("setlist_songs")
-            .select("id, sequence_order, start_time, custom_key, songs (*)")
+            .select("id, sequence_order, start_time, custom_key, group_name, group_color, songs (*)")
             .eq("setlist_id", setlistId)
             .order("sequence_order", { ascending: true });
           rawQueryData = fallbackResponse.data;

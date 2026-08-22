@@ -195,7 +195,7 @@ export function SettingsModal(props: SettingsModalProps) {
                 </div>
               </button>
               
-              <div className="px-2 pb-2 mt-1">
+              <div className="pb-2 mt-1">
                 <button 
                   type="button" 
                   onClick={() => setIsMixerOpen(true)}

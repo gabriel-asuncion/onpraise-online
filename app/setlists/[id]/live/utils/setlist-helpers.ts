@@ -48,14 +48,14 @@ export const getSectionAbbreviation = (name: string): string => {
 };
 
 export const getSectionColorClass = (name: string): string => {
-  if (!name) return 'border-zinc-300 text-zinc-500';
+  if (!name) return 'border-zinc-700/50 text-zinc-400 bg-zinc-800/30';
   const lower = name.toLowerCase();
-  if (lower.includes('verse')) return 'border-[#71cbf4] text-[#4db3df] bg-[#eefaff]';
-  if (lower.includes('chorus')) return 'border-[#fcbca0] text-[#ea9772] bg-[#fff5f0]';
-  if (lower.includes('pre')) return 'border-[#fbd277] text-[#e0a82e] bg-[#fffbf0]';
-  if (lower.includes('bridge')) return 'border-[#d0a7f1] text-[#aa73d7] bg-[#fbf5ff]';
-  if (lower.includes('intro') || lower.includes('outro')) return 'border-[#a7f1d0] text-[#69c79e] bg-[#f0fdf6]';
-  return 'border-zinc-300 text-zinc-500 bg-zinc-50';
+  if (lower.includes('verse')) return 'border-cyan-800/50 text-cyan-400 bg-cyan-900/30';
+  if (lower.includes('chorus')) return 'border-rose-800/50 text-rose-400 bg-rose-900/30';
+  if (lower.includes('pre')) return 'border-amber-800/50 text-amber-400 bg-amber-900/30';
+  if (lower.includes('bridge')) return 'border-purple-800/50 text-purple-400 bg-purple-900/30';
+  if (lower.includes('intro') || lower.includes('outro')) return 'border-emerald-800/50 text-emerald-400 bg-emerald-900/30';
+  return 'border-zinc-700/50 text-zinc-400 bg-zinc-800/30';
 };
 
 export type SongContentType = "Chords + Lyrics" | "Chords" | "Lyrics" | "Empty";

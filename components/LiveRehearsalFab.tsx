@@ -25,18 +25,16 @@ export default function LiveRehearsalFab() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  const [position, setPosition] = useState({ x: 0, y: 0 }); 
+  const [position, setPosition] = useState(() => ({
+    x: typeof window === "undefined" ? 0 : window.innerWidth - 64,
+    y: typeof window === "undefined" ? 0 : window.innerHeight - 64,
+  }));
   const [isDragging, setIsDragging] = useState(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
   const dragOffset = useRef({ x: 0, y: 0 });
   const isMovedRef = useRef(false);
-  const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
-    setIsMounted(true);
-    // ✅ Spawn perfectly snapped into the bottom-right corner
-    setPosition({ x: window.innerWidth - 64, y: window.innerHeight - 64 });
-
     // ✅ SURGICAL FIX: Keep it glued to the correct corner during window resizes
     const handleResize = () => {
       setPosition((prev) => {
@@ -91,13 +89,13 @@ export default function LiveRehearsalFab() {
 
         if (data) {
           const validEvents = data
-            .map((row: any) => {
+            .map((row: Record<string, unknown>) => {
               const joinedKey = Object.keys(row).find(k => typeof row[k] === 'object' && row[k] !== null);
-              let evNode = joinedKey ? row[joinedKey] : (row.events || row.event);
-              if (Array.isArray(evNode)) evNode = evNode[0];
-              return evNode;
+              const candidate = joinedKey ? row[joinedKey as keyof typeof row] : (row.events ?? row.event);
+              const evNode = Array.isArray(candidate) ? candidate[0] : candidate;
+              return evNode as AssignedEvent | null;
             })
-            .filter((e: any) => e !== null && e !== undefined) as AssignedEvent[];
+            .filter((e): e is AssignedEvent => e !== null && e !== undefined);
 
           const today = new Date();
           today.setHours(0, 0, 0, 0); 
@@ -111,8 +109,9 @@ export default function LiveRehearsalFab() {
           const uniqueEvents = Array.from(new Map(upcomingEvents.map(e => [e.id, e])).values());
           setAssignedEvents(uniqueEvents);
         }
-      } catch (err: any) {
-        console.error("Failed to load rehearsal fab events:", err?.message || err);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Unknown event fetch error.";
+        console.error("Failed to load rehearsal fab events:", message);
       } finally {
         setLoading(false);
       }
@@ -121,7 +120,6 @@ export default function LiveRehearsalFab() {
     fetchAssignedEvents();
   }, [simulatedUserId]);
 
-  if (!isMounted) return null;
   if (pathname === "/" || pathname?.includes("/login") || pathname?.includes("/auth") || pathname?.includes("/live")) return null;
   if (loading || assignedEvents.length === 0) return null;
 

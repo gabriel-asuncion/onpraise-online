@@ -78,7 +78,7 @@ export function StandardSheetView(props: StandardSheetViewProps) {
                 <span className="text-[10px] font-mono font-bold text-zinc-400">⏱ {formattedDuration}</span>
               </div>
 
-              <div className="pl-0.5 select-text selection:bg-blue-50 text-zinc-800 space-y-0.5 mt-2">
+              <div className="pl-0.5 select-text text-zinc-800 space-y-0.5 mt-2">
                 {section.lines.length === 0 ? <div className="h-4" /> : section.lines.map((line, lIdx) => {
                   const isCurrentlyPlayingLine = isThisSectionActivePlayback && activeLineIndex === lIdx;
                   return (
