@@ -135,8 +135,6 @@ export default function SoloPracticeRoomPage() {
   }
   
   const metronomeRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
-  const scheduledClicksRef = useRef<{ source: AudioBufferSourceNode, audioTime: number }[]>([]);
-
   useEffect(() => {
     async function fetchSoloSong() {
       const { data: song, error } = await supabase
@@ -235,11 +233,7 @@ export default function SoloPracticeRoomPage() {
         const audioBeat = Math.floor(elapsed / 500) % 4 + 1; 
         if (audioBeat !== testAudioRef.current) {
            testAudioRef.current = audioBeat;
-           triggerMetronomeSound(audioBeat);
-           if (isDoubleMetronomeEnabledRef.current) {
-             const audioCtx = getAudioContext();
-             if (audioCtx) triggerMetronomeSound(2, audioCtx.currentTime + 0.25);
-           }
+          
         }
         const visElapsed = elapsed - audioLatencyOffsetMs;
         const visBeat = Math.floor(Math.max(0, visElapsed) / 500) % 4 + 1;
@@ -286,19 +280,6 @@ export default function SoloPracticeRoomPage() {
     }
   };
 
-  const triggerMetronomeSound = (beatNum: number, time: number = 0) => {
-    if (!isMetronomeSoundEnabledRef.current) return;
-    const type = metronomeSoundTypeRef.current;
-    const targetKey = beatNum === 1 ? `metronome_${type}_1` : `metronome_${type}_2`;
-    const source = playZeroLatencyAudio(targetKey, localClickVolumeRef.current, time);
-    if (source) {
-      scheduledClicksRef.current.push({ source, audioTime: time });
-      source.onended = () => {
-        const idx = scheduledClicksRef.current.findIndex(s => s.source === source);
-        if (idx > -1) scheduledClicksRef.current.splice(idx, 1);
-      };
-    }
-  };
 
   const beatMapRef = useRef<CompiledBeatMap>({ totalBeats: 0, nodes: [], sectionStartBeats: [] });
 
@@ -331,7 +312,7 @@ export default function SoloPracticeRoomPage() {
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
     audioLatencyOffsetMs, isYtBackingTrackStartRef, countdownValueRef, setCountdownValue,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef, playGuideCue,
-    queuedSectionIndexRef, queuedTrackIndexRef, audioContextStartTimeRef, getAudioContext, triggerMetronomeSound,
+    queuedSectionIndexRef, queuedTrackIndexRef, audioContextStartTimeRef, getAudioContext,
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
     getYoutubeTime: () => {
@@ -384,17 +365,13 @@ export default function SoloPracticeRoomPage() {
             }, timeUntilPlayMs);
           } catch(e) {}
         }
-        if (timeUntilJumpMs >= 3000 && !isYtBackingTrackStartRef.current) {
-          triggerMetronomeSound(2, absoluteHardwareTimeAtJump - 3); triggerMetronomeSound(2, absoluteHardwareTimeAtJump - 2); triggerMetronomeSound(1, absoluteHardwareTimeAtJump - 1); 
-        }
+        
       }
     }
     currentSectionIndexRef.current = targetSectionIdx; setCurrentSectionIndex(targetSectionIdx);
     lastAudioBeatRef.current = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0; 
     lastBeatRef.current = 0; lastVisualBeatRef.current = 0;
     setQueuedSectionIndex(null); pendingQuantizedJumpRef.current = null;
-    scheduledClicksRef.current.forEach(click => { try { click.source.stop(); click.source.disconnect(); } catch(e) {} });
-    scheduledClicksRef.current = []; hasPlayedCueRef.current = false; 
     
     setShowSyncBack(false);
 
@@ -409,8 +386,6 @@ export default function SoloPracticeRoomPage() {
   function executeLocalResetSequence() {
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    scheduledClicksRef.current.forEach(click => { try { click.source.stop(); click.source.disconnect(); } catch(e) {} });
-    scheduledClicksRef.current = [];
     if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
     currentSectionIndexRef.current = 0; lastBeatRef.current = 0; activeLineIndexRef.current = 0;
     setCurrentSectionIndex(0); updateMetronomeUI(1, false); setActiveLineIndex(0);
@@ -464,11 +439,6 @@ export default function SoloPracticeRoomPage() {
           jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
           pendingQuantizedJumpRef.current = { trackIndex: 0, sectionIndex: index, jumpTime };
           const audioCtx = getAudioContext();
-          if (audioCtx) {
-            const audioJumpTime = audioCtx.currentTime + ((jumpTime - getGlobalTime()) / 1000);
-            scheduledClicksRef.current.forEach(click => { if (click.audioTime >= audioJumpTime - 0.05) { try { click.source.stop(); click.source.disconnect(); } catch(e) {} } });
-            scheduledClicksRef.current = scheduledClicksRef.current.filter(click => click.audioTime < audioJumpTime - 0.05);
-          }
           setQueuedSectionIndex(index);
           if (sectionsRef.current[index]) playGuideCue(sectionsRef.current[index].section_name);
           hasPlayedCueRef.current = true; 

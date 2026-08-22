@@ -127,73 +127,43 @@ export default function SetlistPerformanceRoomPage() {
   // ✅ SURGICAL ADDITION: Smart Available Sections Fetcher
   const [availableSongSections, setAvailableSongSections] = useState<string[]>([]);
 
-  // ✅ SURGICAL FIX: Swipe Gesture Tracking Refs
-  const touchStartX = useRef<number | null>(null);
-  const touchStartY = useRef<number | null>(null);
 
-  // ✅ SURGICAL FIX: Swipe Navigation Handlers
-  const handleTouchStart = (e: React.TouchEvent) => {
-    touchStartX.current = e.touches[0].clientX;
-    touchStartY.current = e.touches[0].clientY;
-  };
-
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    if (touchStartX.current === null || touchStartY.current === null) return;
-    
-    // Safety check: Don't trigger swipes if a full-screen modal is open
-    if (isSettingsModalOpen || isStructureModalOpen || isTransposerOpen || isRecordModalOpen) return;
-
-    const touchEndX = e.changedTouches[0].clientX;
-    const touchEndY = e.changedTouches[0].clientY;
-
-    const deltaX = touchEndX - touchStartX.current;
-    const deltaY = touchEndY - touchStartY.current;
-
-    // The swipe must be at least 75px wide, and the horizontal movement 
-    // must be at least twice as large as the vertical movement (to ignore sloppy vertical scrolling)
-    if (Math.abs(deltaX) > 75 && Math.abs(deltaX) > Math.abs(deltaY) * 2) {
-      const currentIndex = currentTrackIndexRef.current;
-      
-      if (deltaX > 0) {
-        // Swiped Right -> Previous Song (Left to Right)
-        if (currentIndex > 0) handleUserSelectTrackBadge(currentIndex - 1);
-      } else {
-        // Swiped Left -> Next Song (Right to Left)
-        if (currentIndex < tracksListRef.current.length - 1) handleUserSelectTrackBadge(currentIndex + 1);
-      }
-    }
-
-    touchStartX.current = null;
-    touchStartY.current = null;
-  };
 
   // =========================================================================
-  // ✅ SURGICAL FIX: PHYSICS-BASED DRAG ENGINE
+  // ✅ SURGICAL FIX: UNIFIED PHYSICS-BASED DRAG ENGINE (Mouse + Touch)
   // =========================================================================
   const [swipeOffsetX, setSwipeOffsetX] = useState(0);
   const [swipeTransition, setSwipeTransition] = useState(false);
   
-  const pointerStartX = useRef<number | null>(null);
-  const pointerStartY = useRef<number | null>(null);
+  const dragStartX = useRef<number | null>(null);
+  const dragStartY = useRef<number | null>(null);
   const isDraggingRef = useRef(false);
   const isSwipingRef = useRef(false);
 
-  const handlePointerDown = (e: React.PointerEvent) => {
-    pointerStartX.current = e.clientX;
-    pointerStartY.current = e.clientY;
+  // Safely extracts X and Y coordinates whether the user is touching or clicking
+  const getClientPos = (e: React.TouchEvent | React.MouseEvent) => {
+    if ('touches' in e) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    return { x: (e as React.MouseEvent).clientX, y: (e as React.MouseEvent).clientY };
+  };
+
+  const handleDragStart = (e: React.TouchEvent | React.MouseEvent) => {
+    const { x, y } = getClientPos(e);
+    dragStartX.current = x;
+    dragStartY.current = y;
     isDraggingRef.current = true;
     isSwipingRef.current = false;
     setSwipeTransition(false); // Turn off CSS easing so it sticks perfectly to the finger
   };
 
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!isDraggingRef.current || pointerStartX.current === null || pointerStartY.current === null) return;
+  const handleDragMove = (e: React.TouchEvent | React.MouseEvent) => {
+    if (!isDraggingRef.current || dragStartX.current === null || dragStartY.current === null) return;
     
     // Safety check: Disable drag if modals are open
     if (isSettingsModalOpen || isStructureModalOpen || isTransposerOpen || isRecordModalOpen) return;
 
-    const deltaX = e.clientX - pointerStartX.current;
-    const deltaY = e.clientY - pointerStartY.current;
+    const { x, y } = getClientPos(e);
+    const deltaX = x - dragStartX.current;
+    const deltaY = y - dragStartY.current;
 
     // Lock into swipe mode if they move 15px horizontally and aren't scrolling vertically
     if (!isSwipingRef.current) {
@@ -207,7 +177,7 @@ export default function SetlistPerformanceRoomPage() {
       const isFirstSong = currentTrackIndexRef.current === 0;
       const isLastSong = currentTrackIndexRef.current === tracksListRef.current.length - 1;
       
-      // Apple-style "Rubber Banding" if you try to swipe past the first/last song
+      // Apple-style "Rubber Banding" if trying to swipe past the first/last song
       if ((isFirstSong && deltaX > 0) || (isLastSong && deltaX < 0)) {
         resistanceDelta = deltaX * 0.25; 
       }
@@ -215,32 +185,27 @@ export default function SetlistPerformanceRoomPage() {
     }
   };
 
-  // ✅ SURGICAL FIX: Streamlined Carousel Swipe Engine
-  const handlePointerUp = (e: React.PointerEvent) => {
+  const handleDragEnd = () => {
     if (!isDraggingRef.current) return;
     isDraggingRef.current = false;
     setSwipeTransition(true); // Turn on CSS easing for the snap animation
 
     if (isSwipingRef.current) {
       const deltaX = swipeOffsetX;
-      const threshold = 100; // Require at least 100px of drag force to commit
+      const threshold = 75; // Lowered to 75px for easier phone swiping
       const currentIndex = currentTrackIndexRef.current;
       
       if (deltaX > threshold && currentIndex > 0) {
-        // Swiped Right -> Previous Song
         handleUserSelectTrackBadge(currentIndex - 1);
       } else if (deltaX < -threshold && currentIndex < tracksListRef.current.length - 1) {
-        // Swiped Left -> Next Song
         handleUserSelectTrackBadge(currentIndex + 1);
       }
-      // Always snap back to 0. The CSS translateX formula will automatically 
-      // shift the whole container based on the new currentTrackIndex!
       setSwipeOffsetX(0); 
     }
     
     isSwipingRef.current = false;
-    pointerStartX.current = null;
-    pointerStartY.current = null;
+    dragStartX.current = null;
+    dragStartY.current = null;
   };
   
   useEffect(() => {
@@ -1072,13 +1037,18 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           transform: `translateX(calc(${-currentTrackIndex * 100}% + ${swipeOffsetX}px))`, 
           transition: swipeTransition ? 'transform 0.35s cubic-bezier(0.32, 0.72, 0, 1)' : 'none',
           overscrollBehaviorX: 'none',
-          // 1. ✅ SURGICAL FIX: explicitly tell the browser to allow vertical scrolling gestures!
           touchAction: 'pan-y' 
         }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+        // ✅ Native Mouse Events
+        onMouseDown={handleDragStart}
+        onMouseMove={handleDragMove}
+        onMouseUp={handleDragEnd}
+        onMouseLeave={handleDragEnd}
+        // ✅ Native Touch Events (Guaranteed to work on iOS/Android)
+        onTouchStart={handleDragStart}
+        onTouchMove={handleDragMove}
+        onTouchEnd={handleDragEnd}
+        onTouchCancel={handleDragEnd}
       >
         {memoizedSetlistAst.map((trackAst, idx) => {
           const isActive = idx === currentTrackIndex;
