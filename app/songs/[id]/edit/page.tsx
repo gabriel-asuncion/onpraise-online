@@ -6,6 +6,15 @@ import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import GlobalLoader from '../../../../components/GlobalLoader';
+// 1. UPDATE YOUR IMPORT AT THE TOP OF page.tsx
+import { 
+  injectChordsIntoGeniusLyrics, 
+  injectChordsIntoStanza, 
+  extractDonorChordsFromChordPro 
+} from "../../utils/chord-injector";
+
+
+
 
 // =======================================================
 // --- TRANSPOSTITION & DIATONIC CONSTANT BLUEPRINTS -----
@@ -245,6 +254,8 @@ const ChordWheelOverlay = ({ config, deck, onSelect, onCancel }: { config: any, 
   );
 };
 
+
+
 export default function SongEditPage() {
   const supabase = createClient();
   const router = useRouter();
@@ -254,6 +265,14 @@ export default function SongEditPage() {
 
   const editorContentContainerRef = useRef<HTMLDivElement | null>(null);
   const { activeRole } = useEngine();
+
+  const [isMappingModalOpen, setIsMappingModalOpen] = useState(false);
+  const [mappingData, setMappingData] = useState<{
+    filledStanzas: { id: string, label: string, text: string }[],
+    unfilledStanzas: { id: string, originalIdx: number, text: string, label: string }[],
+    allStanzas: string[]
+  } | null>(null);
+  const [stanzaMappings, setStanzaMappings] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (activeRole === "member") {
@@ -338,6 +357,28 @@ export default function SongEditPage() {
     if (isPlayerExpanded && deltaY > 0) {
       setPlayerDragY(deltaY);
     }
+  };
+  
+  // ✅ The Execution Engine for Manual Mappings
+  const executeManualStanzaMapping = () => {
+    if (!mappingData) return;
+    
+    const finalStanzas = [...mappingData.allStanzas];
+    
+    mappingData.unfilledStanzas.forEach(unf => {
+      const donorId = stanzaMappings[unf.id];
+      if (donorId && donorId !== "blank") {
+        const donorStanza = mappingData.filledStanzas.find(f => f.id === donorId);
+        if (donorStanza) {
+          // Extract the chords from the chosen filled section, and inject them into the blank one
+          const extractedChords = extractDonorChordsFromChordPro(donorStanza.text);
+          finalStanzas[unf.originalIdx] = injectChordsIntoStanza(unf.text, extractedChords);
+        }
+      }
+    });
+
+    setPastedRawLyricsText(finalStanzas.join("\n\n"));
+    setIsMappingModalOpen(false);
   };
 
   const handlePlayerPointerUp = (e: React.PointerEvent) => {
@@ -576,34 +617,99 @@ export default function SongEditPage() {
     }
   };
 
-  // ✅ STEP 2: The Scrape Execution
+  // ✅ SURGICAL UPDATE: Hardened Pipeline for Open Database Chords
   const handleSelectLyricsCard = async (opt: any) => {
-    // If the API provided the lyrics upfront (fallback), use them directly
-    if (opt.lyrics) {
-      setPastedRawLyricsText(opt.lyrics);
-      setFetchedLyricsOptions(null);
-      return;
-    }
-
-    if (!opt.url) {
-      alert("Missing URL to scrape lyrics from.");
-      return;
-    }
-
+    let baseLyrics = opt.lyrics || "";
     setIsScrapingSelection(true);
-    try {
-      // Send the specific URL back to the API for scraping
-      const res = await fetch(`/api/lyrics?url=${encodeURIComponent(opt.url)}&action=scrape`);
-      const data = await res.json();
 
-      if (res.ok && data.lyrics) {
-        setPastedRawLyricsText(data.lyrics);
-        setFetchedLyricsOptions(null);
-      } else {
-        alert(data.error || "Failed to extract lyrics for this specific version.");
+    console.log("🚀 [Step 1] Starting Smart Fetch pipeline...");
+
+    try {
+      // --- FETCH GENIUS LYRICS ---
+      if (!baseLyrics) {
+        if (!opt.url) {
+          alert("Missing URL to scrape lyrics from.");
+          setIsScrapingSelection(false); return;
+        }
+        
+        console.log("🔍 [Step 2] Fetching base lyrics from Genius URL...");
+        const res = await fetch(`/api/lyrics?url=${encodeURIComponent(opt.url)}&action=scrape`);
+        const data = await res.json();
+        
+        if (res.ok && data.lyrics) {
+          baseLyrics = data.lyrics;
+          console.log("✅ [Step 2] Genius lyrics fetched successfully!");
+        } else {
+          alert(data.error || "Failed to extract Genius lyrics.");
+          setIsScrapingSelection(false); return;
+        }
       }
+
+      // --- FETCH OPEN DATABASE CHORDS (GitHub Multi-Format) ---
+      const searchTitle = formTitle.trim() || opt.title || "";
+      const searchArtist = formArtist.trim() || opt.artist || "";
+      console.log(`🎸 [Step 3] Querying Open Chord Database for: "${searchTitle}" by "${searchArtist}"`);
+
+      try {
+        const chordRes = await fetch(`/api/chords?title=${encodeURIComponent(searchTitle)}&artist=${encodeURIComponent(searchArtist)}`);
+        
+        // ✅ Graceful 404 Handling: If no chords exist, just use plain lyrics
+        if (chordRes.status === 404) {
+           console.warn(`⚠️ [Step 3] No open-source chords found. Falling back to plain lyrics.`);
+           setPastedRawLyricsText(baseLyrics);
+        } 
+        // 🚨 Fatal API Error Handling (Token missing, GitHub down, etc.)
+        else if (!chordRes.ok) {
+           throw new Error(`GitHub Database Error: ${chordRes.status}`);
+        } 
+        // ✅ Success: We found a match!
+        else {
+          const chordData = await chordRes.json();
+
+          if (chordData.rawText) {
+        console.log("✨ [Step 4] Injection Complete! Scanning for unfilled sections...");
+        const injectedChordPro = injectChordsIntoGeniusLyrics(baseLyrics, chordData.rawText);
+        
+        // --- NEW: THE ORPHAN SCANNER ---
+        const stanzas = injectedChordPro.split(/\n\s*\n/).filter(s => s.trim());
+        const filled: any[] = [];
+        const unfilled: any[] = [];
+
+        stanzas.forEach((stanza, idx) => {
+          // Identify the section label (e.g., [Verse 1])
+          const labelMatch = stanza.match(/^\[(.*?)\]/);
+          const label = labelMatch ? labelMatch[1] : `Section ${idx + 1}`;
+          
+          // Check if it has injected chords (ignoring the header tag)
+          const bodyText = stanza.replace(/^\[.*?\]\n/, '');
+          const hasChords = /\[[A-G][#b]?.*?\]/.test(bodyText);
+
+          if (hasChords) filled.push({ id: `f-${idx}`, label, text: stanza });
+          else unfilled.push({ id: `u-${idx}`, originalIdx: idx, label, text: stanza });
+        });
+
+        // Intercept if there are unfilled sections AND we have donor sections to copy from
+        if (unfilled.length > 0 && filled.length > 0) {
+          setMappingData({ filledStanzas: filled, unfilledStanzas: unfilled, allStanzas: stanzas });
+          setStanzaMappings({}); // Reset selections
+          setIsMappingModalOpen(true);
+        } else {
+          setPastedRawLyricsText(injectedChordPro);
+        }
+      }
+        }
+      } catch (chordErr) {
+        console.error("🚨 [Step 3] Chord Engine Failed. Falling back to plain lyrics. Reason:", chordErr);
+        setPastedRawLyricsText(baseLyrics);
+      }
+
+      // Transition the UI to the editor textarea so the user can verify before importing
+      console.log("🎉 [Step 5] Pipeline complete. Opening editor view.");
+      setFetchedLyricsOptions(null); 
+      
     } catch (err) {
-      alert("Error parsing lyrics data.");
+      console.error("🚨 [Fatal Pipeline Error]:", err);
+      alert("A critical error occurred processing the song data. Check console.");
     } finally {
       setIsScrapingSelection(false);
     }
@@ -2455,6 +2561,71 @@ export default function SongEditPage() {
         </div>
       )}
 
+      {isMappingModalOpen && mappingData && (
+    // Elevated the z-index to 250000 so it completely overrides the Import Modal
+    <div className="fixed inset-0 bg-zinc-950/80 backdrop-blur-md z-[250000] flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl p-6 w-full max-w-lg border shadow-2xl space-y-5">
+        
+        <div>
+          <h4 className="text-lg font-black text-zinc-900 tracking-tight flex items-center gap-2">
+            <span className="text-amber-500">⚠️</span> Unfilled Sections Detected
+          </h4>
+          <p className="text-[13px] text-zinc-500 font-medium leading-relaxed mt-1">
+            We couldn't find chord matches for <strong className="text-zinc-800">{mappingData.unfilledStanzas.length} sections</strong>. You can force them to copy chords from a different section, or leave them blank for manual editing.
+          </p>
+        </div>
+
+        <div className="max-h-[45vh] overflow-y-auto space-y-3 custom-scrollbar pr-2">
+          {mappingData.unfilledStanzas.map((unf) => (
+            <div key={unf.id} className="bg-zinc-50 border border-zinc-200 rounded-xl p-3.5 shadow-sm flex items-center justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <span className="text-[11px] font-black uppercase tracking-widest text-zinc-400 block mb-0.5">Missing Chords</span>
+                <span className="text-sm font-bold text-zinc-800 truncate block">{unf.label}</span>
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <span className="text-zinc-400 text-lg">→</span>
+                <select 
+                  value={stanzaMappings[unf.id] || "blank"}
+                  onChange={(e) => setStanzaMappings(prev => ({ ...prev, [unf.id]: e.target.value }))}
+                  className="bg-white border border-zinc-300 text-zinc-800 text-xs font-bold rounded-lg p-2 outline-none focus:border-purple-500 shadow-sm cursor-pointer"
+                >
+                  <option value="blank">Leave Blank</option>
+                  <optgroup label="Copy Chords From...">
+                    {mappingData.filledStanzas.map(f => (
+                      <option key={f.id} value={f.id}>{f.label}</option>
+                    ))}
+                  </optgroup>
+                </select>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-zinc-100">
+          <button 
+            type="button" 
+            onClick={() => {
+              setPastedRawLyricsText(mappingData.allStanzas.join("\n\n"));
+              setIsMappingModalOpen(false);
+            }} 
+            className="py-3 bg-zinc-100 text-zinc-700 hover:bg-zinc-200 transition-colors text-xs font-black rounded-lg uppercase tracking-wider"
+          >
+            Skip & Leave Blank
+          </button>
+          <button 
+            type="button" 
+            onClick={executeManualStanzaMapping}
+            className="py-3 bg-purple-600 text-white hover:bg-purple-700 transition-colors text-xs font-black rounded-lg shadow-md uppercase tracking-wider"
+          >
+            Apply & Continue
+          </button>
+        </div>
+
+      </div>
+    </div>
+  )}
+
       {isImportModalOpen && (
         <div className="fixed inset-0 bg-zinc-950/60 backdrop-blur-md z-[200000] flex items-center justify-center p-4">
           <div className="bg-white rounded-xl p-5 w-full max-w-xl border shadow-2xl space-y-4">
@@ -2500,8 +2671,8 @@ export default function SongEditPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-start mb-0.5">
                         <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded shadow-sm ${idx === 0 ? 'text-purple-600 bg-purple-100' : 'text-zinc-600 bg-zinc-200'}`}>
-                          {isScrapingSelection ? "Extracting..." : opt.type || "Alternative Version"}
-                        </span>
+                        {isScrapingSelection ? "Matching & Injecting Chords..." : opt.type || "Alternative Version"}
+                      </span>
                       </div>
                       <h5 className="font-black text-zinc-900 text-[15px] tracking-tight truncate">{opt.title}</h5>
                       <p className="text-[11px] font-bold text-zinc-500 truncate">{opt.artist}</p>
