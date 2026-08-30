@@ -98,32 +98,32 @@ export function LiveHeader({
   const liveSoundTypeRef = useRef(metronomeSoundType);
   useEffect(() => { liveSoundTypeRef.current = metronomeSoundType; }, [metronomeSoundType]);
 
-  useEffect(() => {
-    if (!isPlayingFlow) return;
-    const observers: MutationObserver[] = [];
-    metronomeRefs.current.forEach((node, index) => {
-      if (!node) return;
-      const observer = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-          if (mutation.attributeName === "class") {
-            const newClasses = (mutation.target as HTMLElement).className || "";
-            const oldClasses = mutation.oldValue || "";
-            const isNowActive = newClasses.includes("text-white");
-            const wasActive = oldClasses.includes("text-white");
+  // useEffect(() => {
+  //   if (!isPlayingFlow) return;
+  //   const observers: MutationObserver[] = [];
+  //   metronomeRefs.current.forEach((node, index) => {
+  //     if (!node) return;
+  //     const observer = new MutationObserver((mutations) => {
+  //       mutations.forEach((mutation) => {
+  //         if (mutation.attributeName === "class") {
+  //           const newClasses = (mutation.target as HTMLElement).className || "";
+  //           const oldClasses = mutation.oldValue || "";
+  //           const isNowActive = newClasses.includes("text-white");
+  //           const wasActive = oldClasses.includes("text-white");
 
-            if (isNowActive && !wasActive) {
-              const currentSound = liveSoundTypeRef.current;
-              const soundKey = index === 0 ? `metronome_${currentSound}_1` : `metronome_${currentSound}_2`;
-              playZeroLatencyAudio(soundKey, liveVolumeRef.current);
-            }
-          }
-        });
-      });
-      observer.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class"] });
-      observers.push(observer);
-    });
-    return () => observers.forEach(obs => obs.disconnect());
-  }, [isPlayingFlow, metronomeRefs, playZeroLatencyAudio]);
+  //           if (isNowActive && !wasActive) {
+  //             const currentSound = liveSoundTypeRef.current;
+  //             const soundKey = index === 0 ? `metronome_${currentSound}_1` : `metronome_${currentSound}_2`;
+  //             playZeroLatencyAudio(soundKey, liveVolumeRef.current);
+  //           }
+  //         }
+  //       });
+  //     });
+  //     observer.observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ["class"] });
+  //     observers.push(observer);
+  //   });
+  //   return () => observers.forEach(obs => obs.disconnect());
+  // }, [isPlayingFlow, metronomeRefs, playZeroLatencyAudio]);
 
   return (
     <>

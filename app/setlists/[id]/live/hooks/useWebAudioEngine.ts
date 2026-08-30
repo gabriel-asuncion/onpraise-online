@@ -29,20 +29,29 @@ export const fetchAndDecodeAudio = async (url: string, key: string) => {
 };
 
 export const playZeroLatencyAudio = (key: string, volume: number = 1.0, time: number = 0) => {
-  if (!globalAudioContext || !audioBufferCache[key]) return;
-  
-  const source = globalAudioContext.createBufferSource();
-  source.buffer = audioBufferCache[key];
-  
-  const gainNode = globalAudioContext.createGain();
-  gainNode.gain.value = volume;
-  
-  source.connect(gainNode);
-  gainNode.connect(globalAudioContext.destination);
-  
-  source.start(time); 
-  return source; 
-};
+    // 1. Grab the context first
+    const ctx = getAudioContext() || globalAudioContext; 
+
+    // 2. Safety Check: Abort if no context, if autoplay is blocked, or if audio file is missing
+    if (!ctx || ctx.state === 'suspended' || !audioBufferCache[key]) {
+      return; 
+    }
+
+    // 3. Create the audio source and attach the memory buffer
+    const source = ctx.createBufferSource();
+    source.buffer = audioBufferCache[key];
+
+    // 4. Create the volume control (GainNode)
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = volume;
+
+    // 5. Connect the wiring: Source -> Volume -> Speakers
+    source.connect(gainNode);
+    gainNode.connect(ctx.destination);
+
+    // 6. Fire the audio at the precise hardware time
+    source.start(time); 
+  };
 
 export const playGuideCue = (rawSectionName: string) => {
   if (!rawSectionName) return;

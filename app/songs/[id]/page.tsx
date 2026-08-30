@@ -65,6 +65,18 @@ export default function SoloPracticeRoomPage() {
   const [metronomeSoundType, setMetronomeSoundType] = useState<"blip" | "bell" | "block" | "glass">("blip");
   const metronomeSoundTypeRef = useRef(metronomeSoundType);
   useEffect(() => { metronomeSoundTypeRef.current = metronomeSoundType; }, [metronomeSoundType]);
+
+  useEffect(() => {
+    if (isMetronomeSoundEnabledRef) {
+      isMetronomeSoundEnabledRef.current = isMetronomeSoundEnabled;
+    }
+  }, [isMetronomeSoundEnabled, isMetronomeSoundEnabledRef]);
+
+  useEffect(() => {
+    if (localClickVolumeRef) {
+      localClickVolumeRef.current = localClickVolume;
+    }
+  }, [localClickVolume, localClickVolumeRef]);
   
   const [isTestingSync, setIsTestingSync] = useState<boolean>(false);
   const [testVisualBeat, setTestVisualBeat] = useState<number>(1);
@@ -311,10 +323,22 @@ export default function SoloPracticeRoomPage() {
     isPlayingFlow, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
     audioLatencyOffsetMs, isYtBackingTrackStartRef, countdownValueRef, setCountdownValue,
-    backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef, playGuideCue,
-    queuedSectionIndexRef, queuedTrackIndexRef, audioContextStartTimeRef, getAudioContext,
+    backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
+    queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
+    playGuideCue, getAudioContext, audioContextStartTimeRef,
+
+    // 👇 ADD THIS EXACT BLOCK 👇
+    triggerMetronomeSound: (beatPulse, time) => {
+      // ✅ FIX: Trust the Stage Mixer volume fader instead of the strict boolean toggle
+      if (localClickVolumeRef.current <= 0) return;
+      
+      const soundKey = `metronome_${metronomeSoundTypeRef.current}_${beatPulse}`;
+      playZeroLatencyAudio(soundKey, localClickVolumeRef.current, time);
+    },
+    // 👆 ---------------------- 👆
+
     getYoutubeTime: () => {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isYtBufferingRef.current) {
         return ytPlayerRef.current.getCurrentTime();
@@ -324,7 +348,7 @@ export default function SoloPracticeRoomPage() {
     executeJumpNow, localPresenceUserRef, 
     sendSupabaseBroadcast: () => {}, 
     updateMetronomeUI, activeLineIndexRef, setActiveLineIndex, 
-    handleAdvanceToNextSetlistTrack: () => { handleResetFlowTrigger(); }, 
+    handleAdvanceToNextSetlistTrack: () => { handleResetFlowTrigger(); },
     sectionStartTimeRef, pauseOffsetMsRef, animationFrameRef, playingTrackIndexRef
   });
 
@@ -353,6 +377,7 @@ export default function SoloPracticeRoomPage() {
         } else {
           audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
         }
+        console.log(`🕒 [Clock Sync] Ctx State: ${audioCtx?.state} | StartTimeRef: ${audioContextStartTimeRef.current}`);
 
         if (isYtBackingTrackStartRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
           try { 

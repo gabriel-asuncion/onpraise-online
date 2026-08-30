@@ -44,7 +44,6 @@ export interface HardwareClockConfig {
   animationFrameRef: React.MutableRefObject<number | null>;
   playingTrackIndexRef: React.MutableRefObject<number>;
   
-  // ✅ SURGICAL FIX: Made Audio props OPTIONAL so the Song Edit page doesn't crash!
   playGuideCue?: (name: string) => void;
   getAudioContext?: () => AudioContext | null;
   triggerMetronomeSound?: (beat: number, time: number) => void;
@@ -143,7 +142,6 @@ export function useHardwareClock(config: HardwareClockConfig) {
         const sectionElapsedSecs = ytTimeSecs - ytOffsetSecs - theoreticalSongStartOffsetSecs;
         elapsedMs = sectionElapsedSecs * 1000;
 
-        // ✅ Safely checking for optional audio context
         const audioCtx = c.getAudioContext ? c.getAudioContext() : null;
         if (c.audioContextStartTimeRef && c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
           const theoreticalSongElapsed = audioCtx.currentTime - c.audioContextStartTimeRef.current;
@@ -187,11 +185,9 @@ export function useHardwareClock(config: HardwareClockConfig) {
         c.hasPlayedCueRef.current = true; 
         const nextSecIndex = (c.queuedSectionIndexRef.current !== null) ? c.queuedSectionIndexRef.current : idx + 1;
         const targetSec = secs[nextSecIndex];
-        // ✅ Safely checking for optional cue player
         if (targetSec && c.playGuideCue) c.playGuideCue(targetSec.section_name);
       }
 
-      // ✅ Safely checking for optional audio context
       const audioCtx = c.getAudioContext ? c.getAudioContext() : null;
       if (c.audioContextStartTimeRef && c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
         const lookaheadSecs = 0.200;
@@ -210,16 +206,24 @@ export function useHardwareClock(config: HardwareClockConfig) {
             const exactGlobalBeatTime = c.getGlobalTime() + (timeUntilBeatSecs * 1000);
             if (exactGlobalBeatTime >= c.pendingQuantizedJumpRef.current.jumpTime - 10) break; 
           }
+          
+          // ✅ SURGICAL FIX: Infinite Audio Metronome Extension
+          let isDownbeat = false;
           if (absoluteBeatIndex < mapNodes.length) {
-            const beatNode = mapNodes[absoluteBeatIndex];
-            // ✅ Safely checking for optional metronome trigger
-            if (c.triggerMetronomeSound) {
-              c.triggerMetronomeSound(beatNode.isDownbeat ? 1 : 2, nextBeatTime + audioOffsetSecs);
-              if (config.isDoubleMetronomeEnabledRef.current) {
-                c.triggerMetronomeSound(2, nextBeatTime + audioOffsetSecs + (beatSpeedSecs / 2));
-              }
+            isDownbeat = mapNodes[absoluteBeatIndex].isDownbeat;
+          } else {
+            const overage = absoluteBeatIndex - mapNodes.length;
+            const lastMeasureLength = mapNodes.length > 0 ? mapNodes[mapNodes.length - 1].measureLength : 4;
+            isDownbeat = (overage % lastMeasureLength) === 0;
+          }
+
+          if (c.triggerMetronomeSound) {
+            c.triggerMetronomeSound(isDownbeat ? 1 : 2, nextBeatTime + audioOffsetSecs);
+            if (config.isDoubleMetronomeEnabledRef.current) {
+              c.triggerMetronomeSound(2, nextBeatTime + audioOffsetSecs + (beatSpeedSecs / 2));
             }
           }
+          
           c.lastAudioBeatRef.current++;
           nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
         }
@@ -246,18 +250,28 @@ export function useHardwareClock(config: HardwareClockConfig) {
       const absoluteVisualBeatFloat = (c.beatMapRef.current.sectionStartBeats[idx] || 0) + localSectionElapsedBeats;
       const absoluteVisualBeatIndex = Math.floor(absoluteVisualBeatFloat);
 
-      if (absoluteVisualBeatIndex < c.beatMapRef.current.nodes.length) {
-        const beatNode = c.beatMapRef.current.nodes[absoluteVisualBeatIndex];
-        const currentVisualBeatPulse = beatNode.measureBeatIndex;
-        const activeMeasureLength = beatNode.measureLength;
-        if (activeMeasureLength !== c.lastVisualMeasureLengthRef.current) {
-          c.lastVisualMeasureLengthRef.current = activeMeasureLength;
-          c.setCurrentMeasureLength(activeMeasureLength);
-        }
-        if (currentVisualBeatPulse !== c.lastVisualBeatRef.current) {
-          c.lastVisualBeatRef.current = currentVisualBeatPulse;
-          c.updateMetronomeUI(currentVisualBeatPulse, true, activeMeasureLength); 
-        }
+      // ✅ SURGICAL FIX: Infinite Visual Metronome Extension
+      let currentVisualBeatPulse = 1;
+      let activeMeasureLength = 4;
+      const mapNodes = c.beatMapRef.current.nodes;
+
+      if (absoluteVisualBeatIndex < mapNodes.length) {
+        const beatNode = mapNodes[absoluteVisualBeatIndex];
+        currentVisualBeatPulse = beatNode.measureBeatIndex;
+        activeMeasureLength = beatNode.measureLength;
+      } else {
+        activeMeasureLength = mapNodes.length > 0 ? mapNodes[mapNodes.length - 1].measureLength : 4;
+        const beatsPastEnd = absoluteVisualBeatIndex - mapNodes.length;
+        currentVisualBeatPulse = (beatsPastEnd % activeMeasureLength) + 1;
+      }
+
+      if (activeMeasureLength !== c.lastVisualMeasureLengthRef.current) {
+        c.lastVisualMeasureLengthRef.current = activeMeasureLength;
+        c.setCurrentMeasureLength(activeMeasureLength);
+      }
+      if (currentVisualBeatPulse !== c.lastVisualBeatRef.current) {
+        c.lastVisualBeatRef.current = currentVisualBeatPulse;
+        c.updateMetronomeUI(currentVisualBeatPulse, true, activeMeasureLength); 
       }
 
       const safeDuration = Math.max(1, totalDurationMs);
@@ -303,18 +317,19 @@ export function useHardwareClock(config: HardwareClockConfig) {
           if (isCurrentlyMD) {
             c.sendSupabaseBroadcast({ action: "JUMP", trackIndex: nextTrackIdx, sectionIndex: nextSectionIdx, mdSectionStartTime: jumpTime });
           }
-        } else if (nextSectionIdx >= secs.length) {
-          const jumpTime = c.mdSectionStartTimeRef.current + totalDurationMs;
-          c.executeJumpNow(nextTrackIdx, 0, jumpTime);
-          if (isCurrentlyMD) {
-            c.sendSupabaseBroadcast({ action: "JUMP", trackIndex: nextTrackIdx, sectionIndex: 0, mdSectionStartTime: jumpTime }); 
-          }
-        } else {
+        } else if (nextSectionIdx < secs.length) {
+          // Progress to the next valid section
           c.currentSectionIndexRef.current = nextSectionIdx;
           c.setCurrentSectionIndex(nextSectionIdx);
           c.hasPlayedCueRef.current = false;
           c.mdSectionStartTimeRef.current = c.mdSectionStartTimeRef.current + totalDurationMs;
         }
+        
+        // ✅ SURGICAL FIX: The "Else" Boundary is DELETED!
+        // If nextSectionIdx >= secs.length, we do nothing.
+        // elapsedMs keeps ticking up endlessly.
+        // The metronome uses the fallback modulo math to keep clicking in time.
+        // The UI lock uses cappedElapsedMs to stay glued perfectly to the final line.
       }
     };
 

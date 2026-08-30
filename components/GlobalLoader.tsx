@@ -66,9 +66,9 @@ export default function GlobalLoader({ message = "Syncing..." }: { message?: str
         <Blob color="#F59E0B" w="80px" hasEyes animClass="animate-morph-squish" delay="0s" top="25%" right="20%" />
         <Blob color="#FDE68A" w="25px" hasEyes={false} animClass="animate-float-spin" delay="-4s" top="18%" right="12%" />
         <Blob color="#A855F7" w="85px" hasEyes animClass="animate-float-spin" delay="-3s" bottom="20%" left="20%" />
-        <Blob color="#E9D5FF" w="45px" hasEyes={false} animClass="animate-orbit-ccw" delay="-2s" bottom="30%" left="10%" />
-        <Blob color="#EFF6FF" w="60px" hasEyes={false} animClass="animate-pulse-ghost" delay="-1s" top="40%" right="10%" />
-        <Blob color="#F3E8FF" w="70px" hasEyes={false} animClass="animate-pulse-ghost" delay="-5s" bottom="40%" left="8%" />
+        <Blob color="#333333" w="45px" hasEyes={false} animClass="animate-orbit-ccw" delay="-2s" bottom="30%" left="10%" />
+        <Blob color="#333333" w="60px" hasEyes={false} animClass="animate-pulse-ghost" delay="-1s" top="40%" right="10%" />
+        <Blob color="#333333" w="70px" hasEyes={false} animClass="animate-pulse-ghost" delay="-5s" bottom="40%" left="8%" />
       </div>
 
       {/* CENTER LOADING INDICATOR */}
@@ -83,12 +83,7 @@ export default function GlobalLoader({ message = "Syncing..." }: { message?: str
         </div>
       </div>
 
-      {/* GROUNDING WAVE */}
-      <div className="absolute bottom-0 left-0 w-full z-0 pointer-events-none">
-        <svg viewBox="0 0 1440 320" className="w-full h-auto opacity-40">
-          <path fill="#EFF6FF" fillOpacity="1" d="M0,160L48,165.3C96,171,192,181,288,165.3C384,149,480,107,576,112C672,117,768,171,864,186.7C960,203,1056,181,1152,149.3C1248,117,1344,75,1392,53.3L1440,32L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z"></path>
-        </svg>
-      </div>
+
 
     </div>
   );

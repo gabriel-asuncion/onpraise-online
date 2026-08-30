@@ -564,8 +564,18 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
-    // ✅ SURGICAL FIX: Feed the audio engine into the clock
     playGuideCue, getAudioContext, audioContextStartTimeRef,
+
+    // 👇 ADD THIS EXACT BLOCK 👇
+    triggerMetronomeSound: (beatPulse, time) => {
+      // ✅ FIX: Trust the Stage Mixer volume fader instead of the strict boolean toggle
+      if (localClickVolumeRef.current <= 0) return;
+      
+      const soundKey = `metronome_${metronomeSoundTypeRef.current}_${beatPulse}`;
+      playZeroLatencyAudio(soundKey, localClickVolumeRef.current, time);
+    },
+    // 👆 ---------------------- 👆
+
     getYoutubeTime: () => {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isYtBufferingRef.current) {
         return ytPlayerRef.current.getCurrentTime();
@@ -573,8 +583,9 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       return null;
     },
     executeJumpNow, localPresenceUserRef, 
-    sendSupabaseBroadcast, 
-    updateMetronomeUI, activeLineIndexRef, setActiveLineIndex, handleAdvanceToNextSetlistTrack,
+    sendSupabaseBroadcast, // (Note: In the solo page, this is `sendSupabaseBroadcast: () => {},`)
+    updateMetronomeUI, activeLineIndexRef, setActiveLineIndex, 
+    handleAdvanceToNextSetlistTrack: () => { handleResetFlowTrigger(); }, // (Note: In page_2.tsx this is just `handleAdvanceToNextSetlistTrack,`)
     sectionStartTimeRef, pauseOffsetMsRef, animationFrameRef, playingTrackIndexRef
   });
 
@@ -657,7 +668,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         } else {
           audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
         }
-
+        console.log(`🕒 [Clock Sync] Ctx State: ${audioCtx?.state} | StartTimeRef: ${audioContextStartTimeRef.current}`);
         if (isYtBackingTrackStartRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
           try { 
             ytPlayerRef.current.seekTo(ytSeekTargetSecs, true); 

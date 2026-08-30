@@ -6,6 +6,7 @@ import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import GlobalLoader from '../../../../components/GlobalLoader';
+import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
 // 1. UPDATE YOUR IMPORT AT THE TOP OF page.tsx
 import { 
   injectChordsIntoGeniusLyrics, 
@@ -291,6 +292,17 @@ export default function SongEditPage() {
   const [isScrollingDown, setIsScrollingDown] = useState(false);
   const lastScrollY = useRef(0);
 
+  const { initAudioContext, playZeroLatencyAudio, fetchAndDecodeAudio } = useWebAudioEngine();
+  const lastTickedBeatRef = useRef<number>(-1);
+
+  // Load the click sounds into memory when the edit page opens
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      fetchAndDecodeAudio(`/sound_files/metronome_blip_1.wav`, `metronome_blip_1`);
+      fetchAndDecodeAudio(`/sound_files/metronome_blip_2.wav`, `metronome_blip_2`);
+    }
+  }, [fetchAndDecodeAudio]);
+
   const handleCanvasScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const currentScrollY = e.currentTarget.scrollTop;
 
@@ -409,17 +421,43 @@ export default function SongEditPage() {
   useEffect(() => {
     const updateScrubber = () => {
       if (ytPlaying && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
-        setYtCurrentTime(ytPlayerRef.current.getCurrentTime());
+        const currentTime = ytPlayerRef.current.getCurrentTime();
+        setYtCurrentTime(currentTime);
+
+        // ✅ FIX 1: THE EDIT PAGE METRONOME
+        const tempo = parseInt(formTempo) || 0;
+        if (tempo > 0 && formYoutubeSyncOffset !== null) {
+          const elapsedMs = (currentTime * 1000) - formYoutubeSyncOffset;
+          if (elapsedMs >= 0) {
+            const msPerBeat = 60000 / tempo;
+            const currentBeat = Math.floor(elapsedMs / msPerBeat);
+            
+            // If we crossed into a new beat boundary, play the click!
+            if (currentBeat !== lastTickedBeatRef.current) {
+              if (currentBeat > lastTickedBeatRef.current) {
+                const isDownbeat = currentBeat % 4 === 0; // 0 is the first beat after offset
+                playZeroLatencyAudio(isDownbeat ? 'metronome_blip_1' : 'metronome_blip_2', 1.0);
+              }
+              lastTickedBeatRef.current = currentBeat;
+            }
+          } else {
+            lastTickedBeatRef.current = -1; // Reset if scrubbing before the downbeat
+          }
+        }
+      } else {
+        lastTickedBeatRef.current = -1;
       }
       ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
     };
 
-    if (ytPlaying) ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
+    if (ytPlaying) {
+      ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
+    }
     
     return () => {
       if (ytTimeTrackerRef.current) cancelAnimationFrame(ytTimeTrackerRef.current);
     };
-  }, [ytPlaying]);
+  }, [ytPlaying, formTempo, formYoutubeSyncOffset, initAudioContext, playZeroLatencyAudio]);
   
   const ytPlayerRef = useRef<any>(null);
   // ✅ SURGICAL FIX: Declare the ref so the YouTube player logic can use it!
@@ -1651,7 +1689,7 @@ export default function SongEditPage() {
 
   return (
     // ✅ SURGICAL FIX: Restored the permanent 57px clearance for the global navigation
-    <div ref={editorContentContainerRef} className="h-screen w-full border-b-[57px] border-[#f8f9fa] overflow-hidden bg-[#f8f9fa] flex flex-col relative animate-in fade-in duration-200">
+    <div ref={editorContentContainerRef} className="h-screen w-full border-b-[57px] border-[#333333] overflow-hidden bg-[#333333] flex flex-col relative animate-in fade-in duration-200">
       <style dangerouslySetInnerHTML={{__html: `@import url('https://fonts.googleapis.com/css2?family=Nothing+You+Could+Do&display=swap');`}} />
 
       {/* --- UNIFIED SEMANTIC STICKY HEADER --- */}
@@ -2870,17 +2908,17 @@ export default function SongEditPage() {
             chordMode !== "Off" || chordPickerConfig.isOpen ? 'opacity-0 pointer-events-none' : ''
           }`}
           style={{
-            // Handle swipe drag or global scroll hiding
+            zIndex: isPlayerExpanded ? 150000 : 45, // ✅ FIX 3: Drops safely below the Global FAB (z-50) when docked
             transform: playerDragY !== 0 
               ? `translateY(${playerDragY}px)` 
               : (!isPlayerExpanded && isScrollingDown ? 'translateY(63px)' : 'translateY(0px)'),
-            // Morphing Container Size & Position
             height: isPlayerExpanded ? '100dvh' : '54px',
             bottom: isPlayerExpanded ? '0px' : '63px',
-            backgroundColor: isPlayerExpanded ? '#0f0f0f' : 'rgba(255, 255, 255, 0.95)',
-            borderTop: isPlayerExpanded ? '1px solid transparent' : '1px solid #e4e4e7',
+            backgroundColor: isPlayerExpanded ? '#0f0f0f' : '#18181b', // ✅ Matches your dark screenshot
+            color: '#ffffff',
+            borderTop: isPlayerExpanded ? '1px solid transparent' : '1px solid #3f3f46',
             borderRadius: isPlayerExpanded ? '0px' : '0.75rem',
-            boxShadow: isPlayerExpanded ? 'none' : '0 -4px 20px rgba(0,0,0,0.08)'
+            boxShadow: isPlayerExpanded ? 'none' : '0 -4px 20px rgba(0,0,0,0.5)'
           }}
         >
           {/* DOCKED CLICK CATCHER (Expands the player) */}
@@ -2969,17 +3007,20 @@ export default function SongEditPage() {
             className="absolute z-30 flex items-center justify-center transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] cursor-pointer outline-none"
             style={{
                bottom: isPlayerExpanded ? '8dvh' : '7px',
-               left: isPlayerExpanded ? '50%' : 'calc(100% - 48px)',
-               transform: isPlayerExpanded ? 'translateX(-50%)' : 'translateX(0)',
+               // ✅ FIX 2: Locks strictly to the right side so it can't overflow out of bounds
+               right: isPlayerExpanded ? 'auto' : '8px',
+               left: isPlayerExpanded ? '50%' : 'auto',
+               transform: isPlayerExpanded ? 'translateX(-50%)' : 'none',
                width: isPlayerExpanded ? '84px' : '40px',
                height: isPlayerExpanded ? '84px' : '40px',
                backgroundColor: isPlayerExpanded ? '#ffffff' : 'transparent',
-               color: '#18181b', // Always dark icon
+               color: isPlayerExpanded ? '#18181b' : '#ffffff', // ✅ Forces icon to be white when docked
                borderRadius: '9999px',
                boxShadow: isPlayerExpanded ? '0 0 40px rgba(255,255,255,0.15)' : 'none'
             }}
             onClick={(e) => {
               e.stopPropagation();
+              initAudioContext();
               if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
               if (ytPlaying) ytPlayerRef.current.pauseVideo();
               else ytPlayerRef.current.playVideo();
