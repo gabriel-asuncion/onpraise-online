@@ -24,8 +24,9 @@ const QUICK_FILTERS = [
   { id: "chords-lyrics", label: "🎸+📝 Chords & Lyrics" },
   { id: "pending", label: "Pending Review", count: true },
   { id: "bookmarked", label: "Bookmarked", count: true },
-  { id: "key-b", label: "Key of B" },
-  { id: "fast", label: "Fast / Praise" }
+  // ✅ SURGICAL FIX: Replaced obsolete filters with requested YouTube filters
+  { id: "youtube-included", label: "YouTube Included" },
+  { id: "youtube-sync", label: "YouTube Sync Validated" }
 ];
 
 const ContentTypeBadge = ({ type }: { type: SongContentType }) => {
@@ -351,11 +352,10 @@ export default function SongsListPage() {
     if (activeFilterId === "chords-lyrics" && type !== "Chords + Lyrics") return false;
     if (activeFilterId === "pending" && song.approval_status !== "pending") return false;
     if (activeFilterId === "bookmarked" && !bookmarkedSongIds.includes(song.id)) return false;
-    if (activeFilterId === "key-b" && song.original_key?.toLowerCase() !== "b") return false;
-    if (activeFilterId === "fast") {
-      const tempo = parseInt(String(song.tempo || 0), 10);
-      if (tempo < 110) return false; 
-    }
+    
+    // ✅ SURGICAL FIX: Filter by YouTube presence or validation status
+    if (activeFilterId === "youtube-included" && !song.youtube_url) return false;
+    if (activeFilterId === "youtube-sync" && !song.is_youtube_sync_validated) return false;
 
     return true;
   });
@@ -391,7 +391,8 @@ export default function SongsListPage() {
         
         {canApproveSongs && pendingSongsCount > 0 && (
           <button 
-            onClick={() => setActiveFilterId("pending")}
+            // ✅ SURGICAL FIX: Route directly to the approvals dashboard
+            onClick={() => router.push("/songs/approvals")}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-surface-container-high text-on-surface active:bg-surface-container-highest transition-colors shadow-sm cursor-pointer border border-outline-variant/30"
           >
             <span className="w-2 h-2 rounded-full bg-secondary animate-ping"></span>
@@ -552,18 +553,19 @@ export default function SongsListPage() {
                     <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
                       {canEditLibrary && (
                         <button 
+                          // ✅ SURGICAL FIX: Reverted to standard edit route and label
                           onClick={() => router.push(`/songs/${song.id}/edit`)}
                           className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold hover:bg-surface-bright flex items-center justify-center gap-1 cursor-pointer border border-outline-variant/30 shadow-sm shrink-0"
                         >
-                          <span className="material-symbols-outlined text-[14px]">{canApproveSongs ? 'visibility' : 'edit'}</span>
-                          <span>{canApproveSongs ? 'Review' : 'Edit'}</span>
+                          
+                          <span>Edit</span>
                         </button>
                       )}
                       <button 
                         onClick={() => router.push(`/songs/${song.id}`)}
                         className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-transform flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
-                        <span className="material-symbols-outlined text-[14px]">library_music</span>
+                        <span className="material-symbols-outlined text-[10px]">library_music</span>
                         <span>Open</span>
                       </button>
                     </div>
