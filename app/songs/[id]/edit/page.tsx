@@ -1,21 +1,13 @@
 "use client";
 
 import { useEffect, useState, useRef, useMemo } from "react";
+import { createPortal } from "react-dom"; // ✅ Added for portaling into Sidebar
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import GlobalLoader from '../../../../components/GlobalLoader';
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
-// 1. UPDATE YOUR IMPORT AT THE TOP OF page.tsx
-import { 
-  injectChordsIntoGeniusLyrics, 
-  injectChordsIntoStanza, 
-  extractDonorChordsFromChordPro 
-} from "../../utils/chord-injector";
-
-
-
 
 // =======================================================
 // --- TRANSPOSTITION & DIATONIC CONSTANT BLUEPRINTS -----
@@ -267,14 +259,6 @@ export default function SongEditPage() {
   const editorContentContainerRef = useRef<HTMLDivElement | null>(null);
   const { activeRole } = useEngine();
 
-  const [isMappingModalOpen, setIsMappingModalOpen] = useState(false);
-  const [mappingData, setMappingData] = useState<{
-    filledStanzas: { id: string, label: string, text: string }[],
-    unfilledStanzas: { id: string, originalIdx: number, text: string, label: string }[],
-    allStanzas: string[]
-  } | null>(null);
-  const [stanzaMappings, setStanzaMappings] = useState<Record<string, string>>({});
-
   useEffect(() => {
     if (activeRole === "member") {
       router.replace("/songs"); 
@@ -292,6 +276,18 @@ export default function SongEditPage() {
   const [isScrollingDown, setIsScrollingDown] = useState(false);
   const lastScrollY = useRef(0);
 
+  // ✅ SURGICAL ADDITION: Portal Mounting Engine
+  const [mounted, setMounted] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    const checkMobile = () => setIsMobile(window.innerWidth < 768);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
   const { initAudioContext, playZeroLatencyAudio, fetchAndDecodeAudio } = useWebAudioEngine();
   const lastTickedBeatRef = useRef<number>(-1);
 
@@ -306,8 +302,6 @@ export default function SongEditPage() {
   const handleCanvasScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const currentScrollY = e.currentTarget.scrollTop;
 
-    // ✅ SURGICAL FIX: 0-pixel tolerance for instant triggering. 
-    // Also guarantees it stays visible if you bounce at the absolute top of the page.
     if (currentScrollY <= 0) {
       setIsScrollingDown(false);
     } else if (currentScrollY > lastScrollY.current) {
@@ -319,8 +313,6 @@ export default function SongEditPage() {
     lastScrollY.current = currentScrollY;
   };
 
-
-  // ✅ Ensures the nav is locked up the exact millisecond the page mounts
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("onpraise-scroll", { detail: false }));
@@ -342,8 +334,15 @@ export default function SongEditPage() {
   const [ytDuration, setYtDuration] = useState(0);
   const ytTimeTrackerRef = useRef<number | null>(null);
 
+  // ✅ SURGICAL ADDITION: Tell the Sidebar to slide down to 68px when playing!
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: ytPlaying }));
+    }
+  }, [ytPlaying]);
+
   // ============================================================================
-  // ✅ SURGICAL ADDITION: Media Player Gesture & State Engine
+  // Media Player Gesture & State Engine
   // ============================================================================
   const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
   const [playerDragY, setPlayerDragY] = useState(0);
@@ -352,7 +351,6 @@ export default function SongEditPage() {
 
   const handlePlayerPointerDown = (e: React.PointerEvent) => {
     const target = e.target as HTMLElement;
-    // Don't trigger drag if interacting with controls
     if (target.tagName === 'INPUT' || target.closest('button')) return;
     
     isPlayerDraggingRef.current = true;
@@ -364,33 +362,9 @@ export default function SongEditPage() {
     if (!isPlayerDraggingRef.current) return;
     const deltaY = e.clientY - playerDragStartYRef.current;
     
-    // ✅ SURGICAL FIX: Removed drag-up logic for docked state.
-    // Expanded: Only allow dragging DOWN (positive delta) to close.
     if (isPlayerExpanded && deltaY > 0) {
       setPlayerDragY(deltaY);
     }
-  };
-  
-  // ✅ The Execution Engine for Manual Mappings
-  const executeManualStanzaMapping = () => {
-    if (!mappingData) return;
-    
-    const finalStanzas = [...mappingData.allStanzas];
-    
-    mappingData.unfilledStanzas.forEach(unf => {
-      const donorId = stanzaMappings[unf.id];
-      if (donorId && donorId !== "blank") {
-        const donorStanza = mappingData.filledStanzas.find(f => f.id === donorId);
-        if (donorStanza) {
-          // Extract the chords from the chosen filled section, and inject them into the blank one
-          const extractedChords = extractDonorChordsFromChordPro(donorStanza.text);
-          finalStanzas[unf.originalIdx] = injectChordsIntoStanza(unf.text, extractedChords);
-        }
-      }
-    });
-
-    setPastedRawLyricsText(finalStanzas.join("\n\n"));
-    setIsMappingModalOpen(false);
   };
 
   const handlePlayerPointerUp = (e: React.PointerEvent) => {
@@ -401,13 +375,12 @@ export default function SongEditPage() {
     const deltaY = e.clientY - playerDragStartYRef.current;
 
     if (!isPlayerExpanded) {
-      // ✅ SURGICAL FIX: Only allow standard click detection when docked. No swipe thresholds.
       if (Math.abs(deltaY) < 10) setIsPlayerExpanded(true); 
     } else {
-      if (deltaY > 60) setIsPlayerExpanded(false); // Keep swipe down to close
+      if (deltaY > 60) setIsPlayerExpanded(false); 
     }
 
-    setPlayerDragY(0); // Reset live transform, let Tailwind take over
+    setPlayerDragY(0); 
   };
 
   const formatTime = (seconds: number) => {
@@ -417,14 +390,12 @@ export default function SongEditPage() {
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
-
   useEffect(() => {
     const updateScrubber = () => {
       if (ytPlaying && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
         const currentTime = ytPlayerRef.current.getCurrentTime();
         setYtCurrentTime(currentTime);
 
-        // ✅ FIX 1: THE EDIT PAGE METRONOME
         const tempo = parseInt(formTempo) || 0;
         if (tempo > 0 && formYoutubeSyncOffset !== null) {
           const elapsedMs = (currentTime * 1000) - formYoutubeSyncOffset;
@@ -432,16 +403,15 @@ export default function SongEditPage() {
             const msPerBeat = 60000 / tempo;
             const currentBeat = Math.floor(elapsedMs / msPerBeat);
             
-            // If we crossed into a new beat boundary, play the click!
             if (currentBeat !== lastTickedBeatRef.current) {
               if (currentBeat > lastTickedBeatRef.current) {
-                const isDownbeat = currentBeat % 4 === 0; // 0 is the first beat after offset
+                const isDownbeat = currentBeat % 4 === 0; 
                 playZeroLatencyAudio(isDownbeat ? 'metronome_blip_1' : 'metronome_blip_2', 1.0);
               }
               lastTickedBeatRef.current = currentBeat;
             }
           } else {
-            lastTickedBeatRef.current = -1; // Reset if scrubbing before the downbeat
+            lastTickedBeatRef.current = -1; 
           }
         }
       } else {
@@ -460,7 +430,6 @@ export default function SongEditPage() {
   }, [ytPlaying, formTempo, formYoutubeSyncOffset, initAudioContext, playZeroLatencyAudio]);
   
   const ytPlayerRef = useRef<any>(null);
-  // ✅ SURGICAL FIX: Declare the ref so the YouTube player logic can use it!
   const isYtPlayerReadyRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -587,7 +556,6 @@ export default function SongEditPage() {
   const [initialModalText, setInitialModalText] = useState(""); 
 
   const [isFetchingLyrics, setIsFetchingLyrics] = useState(false);
-  // ✅ NEW: Tracks the loading state while the backend scrapes the clicked song
   const [isScrapingSelection, setIsScrapingSelection] = useState(false);
   const [fetchedLyricsOptions, setFetchedLyricsOptions] = useState<{title: string, artist: string, url?: string, lyrics?: string, type?: string, thumbnail?: string}[] | null>(null);
 
@@ -602,11 +570,9 @@ export default function SongEditPage() {
     let cleanTitle = formTitle.replace(/\[.*?\]|\(.*?\)/g, ""); 
     cleanTitle = cleanTitle.replace(/(official|live|lyric|video|audio|music)/gi, "").trim(); 
     
-    // We send ONLY the title to cast a wide net
     const searchQuery = cleanTitle;
 
     try {
-      // ✅ STEP 1: We tell the API to ONLY perform a search and return an array of hits
       const res = await fetch(`/api/lyrics?q=${encodeURIComponent(searchQuery)}&action=search`);
       const data = await res.json();
 
@@ -639,7 +605,6 @@ export default function SongEditPage() {
           }
           setFetchedLyricsOptions(scoredResults);
         } 
-        // Fallback for your current API until you update it
         else if (data.lyrics) {
           setFetchedLyricsOptions([{ title: cleanTitle, artist: formArtist || "Unknown", lyrics: data.lyrics, type: "Top Result" }]);
         } else {
@@ -655,7 +620,7 @@ export default function SongEditPage() {
     }
   };
 
-  // ✅ SURGICAL UPDATE: Hardened Pipeline for Open Database Chords
+  // ✅ SURGICAL UPDATE: Fridged the Chord Engine and mapped straight to text injection
   const handleSelectLyricsCard = async (opt: any) => {
     let baseLyrics = opt.lyrics || "";
     setIsScrapingSelection(true);
@@ -683,66 +648,11 @@ export default function SongEditPage() {
         }
       }
 
-      // --- FETCH OPEN DATABASE CHORDS (GitHub Multi-Format) ---
-      const searchTitle = formTitle.trim() || opt.title || "";
-      const searchArtist = formArtist.trim() || opt.artist || "";
-      console.log(`🎸 [Step 3] Querying Open Chord Database for: "${searchTitle}" by "${searchArtist}"`);
+      // --- GITHUB CHORD SCRAPING FRIDGED ---
+      console.log("🎸 [Step 3] Chord Engine Fridged. Injecting plain lyrics.");
+      setPastedRawLyricsText(baseLyrics);
 
-      try {
-        const chordRes = await fetch(`/api/chords?title=${encodeURIComponent(searchTitle)}&artist=${encodeURIComponent(searchArtist)}`);
-        
-        // ✅ Graceful 404 Handling: If no chords exist, just use plain lyrics
-        if (chordRes.status === 404) {
-           console.warn(`⚠️ [Step 3] No open-source chords found. Falling back to plain lyrics.`);
-           setPastedRawLyricsText(baseLyrics);
-        } 
-        // 🚨 Fatal API Error Handling (Token missing, GitHub down, etc.)
-        else if (!chordRes.ok) {
-           throw new Error(`GitHub Database Error: ${chordRes.status}`);
-        } 
-        // ✅ Success: We found a match!
-        else {
-          const chordData = await chordRes.json();
-
-          if (chordData.rawText) {
-        console.log("✨ [Step 4] Injection Complete! Scanning for unfilled sections...");
-        const injectedChordPro = injectChordsIntoGeniusLyrics(baseLyrics, chordData.rawText);
-        
-        // --- NEW: THE ORPHAN SCANNER ---
-        const stanzas = injectedChordPro.split(/\n\s*\n/).filter(s => s.trim());
-        const filled: any[] = [];
-        const unfilled: any[] = [];
-
-        stanzas.forEach((stanza, idx) => {
-          // Identify the section label (e.g., [Verse 1])
-          const labelMatch = stanza.match(/^\[(.*?)\]/);
-          const label = labelMatch ? labelMatch[1] : `Section ${idx + 1}`;
-          
-          // Check if it has injected chords (ignoring the header tag)
-          const bodyText = stanza.replace(/^\[.*?\]\n/, '');
-          const hasChords = /\[[A-G][#b]?.*?\]/.test(bodyText);
-
-          if (hasChords) filled.push({ id: `f-${idx}`, label, text: stanza });
-          else unfilled.push({ id: `u-${idx}`, originalIdx: idx, label, text: stanza });
-        });
-
-        // Intercept if there are unfilled sections AND we have donor sections to copy from
-        if (unfilled.length > 0 && filled.length > 0) {
-          setMappingData({ filledStanzas: filled, unfilledStanzas: unfilled, allStanzas: stanzas });
-          setStanzaMappings({}); // Reset selections
-          setIsMappingModalOpen(true);
-        } else {
-          setPastedRawLyricsText(injectedChordPro);
-        }
-      }
-        }
-      } catch (chordErr) {
-        console.error("🚨 [Step 3] Chord Engine Failed. Falling back to plain lyrics. Reason:", chordErr);
-        setPastedRawLyricsText(baseLyrics);
-      }
-
-      // Transition the UI to the editor textarea so the user can verify before importing
-      console.log("🎉 [Step 5] Pipeline complete. Opening editor view.");
+      console.log("🎉 [Step 4] Pipeline complete. Opening editor view.");
       setFetchedLyricsOptions(null); 
       
     } catch (err) {
@@ -991,7 +901,6 @@ export default function SongEditPage() {
             let currentLine = lines[lineIdx] || "";
             const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
 
-            // ✅ SURGICAL FIX: Process Ghost Slots
             if (wordIdx === -1) {
                 currentLine = `[${formattedFullChordStr}] ${currentLine}`.trim();
             } else if (wordIdx === -2) {
@@ -1023,7 +932,6 @@ export default function SongEditPage() {
           let currentLine = lines[lineIdx] || "";
           const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
 
-          // Ghost slots don't have chords to backspace!
           if (wordIdx !== -1 && wordIdx !== -2 && wordIdx < matchCount) {
               let realWordCounter = 0;
               currentLine = currentLine.replace(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g, (match) => {
@@ -1225,7 +1133,6 @@ export default function SongEditPage() {
       let currentLine = lines[lineIdx] || "";
       const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
 
-      // ✅ SURGICAL FIX: Process Ghost Slots
       if (wordIdx === -1) {
           currentLine = `${bracketedTag} ${currentLine}`.trim();
       } else if (wordIdx === -2) {
@@ -1261,7 +1168,6 @@ export default function SongEditPage() {
       const compiledBrackets = stagedChordsText.trim().split(/\s+/).filter(Boolean).map(ch => `[${ch.trim()}]`).join("");
       const matchCount = (currentLine.match(/(?:\[[^\]]+\]|\{\s*[^\}]+\s*\}|\S)+/g) || []).length;
 
-      // ✅ SURGICAL FIX: Process Ghost Slots
       if (chordPickerConfig.wordIdx === -1) {
           currentLine = `${compiledBrackets} ${currentLine}`.trim();
       } else if (chordPickerConfig.wordIdx === -2) {
@@ -1370,7 +1276,6 @@ export default function SongEditPage() {
         const metrics = getCentralizedMetricsTuple(sec.type);
         const header = `[${sec.type}] (M: ${metrics.measures}, B: ${metrics.beats}, R: ${metrics.repeats}, H: ${metrics.head_m}, T: ${metrics.tail_m})`;
         
-        // ✅ SURGICAL FIX: Serialize line-level (M: x, B: y) metrics into the text
         const lines = sec.content.split("\n");
         const processedLines = lines.map(l => ({ rawText: l, cleanText: l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim() }));
         const validLines = processedLines.filter(l => l.cleanText.length > 0);
@@ -1417,7 +1322,6 @@ export default function SongEditPage() {
     let unassignedCounter = 1;
     const newExtractedTimings: SectionTimingMap = {};
     
-    // ✅ NEW: Capture line-level overrides during parsing
     const newLineOverrides: Record<string, Record<number, { measures: number; beats: number }>> = {};
 
     const flushBuffer = () => {
@@ -1463,7 +1367,6 @@ export default function SongEditPage() {
       } else if (line === "") {
         if (currentBuffer.length > 0) flushBuffer(); 
       } else {
-        // ✅ SURGICAL FIX: Detect and strip line-level metrics (M: x, B: y)
         const lineMetricMatch = line.match(/(.*?)\s*\(\s*M:\s*(\d+),\s*B:\s*(\d+)\s*\)$/i);
         let cleanLineForContent = line;
         
@@ -1497,7 +1400,6 @@ export default function SongEditPage() {
         return mergedTimings;
       });
       
-      // ✅ Apply the newly scraped line overrides
       if (Object.keys(newLineOverrides).length > 0) {
          setLineOverrides(prev => {
             const merged = { ...(prev || {}) };
@@ -1537,10 +1439,6 @@ export default function SongEditPage() {
         const metricsTuple = getCentralizedMetricsTuple(sec.type);
         let specificRowOverrides = lineOverrides?.[sec.type] || null;
 
-        // ============================================================================
-        // ✅ SURGICAL FIX: Force generate the exact line timings!
-        // This stops the Setlist Live Page from falling back to the broken "repeats" math.
-        // ============================================================================
         if (!specificRowOverrides) {
           const processedLines = sec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim()).filter(l => l.length > 0);
           const totalLines = processedLines.length;
@@ -1565,7 +1463,7 @@ export default function SongEditPage() {
           repeats: metricsTuple.repeats,
           head_m: metricsTuple.head_m,  
           tail_m: metricsTuple.tail_m,  
-          line_timings: specificRowOverrides, // ✅ DB now explicitly tells Live exactly what to do
+          line_timings: specificRowOverrides, 
           youtube_url: formYoutubeUrl.trim(),
           youtube_sync_offset_ms: formYoutubeSyncOffset
         };
@@ -1650,8 +1548,6 @@ export default function SongEditPage() {
     }
   };
 
-  
-
   const uniqueContentSectionsList = formSections.reduce((acc: SongSectionBlock[], curr) => { if (!acc.some(item => item.type === curr.type)) acc.push(curr); return acc; }, []);
   const filteredThemeCatalogSuggestions = CHRISTIAN_THEMES_PRESETS.filter(th => th.toLowerCase().includes(themeInputSearchValue.toLowerCase()) && !formThemes.includes(th));
   const isCommentInputBlank = customCommentInputValue.trim() === "";
@@ -1665,7 +1561,6 @@ export default function SongEditPage() {
     const checkLines = checkSec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").trim()).filter(l => l.length > 0);
     if (checkLines.length === 0) return false;
     
-    // ✅ SURGICAL FIX: Target beats for ONE pass. Removed head/tail bloat from line calculations.
     const targetAbsoluteBeats = (checkTuple.measures * 4) + checkTuple.beats;
     
     const checkSpreadMeasures = Math.floor(checkTuple.measures / checkLines.length);
@@ -1686,10 +1581,8 @@ export default function SongEditPage() {
   const isMismatched = isRealtimePreviewActive && isAnySectionMismatchedAcrossModal; 
   const isSaveDisabled = isMismatched || !hasUnsavedChanges; 
   
-
   return (
-    // ✅ SURGICAL FIX: Restored the permanent 57px clearance for the global navigation
-    <div ref={editorContentContainerRef} className="h-screen w-full border-b-[57px] border-[#333333] overflow-hidden bg-[#333333] flex flex-col relative animate-in fade-in duration-200">
+    <div ref={editorContentContainerRef} className="h-screen w-full border-[#333333] overflow-hidden bg-[#333333] flex flex-col relative animate-in fade-in duration-200">
       <style dangerouslySetInnerHTML={{__html: `@import url('https://fonts.googleapis.com/css2?family=Nothing+You+Could+Do&display=swap');`}} />
 
       {/* --- UNIFIED SEMANTIC STICKY HEADER --- */}
@@ -1711,7 +1604,6 @@ export default function SongEditPage() {
                 <button type="button" onClick={handleOpenImportModal} className="px-3 py-1.5 text-[11px] font-black text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg block shadow-sm">📥 Import Raw</button>
                 <button type="button" onClick={() => { const nextState = !isRealtimePreviewActive; setIsRealtimePreviewActive(nextState); if (!nextState) { setChordMode("Off"); setIsAddNotesModeActive(false); } }} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all ${isRealtimePreviewActive ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-white border-zinc-200 text-zinc-700'}`}> {isRealtimePreviewActive ? "👁️ Hide Preview" : "👁️ Show Preview"} </button>
           
-                
                 <button type="button" disabled={!isRealtimePreviewActive} onClick={cycleChordMode} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all disabled:opacity-40 min-w-[110px] ${chordMode !== "Off" ? 'bg-amber-500 border-amber-400 text-white' : 'bg-white border-zinc-200 text-zinc-700'}`}> 
                   🎸 Chords: {chordMode}
                 </button>
@@ -1773,7 +1665,6 @@ export default function SongEditPage() {
 
       {/* FULL-BLEED WORKSPACE CANVAS */}
       <div 
-        // ✅ SURGICAL FIX: Adds 80px of internal padding ONLY when the docked player exists!
         className={`flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full ${youtubeVideoId ? 'pb-[80px]' : ''}`} 
         onScroll={handleCanvasScroll}
       >
@@ -1900,7 +1791,6 @@ export default function SongEditPage() {
             <div className="space-y-3">
               {formSections.map((sec) => {
                 const timingTuple = getCentralizedMetricsTuple(sec.type);
-                // ✅ SURGICAL FIX #1: Stop deleting empty lines!
                 const linesRaw = sec.content === "" ? [""] : sec.content.split("\n");
                 const processedLines = linesRaw.map((line) => {
                   return {
@@ -2046,13 +1936,11 @@ export default function SongEditPage() {
                           </div>
                         )}
 
-                        {/* ✅ SURGICAL FIX #2: The Active Rendering Loop */}
                         <div className="space-y-3">
                           {processedLines.map((line, lineIdx) => {
                             const lineMetrics = currentLinesMetrics[lineIdx] || { measures: 4, beats: 0 };
                             const wordsArray = line.rawText.replace(/\{([^\}]+)\}/g, "").match(/(?:\[[^\]]+\]|\S)+/g) || [];
 
-                            // ✅ GHOST SLOT TARGETING
                             const targetWordIdx = wordsArray.length;
                             const isGhostTargeted = (chordMode === "Keyboard" && chordTargetCoordinate?.sectionType === sec.type && chordTargetCoordinate?.lineIdx === lineIdx && chordTargetCoordinate?.wordIdx === targetWordIdx) ||
                                                     (chordMode === "Chords" && chordPickerConfig?.sectionType === sec.type && chordPickerConfig?.lineIdx === lineIdx && chordPickerConfig?.wordIdx === targetWordIdx);
@@ -2140,7 +2028,6 @@ export default function SongEditPage() {
                                     );
                                   })}
 
-                                  {/* ✅ SURGICAL FIX #3: The UI Ghost Slot inside the live engine! */}
                                   {chordMode !== "Off" && (
                                     <div 
                                       key={`ghost-${targetWordIdx}`}
@@ -2599,71 +2486,6 @@ export default function SongEditPage() {
         </div>
       )}
 
-      {isMappingModalOpen && mappingData && (
-    // Elevated the z-index to 250000 so it completely overrides the Import Modal
-    <div className="fixed inset-0 bg-zinc-950/80 backdrop-blur-md z-[250000] flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl p-6 w-full max-w-lg border shadow-2xl space-y-5">
-        
-        <div>
-          <h4 className="text-lg font-black text-zinc-900 tracking-tight flex items-center gap-2">
-            <span className="text-amber-500">⚠️</span> Unfilled Sections Detected
-          </h4>
-          <p className="text-[13px] text-zinc-500 font-medium leading-relaxed mt-1">
-            We couldn't find chord matches for <strong className="text-zinc-800">{mappingData.unfilledStanzas.length} sections</strong>. You can force them to copy chords from a different section, or leave them blank for manual editing.
-          </p>
-        </div>
-
-        <div className="max-h-[45vh] overflow-y-auto space-y-3 custom-scrollbar pr-2">
-          {mappingData.unfilledStanzas.map((unf) => (
-            <div key={unf.id} className="bg-zinc-50 border border-zinc-200 rounded-xl p-3.5 shadow-sm flex items-center justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                <span className="text-[11px] font-black uppercase tracking-widest text-zinc-400 block mb-0.5">Missing Chords</span>
-                <span className="text-sm font-bold text-zinc-800 truncate block">{unf.label}</span>
-              </div>
-              
-              <div className="flex items-center gap-2">
-                <span className="text-zinc-400 text-lg">→</span>
-                <select 
-                  value={stanzaMappings[unf.id] || "blank"}
-                  onChange={(e) => setStanzaMappings(prev => ({ ...prev, [unf.id]: e.target.value }))}
-                  className="bg-white border border-zinc-300 text-zinc-800 text-xs font-bold rounded-lg p-2 outline-none focus:border-purple-500 shadow-sm cursor-pointer"
-                >
-                  <option value="blank">Leave Blank</option>
-                  <optgroup label="Copy Chords From...">
-                    {mappingData.filledStanzas.map(f => (
-                      <option key={f.id} value={f.id}>{f.label}</option>
-                    ))}
-                  </optgroup>
-                </select>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-zinc-100">
-          <button 
-            type="button" 
-            onClick={() => {
-              setPastedRawLyricsText(mappingData.allStanzas.join("\n\n"));
-              setIsMappingModalOpen(false);
-            }} 
-            className="py-3 bg-zinc-100 text-zinc-700 hover:bg-zinc-200 transition-colors text-xs font-black rounded-lg uppercase tracking-wider"
-          >
-            Skip & Leave Blank
-          </button>
-          <button 
-            type="button" 
-            onClick={executeManualStanzaMapping}
-            className="py-3 bg-purple-600 text-white hover:bg-purple-700 transition-colors text-xs font-black rounded-lg shadow-md uppercase tracking-wider"
-          >
-            Apply & Continue
-          </button>
-        </div>
-
-      </div>
-    </div>
-  )}
-
       {isImportModalOpen && (
         <div className="fixed inset-0 bg-zinc-950/60 backdrop-blur-md z-[200000] flex items-center justify-center p-4">
           <div className="bg-white rounded-xl p-5 w-full max-w-xl border shadow-2xl space-y-4">
@@ -2686,20 +2508,17 @@ export default function SongEditPage() {
             </div>
 
             {fetchedLyricsOptions ? (
-              // ✅ NEW: The Rich Options Selection View
               <div className="space-y-3 max-h-[55vh] overflow-y-auto custom-scrollbar pr-2 animate-in fade-in zoom-in-95 duration-200">
                 {fetchedLyricsOptions.map((opt, idx) => (
                   <button 
                     key={idx}
                     type="button"
                     disabled={isScrapingSelection}
-                    // ✅ SURGICAL FIX: Fire the Step 2 Scrape function!
                     onClick={() => handleSelectLyricsCard(opt)}
                     className={`w-full text-left p-3.5 border border-zinc-200 rounded-xl transition-all group shadow-sm bg-zinc-50/50 flex gap-4 items-center ${
                       isScrapingSelection ? 'opacity-50 cursor-wait' : 'hover:bg-purple-50 hover:border-purple-300'
                     }`}
                   >
-                    {/* Thumbnail formatting */}
                     {opt.thumbnail ? (
                        <img src={opt.thumbnail} alt="cover" className="w-16 h-16 rounded-md object-cover shadow-sm shrink-0 bg-zinc-200 border border-zinc-200" />
                     ) : (
@@ -2709,7 +2528,7 @@ export default function SongEditPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-start mb-0.5">
                         <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded shadow-sm ${idx === 0 ? 'text-purple-600 bg-purple-100' : 'text-zinc-600 bg-zinc-200'}`}>
-                        {isScrapingSelection ? "Matching & Injecting Chords..." : opt.type || "Alternative Version"}
+                        {isScrapingSelection ? "Processing Plain Lyrics..." : opt.type || "Alternative Version"}
                       </span>
                       </div>
                       <h5 className="font-black text-zinc-900 text-[15px] tracking-tight truncate">{opt.title}</h5>
@@ -2727,7 +2546,6 @@ export default function SongEditPage() {
                 </button>
               </div>
             ) : (
-              // 🔄 The Original Text Area View
               <>
                 <textarea 
                   rows={16} 
@@ -2746,7 +2564,7 @@ export default function SongEditPage() {
                         if (!window.confirm("You have unsaved text changes. Discard?")) return;
                       }
                       setIsImportModalOpen(false);
-                      setFetchedLyricsOptions(null); // Clear options on hard close
+                      setFetchedLyricsOptions(null);
                     }}
                   >
                     Cancel
@@ -2898,142 +2716,120 @@ export default function SongEditPage() {
         />
       )}
       
-      {youtubeVideoId && (
-        <div 
-          onPointerDown={handlePlayerPointerDown}
-          onPointerMove={handlePlayerPointerMove}
-          onPointerUp={handlePlayerPointerUp}
-          onPointerCancel={handlePlayerPointerUp}
-          className={`fixed left-0 right-0 md:mx-auto md:w-[500px] z-[150000] overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] select-none ${
-            chordMode !== "Off" || chordPickerConfig.isOpen ? 'opacity-0 pointer-events-none' : ''
-          }`}
-          style={{
-            zIndex: isPlayerExpanded ? 150000 : 45, // ✅ FIX 3: Drops safely below the Global FAB (z-50) when docked
-            transform: playerDragY !== 0 
-              ? `translateY(${playerDragY}px)` 
-              : (!isPlayerExpanded && isScrollingDown ? 'translateY(63px)' : 'translateY(0px)'),
-            height: isPlayerExpanded ? '100dvh' : '54px',
-            bottom: isPlayerExpanded ? '0px' : '63px',
-            backgroundColor: isPlayerExpanded ? '#0f0f0f' : '#18181b', // ✅ Matches your dark screenshot
-            color: '#ffffff',
-            borderTop: isPlayerExpanded ? '1px solid transparent' : '1px solid #3f3f46',
-            borderRadius: isPlayerExpanded ? '0px' : '0.75rem',
-            boxShadow: isPlayerExpanded ? 'none' : '0 -4px 20px rgba(0,0,0,0.5)'
-          }}
-        >
-          {/* DOCKED CLICK CATCHER (Expands the player) */}
-          {!isPlayerExpanded && (
-            <div className="absolute inset-0 z-0 cursor-pointer" onClick={() => setIsPlayerExpanded(true)} />
+      {youtubeVideoId && mounted && (
+        <>
+          {/* ========================================= */}
+          {/* MOBILE COLLAPSED (Portaled to Sidebar)    */}
+          {/* ========================================= */}
+          {isMobile && !isPlayerExpanded && document.getElementById("media-player-portal-slot") && createPortal(
+            <div 
+              onClick={() => setIsPlayerExpanded(true)}
+              className="flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-lg transition-transform active:scale-[0.99] border-t border-outline-variant/10"
+            >
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div className="w-10 h-10 rounded-md bg-surface-container flex items-center justify-center shrink-0 overflow-hidden shadow-sm">
+                  <img src={`https://img.youtube.com/vi/${youtubeVideoId}/default.jpg`} alt="thumbnail" className="w-full h-full object-cover opacity-90" />
+                </div>
+                <div className="flex flex-col min-w-0 pr-2 pb-0.5">
+                  <h2 className="font-extrabold text-[14px] text-white truncate tracking-tight leading-tight">
+                    {formTitle || "Unknown Track"}
+                  </h2>
+                  <span className="text-[11px] font-semibold text-zinc-400 truncate mt-0.5">
+                    {formArtist || "Unknown"}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2.5 shrink-0">
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation(); 
+                    initAudioContext();
+                    if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
+                    if (ytPlaying) ytPlayerRef.current.pauseVideo();
+                    else ytPlayerRef.current.playVideo();
+                  }}
+                  className={`w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 ${ytPlaying ? "text-primary" : "text-white"}`}
+                >
+                  {ytPlaying ? (
+                    <svg viewBox="0 0 24 24" className="w-8 h-8 fill-currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" className="w-8 h-8 fill-currentColor ml-1"><path d="M8 5v14l11-7z" /></svg>
+                  )}
+                </button>
+              </div>
+            </div>,
+            document.getElementById("media-player-portal-slot")!
           )}
 
-          {/* DOCKED BACKGROUND PROGRESS BAR */}
-          <div className={`absolute bottom-0 left-0 right-0 h-[2px] bg-zinc-200/50 transition-opacity duration-300 pointer-events-none ${isPlayerExpanded ? 'opacity-0' : 'opacity-100'}`}>
-            <div className="h-full bg-zinc-900 transition-all duration-200 ease-linear" style={{ width: `${ytDuration ? (ytCurrentTime / ytDuration) * 100 : 0}%` }} />
-          </div>
+          {/* ========================================= */}
+          {/* MOBILE EXPANDED OR DESKTOP FIXED          */}
+          {/* ========================================= */}
+          {(!isMobile || isPlayerExpanded) && (
+            <div className={`fixed z-[200000] overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] select-none flex flex-col ${
+              isMobile 
+                ? "inset-0 bg-surface animate-in slide-in-from-bottom-full" 
+                : "bottom-6 left-1/2 -translate-x-1/2 w-[400px] bg-[#18181b] rounded-3xl border border-outline-variant/20 shadow-2xl p-5"
+            }`}>
+               
+               {isMobile && (
+                 <div className="flex items-center justify-between w-full shrink-0 mb-6 pt-safe px-6 mt-4">
+                   <button type="button" onClick={() => setIsPlayerExpanded(false)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer">
+                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="text-on-surface"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                   </button>
+                   <span className="text-[10px] font-black uppercase tracking-widest text-zinc-400">Now Playing</span>
+                   <div className="w-10"></div> 
+                 </div>
+               )}
 
-          {/* TOP BAR (Fullscreen Only) */}
-          <div className={`absolute top-0 left-0 right-0 flex justify-between items-center px-6 pt-safe mt-4 transition-all duration-500 z-10 ${isPlayerExpanded ? 'opacity-100 translate-y-0 delay-100' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
-            <button type="button" onClick={(e) => { e.stopPropagation(); setIsPlayerExpanded(false); }} className="p-2 -ml-2 rounded-full hover:bg-white/10 text-white transition-colors cursor-pointer">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-            </button>
-            <span className="text-[10px] font-black uppercase tracking-widest text-zinc-400">Now Playing</span>
-            <div className="w-11"></div> 
-          </div>
+               <div className={`flex flex-col items-center justify-center flex-1 ${isMobile ? "px-8" : ""}`}>
+                  <div className={`w-full aspect-square rounded-2xl overflow-hidden shadow-2xl mb-8 ${isMobile ? "max-w-[320px]" : "max-h-[240px] mb-4"}`}>
+                    <img src={`https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg`} alt="cover" className="w-full h-full object-cover opacity-90" />
+                  </div>
+                  
+                  <div className="w-full text-center mb-8">
+                    <h2 className="font-black text-2xl text-white tracking-tight mb-1 truncate">{formTitle || "Unknown Track"}</h2>
+                    <p className="font-bold text-sm text-zinc-400 truncate">{formArtist || "Unknown Artist"}</p>
+                  </div>
 
-          {/* MORPHING THUMBNAIL */}
-          <div 
-            className="absolute z-10 overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-zinc-800 pointer-events-none"
-            style={{
-               bottom: isPlayerExpanded ? 'calc(25dvh + 130px)' : '8px',
-               left: isPlayerExpanded ? '50%' : '12px',
-               width: isPlayerExpanded ? 'calc(100vw - 48px)' : '38px',
-               maxWidth: isPlayerExpanded ? '384px' : '38px',
-               height: isPlayerExpanded ? 'calc(100vw - 48px)' : '38px',
-               maxHeight: isPlayerExpanded ? '384px' : '38px',
-               transform: isPlayerExpanded ? 'translateX(-50%)' : 'translateX(0)',
-               borderRadius: isPlayerExpanded ? '12px' : '4px',
-               boxShadow: isPlayerExpanded ? '0 20px 40px rgba(0,0,0,0.4)' : 'none'
-            }}
-          >
-            <img src={`https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg`} alt="cover" className="w-full h-full object-cover opacity-90" />
-          </div>
+                  <div className="w-full max-w-sm mb-8">
+                    <input 
+                      type="range" 
+                      min={0} max={ytDuration || 100} step="0.1"
+                      value={ytCurrentTime} 
+                      onChange={(e) => {
+                        const t = parseFloat(e.target.value);
+                        setYtCurrentTime(t);
+                        if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') ytPlayerRef.current.seekTo(t, true);
+                      }}
+                      className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all mb-2"
+                    />
+                    <div className="flex justify-between text-[11px] font-mono font-bold text-zinc-400 pointer-events-none">
+                      <span>{formatTime(ytCurrentTime)}</span>
+                      <span>-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
+                    </div>
+                  </div>
 
-          {/* MORPHING TEXT */}
-          <div 
-            className="absolute z-10 flex flex-col justify-center transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] pointer-events-none"
-            style={{
-               bottom: isPlayerExpanded ? 'calc(25dvh + 50px)' : '8px',
-               left: isPlayerExpanded ? '50%' : '62px',
-               width: isPlayerExpanded ? 'calc(100vw - 48px)' : 'calc(100% - 120px)',
-               maxWidth: isPlayerExpanded ? '384px' : 'none',
-               height: isPlayerExpanded ? '60px' : '38px',
-               transform: isPlayerExpanded ? 'translateX(-50%)' : 'translateX(0)',
-               textAlign: isPlayerExpanded ? 'center' : 'left'
-            }}
-          >
-            <h2 className={`font-black truncate transition-colors duration-500 ${isPlayerExpanded ? 'text-2xl text-white tracking-tight mb-1' : 'text-[13px] text-zinc-900 leading-tight'}`}>
-              {formTitle || "Unknown Track"}
-            </h2>
-            <p className={`font-bold truncate transition-colors duration-500 ${isPlayerExpanded ? 'text-sm text-zinc-400' : 'text-[11px] text-zinc-500 leading-tight'}`}>
-              {formArtist || "Unknown Artist"}
-            </p>
-          </div>
-
-          {/* FULLSCREEN SCRUBBER (Fade in/out) */}
-          <div 
-            className={`absolute left-[10%] w-[80%] max-w-sm mx-auto transition-all duration-500 z-20 ${isPlayerExpanded ? 'bottom-[20dvh] opacity-100' : 'bottom-[10dvh] opacity-0 pointer-events-none'}`}
-            style={{ left: '50%', transform: 'translateX(-50%)' }}
-          >
-            <input 
-              type="range" 
-              min={0} max={ytDuration || 100} step="0.1"
-              value={ytCurrentTime} 
-              onChange={(e) => {
-                const t = parseFloat(e.target.value);
-                setYtCurrentTime(t);
-                if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') ytPlayerRef.current.seekTo(t, true);
-              }}
-              className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all mb-2"
-            />
-            <div className="flex justify-between text-[11px] font-mono font-bold text-zinc-400 pointer-events-none">
-              <span>{formatTime(ytCurrentTime)}</span>
-              <span>-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
+                  <button 
+                    type="button"
+                    className="w-20 h-20 bg-white text-[#18181b] rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none mb-4"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      initAudioContext();
+                      if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
+                      if (ytPlaying) ytPlayerRef.current.pauseVideo();
+                      else ytPlayerRef.current.playVideo();
+                    }}
+                  >
+                    {ytPlaying ? (
+                      <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor ml-2"><path d="M8 5v14l11-7z" /></svg>
+                    )}
+                  </button>
+               </div>
             </div>
-          </div>
-
-          {/* MORPHING PLAY BUTTON */}
-          <button 
-            type="button"
-            className="absolute z-30 flex items-center justify-center transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] cursor-pointer outline-none"
-            style={{
-               bottom: isPlayerExpanded ? '8dvh' : '7px',
-               // ✅ FIX 2: Locks strictly to the right side so it can't overflow out of bounds
-               right: isPlayerExpanded ? 'auto' : '8px',
-               left: isPlayerExpanded ? '50%' : 'auto',
-               transform: isPlayerExpanded ? 'translateX(-50%)' : 'none',
-               width: isPlayerExpanded ? '84px' : '40px',
-               height: isPlayerExpanded ? '84px' : '40px',
-               backgroundColor: isPlayerExpanded ? '#ffffff' : 'transparent',
-               color: isPlayerExpanded ? '#18181b' : '#ffffff', // ✅ Forces icon to be white when docked
-               borderRadius: '9999px',
-               boxShadow: isPlayerExpanded ? '0 0 40px rgba(255,255,255,0.15)' : 'none'
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              initAudioContext();
-              if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-              if (ytPlaying) ytPlayerRef.current.pauseVideo();
-              else ytPlayerRef.current.playVideo();
-            }}
-          >
-            {ytPlaying ? (
-              <svg className={`transition-all duration-500 ${isPlayerExpanded ? 'w-[34px] h-[34px]' : 'w-[22px] h-[22px]'}`} viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
-            ) : (
-              <svg className={`transition-all duration-500 ${isPlayerExpanded ? 'w-[34px] h-[34px] ml-2' : 'w-[22px] h-[22px] ml-1'}`} viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
-            )}
-          </button>
-
-        </div>
+          )}
+        </>
       )}
 
       <div 

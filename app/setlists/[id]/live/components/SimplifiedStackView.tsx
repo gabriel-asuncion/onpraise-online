@@ -36,10 +36,9 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lastScrollTime = useRef(0);
 
-  // ✅ FIX 3: Robust Spy Scroll Engine ensures Scrubber stays synced!
   const handleScroll = () => {
     const now = Date.now();
-    if (now - lastScrollTime.current < 50) return; // 50ms throttle keeps it buttery smooth
+    if (now - lastScrollTime.current < 50) return; 
     lastScrollTime.current = now;
 
     if (!scrollContainerRef.current) return;
@@ -57,7 +56,6 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
         if (el) {
           const rect = el.getBoundingClientRect();
           const relativeTop = rect.top - containerTop;
-          // If the song hits the upper quadrant of the screen, mark it active!
           if (relativeTop <= 200) {
             activeIdx = song.trackIndex;
           }
@@ -97,7 +95,7 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
     <div 
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      className="flex-1 overflow-y-auto custom-scrollbar bg-[#f8f9fa] relative z-0 scroll-smooth pb-[50vh]"
+      className="flex-1 overflow-y-auto custom-scrollbar bg-surface relative z-0 scroll-smooth pb-[50vh]"
     >
       <style>{`
         @keyframes marquee-dynamic {
@@ -110,10 +108,8 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
         }
       `}</style>
 
-      {/* ======================================================= */}
-      {/* ✅ FIX 1: THE SINGLE DYNAMIC SLOT-MACHINE HEADER          */}
-      {/* ======================================================= */}
-      <div className="sticky top-0 z-40 bg-[#f8f9fa]/95 backdrop-blur-md border-b border-zinc-200 shadow-sm w-full h-[76px] overflow-hidden">
+      {/* DYNAMIC SLOT-MACHINE HEADER */}
+      <div className="sticky top-0 z-40 bg-surface/95 backdrop-blur-md border-b border-outline-variant/20 shadow-sm w-full h-[76px] overflow-hidden">
         <div className="w-full max-w-5xl mx-auto h-full relative">
           {setlistAst.map((song, idx) => {
             const isActive = idx === currentTrackIndex;
@@ -128,19 +124,19 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
                   "translate-y-full opacity-0 pointer-events-none scale-95"
                 }`}
               >
-                <span className="text-blue-600 font-black text-xl md:text-2xl opacity-40 shrink-0">#{song.trackIndex + 1}</span>
+                <span className="text-primary font-black text-xl md:text-2xl opacity-40 shrink-0 tnum">#{String(song.trackIndex + 1).padStart(2, '0')}</span>
                 
                 <div className="flex-1 min-w-0 overflow-hidden relative flex items-center h-8" style={{ maskImage: overflowingTitles[song.trackId] ? "linear-gradient(to right, black 85%, transparent 100%)" : "none", WebkitMaskImage: overflowingTitles[song.trackId] ? "linear-gradient(to right, black 85%, transparent 100%)" : "none" }}>
                   <h2 
                     ref={(el) => { titleRefs.current[song.trackId] = el; }} 
-                    className={`text-2xl md:text-3xl font-black text-zinc-900 tracking-tight leading-none ${overflowingTitles[song.trackId] ? 'animate-marquee-dynamic pr-8' : 'truncate'}`}
+                    className={`text-2xl md:text-[28px] font-extrabold text-on-surface tracking-tight leading-none ${overflowingTitles[song.trackId] ? 'animate-marquee-dynamic pr-8' : 'truncate'}`}
                   >
                     {song.title}
                   </h2>
                 </div>
 
                 <div className="flex items-center gap-2 ml-auto shrink-0 hidden sm:block">
-                  <span className="bg-zinc-200 text-zinc-600 text-[10px] font-black uppercase px-2 py-1 rounded-md shadow-inner">
+                  <span className="bg-surface-container-high text-on-surface-variant text-[10px] font-black uppercase px-2.5 py-1 rounded-md shadow-inner border border-outline-variant/30 tnum">
                     {song.tempo} BPM
                   </span>
                 </div>
@@ -157,13 +153,13 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
            return (
              <div key={song.trackId} className={`flex flex-col relative pb-16 md:pb-24`} id={`stack-song-${song.trackIndex}`}>
                
-               {/* ======================================================= */}
-               {/* SONG SECTIONS TIMELINE                                  */}
-               {/* ======================================================= */}
                <div className="flex flex-col gap-6 md:gap-7 px-4 md:px-8">
                  {song.ast.map((sec: any, secIdx: number) => {
                    const isActive = isCurrentSong && currentSectionIndex === secIdx;
                    const isQueued = queuedTrackIndex === song.trackIndex && queuedSectionIndex === secIdx;
+                   
+                   // Determine Block Type (Red active vs Yellow inactive)
+                   const isEmptyChordOnlySection = sec.lines.length === 0 || (sec.lines.length === 1 && sec.lines[0].words.every((w: any) => !w.word.trim()));
 
                    return (
                      <div
@@ -177,49 +173,63 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
                            handleSectionInteractiveSelection(secIdx);
                          }
                        }}
-                       // ✅ FIX 2: Removed `overflow-hidden` so Badges & Pills pop out flawlessly!
-                       className={`bg-white border rounded-xl md:rounded-2xl px-4 pb-3 pt-5 md:px-5 md:pb-4 md:pt-6 shadow-sm transition-all duration-300 relative cursor-pointer ${
+                       className={`rounded-xl md:rounded-2xl px-4 pb-3 pt-5 md:px-5 md:pb-4 md:pt-6 shadow-sm transition-all duration-300 relative cursor-pointer ${
                          isActive 
-                           ? "border-blue-500 ring-4 ring-blue-500/10 shadow-md z-20 scale-[1.02]" 
+                           ? "bg-surface-container-high shadow-[0_0_24px_rgba(37,99,235,0.22)] scale-[1.02] z-20" 
                            : isQueued
-                           ? "border-purple-500 ring-4 ring-purple-500/10 scale-[1.001] shadow-md z-10"
-                           : "border-zinc-200 opacity-60 hover:opacity-100 hover:border-blue-400 hover:bg-zinc-50/30"
+                           ? "bg-surface-container shadow-[0_0_12px_rgba(147,51,234,0.15)] scale-[1.001] z-10"
+                           : isEmptyChordOnlySection
+                           ? "bg-surface-container-lowest border border-outline-variant/20 hover:bg-surface-container-low"
+                           : "bg-surface-container-low border border-outline-variant/20 opacity-80 hover:opacity-100 hover:border-primary/50"
                        }`}
                      >
                        
-                       {/* The Progress Bar Tracker (Safely wrapped in its own hidden container) */}
+                       {/* Active Sidebar Strip */}
+                       {isActive && (
+                         <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-primary shadow-[0_0_12px_rgba(37,99,235,0.9)] rounded-l-xl md:rounded-l-2xl"></div>
+                       )}
+
+                       {/* Inner Active Progress Tracker */}
                        {isActive && (
                          <div className="absolute inset-0 pointer-events-none overflow-hidden rounded-xl md:rounded-2xl">
-                           <div ref={simplifiedProgressBarRef} className="absolute bottom-0 left-0 h-1.5 md:h-2 bg-blue-500 origin-left scale-x-0 w-full z-0" style={{ willChange: 'transform' }} />
+                           <div ref={simplifiedProgressBarRef} className="absolute bottom-0 left-0 h-1.5 md:h-2 bg-[#2563eb] origin-left scale-x-0 w-full z-0" style={{ willChange: 'transform' }} />
                          </div>
                        )}
 
-                       {/* The Pop-Out Section Badge */}
-                       <div className={`absolute -top-3.5 left-4 flex items-center bg-white border rounded-full p-0.5 pr-3 shadow-sm select-none z-10 transition-colors ${isActive ? "border-blue-400" : "border-blue-200/60"}`}>
-                         <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-black mr-2 shadow-inner ${isActive ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-500"}`}>
-                           {getSectionAbbreviation(sec.section_name)}
+                       {/* Top Badges (No longer clamped by overflow-hidden) */}
+                       <div className="absolute -top-3.5 left-4 flex items-center justify-between w-[calc(100%-2rem)] z-10">
+                         {isActive ? (
+                            <div className="flex items-center gap-2 pl-2 bg-surface-container-high rounded-full shadow-sm">
+                              <span className="px-1.5 py-0.5 rounded text-[9px] bg-primary text-on-primary font-black uppercase tracking-widest shadow-sm">LIVE</span>
+                              <span className="font-section-heading text-[15px] font-extrabold text-on-surface uppercase tracking-tight">{sec.section_name}</span>
+                            </div>
+                         ) : (
+                            <div className="flex items-center gap-1.5">
+                              <span className={`w-5 h-5 rounded-md flex items-center justify-center font-black text-[9px] border shadow-sm ${isEmptyChordOnlySection ? "bg-surface-container-highest text-on-surface border-outline-variant/30" : "bg-primary-container/20 text-primary border-primary/20"}`}>
+                                {getSectionAbbreviation(sec.section_name)}
+                              </span>
+                              <span className="font-badge-caps text-[10px] uppercase text-on-surface-variant tracking-wider font-extrabold shadow-sm bg-surface-container px-2 py-0.5 rounded-md border border-outline-variant/20">
+                                {sec.section_name}
+                              </span>
+                              {isQueued && (<span className="ml-1 text-[8px] font-black bg-[#9333ea] text-white uppercase tracking-widest px-1.5 py-0.5 rounded shadow-sm border border-[#7e22ce]">⚡ QUEUED</span>)}
+                            </div>
+                         )}
+
+                         <div className={`flex items-center gap-1 font-label-sm text-[11px] font-bold border rounded-md px-2 py-0.5 shadow-sm transition-colors ${isActive ? "text-primary bg-primary-container/10 border-primary/20" : "text-on-surface-variant bg-surface-container border-outline-variant/20"}`}>
+                           {isActive && <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>}
+                           <span className={isActive ? "" : "material-symbols-outlined text-[12px] opacity-70"}>{isActive ? "" : "schedule"}</span>
+                           <span className="tnum">{getSectionDurationString(sec.section_name, isCurrentSong ? secIdx : undefined)} {isActive && "Rem."}</span>
                          </div>
-                         <span className={`text-[11px] font-black uppercase tracking-wider ${isActive ? "text-blue-700" : "text-blue-500"}`}>
-                           {sec.section_name}
-                         </span>
-                         {isQueued && (<span className="ml-2 text-[8px] font-black bg-purple-600 text-white uppercase tracking-widest px-1.5 py-0.5 rounded shadow-sm">⚡ QUEUED</span>)}
                        </div>
 
-                       {/* The Pop-Out Duration Pill */}
-                       <div className="absolute -top-3.5 right-4 flex items-center bg-white border border-zinc-200 rounded-full px-2.5 py-1 shadow-sm select-none z-10 transition-colors">
-                         <span className="text-[10px] font-mono font-bold text-zinc-400">
-                           ⏱ {getSectionDurationString(sec.section_name, isCurrentSong ? secIdx : undefined)}
-                         </span>
-                       </div>
-
-                       <div className="pl-0.5 select-text selection:bg-blue-50 text-zinc-800 space-y-0.5 mt-2 relative z-10">
+                       <div className="pl-0.5 select-text selection:bg-primary-container/30 text-on-surface space-y-0.5 mt-2 relative z-10">
                          {sec.lines.length === 0 ? <div className="h-4" /> : sec.lines.map((line: any, lIdx: number) => {
                            const isLineActive = isActive && activeLineIndex === lIdx;
 
                            return (
                              <div 
                                key={lIdx} 
-                               className={`transition-all duration-300 ${isLineActive ? "opacity-100" : isActive ? "opacity-30" : "opacity-100"}`}
+                               className={`transition-all duration-300 ${isLineActive ? "opacity-100" : isActive ? "opacity-35" : "opacity-100"}`}
                              >
                                <MemoizedLyricLine 
                                  line={line} 

@@ -39,62 +39,77 @@ export default function Home() {
   const supabase = createClient();
   const router = useRouter();
   
-  // ✅ SURGICAL FIX: Grab the parameter from the URL
   const searchParams = useSearchParams();
   const inviteCode = searchParams.get("invite");
 
   const [activeSlide, setActiveSlide] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(true);
 
-  // ✅ SURGICAL FIX: Stash the code in local storage BEFORE they leave for Google
-  useEffect(() => {
-    if (inviteCode) {
-      localStorage.setItem("onpraise_pending_invite", inviteCode);
-    }
-  }, [inviteCode]);
-
-  // ✅ SURGICAL ADDITION: PWA Install Engine
+  // PWA Install Engine States
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isInstallable, setIsInstallable] = useState(false);
-
   const [hasInstalledApp, setHasInstalledApp] = useState(false);
   const [isInBrowserTab, setIsInBrowserTab] = useState(true);
-
   const [showInstallSuccessModal, setShowInstallSuccessModal] = useState(false);
 
+  // ✅ SURGICAL FIX: Consolidated Session, Invite, & Profile Completion Routing
   useEffect(() => {
+    // 1. Safely extract invite code and save to local storage immediately
+    let currentInvite = inviteCode;
+    if (!currentInvite && typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      currentInvite = params.get("invite");
+    }
+    
+    if (currentInvite) {
+      localStorage.setItem("onpraise_pending_invite", currentInvite);
+    }
+
+    // ✅ HELPER: Checks profile completion before letting them into the app
+    const checkAndRouteUser = async (session: any) => {
+      const storedInvite = currentInvite || localStorage.getItem("onpraise_pending_invite");
+      
+      if (storedInvite) {
+        router.push(`/onboarding?invite=${storedInvite}`);
+        return;
+      }
+
+      // Check if user has actually finished onboarding (has a team and name)
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("team_id, full_name")
+        .eq("id", session.user.id)
+        .maybeSingle();
+
+      const needsOnboarding = !profile || !profile.team_id || !profile.full_name;
+
+      if (needsOnboarding) {
+        router.push('/onboarding'); // Force to onboarding if incomplete
+      } else {
+        router.push('/dashboard'); // Safe to enter the app
+      }
+    };
+
+    // 2. Check if they are ALREADY logged in on mount
     const checkExistingSession = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
-        router.push('/songs'); 
+        await checkAndRouteUser(session);
       }
     };
     checkExistingSession();
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (session) {
-        router.push('/songs'); 
+    // 3. Catch them right after they finish Google OAuth
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session && event === 'SIGNED_IN') {
+        await checkAndRouteUser(session);
       }
     });
-
-    // ============================================================================
-    // ✅ SURGICAL FIX: Bulletproof Raw URL Extraction
-    // Grabs the code directly from the browser window before Next.js wipes it!
-    // ============================================================================
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const inviteCode = params.get("invite");
-      if (inviteCode) {
-        localStorage.setItem("onpraise_pending_invite", inviteCode);
-        // Clean the URL visually so it looks pristine for the user
-        window.history.replaceState(null, '', window.location.pathname);
-      }
-    }
 
     return () => {
       authListener.subscription.unsubscribe();
     };
-  }, [supabase, router]);
+  }, [supabase, router, inviteCode]);
 
   const handleInstallClick = async () => {
     // ✅ SURGICAL FIX: Fallback alert for iOS or strict browsers
@@ -118,11 +133,19 @@ export default function Home() {
   const handleGoogleLogin = async () => {
     const supabase = createClient();
     
+    // ✅ SURGICAL FIX: Retrieve the saved invite code
+    const pendingInvite = inviteCode || localStorage.getItem("onpraise_pending_invite");
+    
+    // ✅ SURGICAL FIX: Append the invite parameter to the Google redirect URL
+    let callbackUrl = `${window.location.origin}/auth/callback`;
+    if (pendingInvite) {
+      callbackUrl += `?invite=${pendingInvite}`;
+    }
+    
     await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        // ✅ SURGICAL FIX: Force Google to return to your existing route.ts
-        redirectTo: `${window.location.origin}/auth/callback`,
+        redirectTo: callbackUrl,
       },
     });
   };

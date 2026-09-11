@@ -95,12 +95,12 @@ export default function ApprovalsDashboardPage() {
   if (loading) return <GlobalLoader message="FETCHING PENDING APPROVALS..." />;
 
   return (
-    <div className="min-h-screen bg-[#f8f9fa] flex flex-col animate-in fade-in duration-300">
+    <div className="h-full w-full bg-[#f8f9fa] flex flex-col overflow-hidden animate-in fade-in duration-300">
       
       {/* ========================================= */}
       {/* 1. DASHBOARD HEADER                       */}
       {/* ========================================= */}
-      <header className="sticky top-0 z-[100] bg-white px-4 md:px-8 py-5 border-b border-zinc-200 shadow-sm flex items-center justify-between">
+      <header className="shrink-0 z-[100] sticky top-0 z-[100] bg-white px-4 md:px-8 py-5 border-b border-zinc-200 shadow-sm flex items-center justify-between">
         <div className="flex items-center gap-4">
           <button 
             onClick={() => router.push("/songs")}
@@ -127,7 +127,7 @@ export default function ApprovalsDashboardPage() {
       {/* ========================================= */}
       {/* 2. PENDING SONGS FEED                     */}
       {/* ========================================= */}
-      <main className="flex-1 p-4 md:p-8 max-w-5xl mx-auto w-full">
+      <main className="flex-1 overflow-y-auto p-4 md:p-8 max-w-5xl mx-auto w-full custom-scrollbar">
         {pendingSongs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 border-2 border-dashed border-zinc-200 rounded-3xl bg-zinc-50/50 mt-10">
             <span className="text-4xl mb-4">🎉</span>

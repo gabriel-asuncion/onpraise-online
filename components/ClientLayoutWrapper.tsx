@@ -8,7 +8,7 @@ import { useEngine } from "../app/context/EngineContext";
 
 export default function ClientLayoutWrapper({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { isSuperAdmin } = useEngine(); // ✅ 2. Pull the boolean from Context
+  const { isSuperAdmin } = useEngine();
 
   const isFullscreenRoute = pathname === "/" || pathname === "/onboarding";
 
@@ -16,22 +16,24 @@ export default function ClientLayoutWrapper({ children }: { children: React.Reac
     return (
       <main className="min-h-screen w-full relative">
         {children}
-        {/* ✅ 3. Conditionally render */}
         {isSuperAdmin && <DevFab />} 
       </main>
     );
   }
 
   return (
-    <div className="flex min-h-screen w-full relative">
+    <div className="flex h-full w-full relative overflow-hidden bg-surface">
       <Sidebar />
-      <main className="flex-1 overflow-x-hidden relative min-w-0 md:pb-0">
-        <div className="">
-          {children}
-        </div>
-        {/* {children} */}
+      {/* 
+        ✅ SURGICAL FIX: 
+        Removed 'overflow-y-auto' and 'pb-20'. 
+        Changed to 'overflow-hidden flex flex-col h-full' so it acts as a rigid frame.
+        The child pages now control their own internal scrolling perfectly.
+      */}
+      <main className="flex-1 flex flex-col relative min-w-0 h-full overflow-hidden">
+        {children}
       </main>
-      {/* ✅ 3. Conditionally render */}
+      
       {isSuperAdmin && <DevFab />}
     </div>
   );
