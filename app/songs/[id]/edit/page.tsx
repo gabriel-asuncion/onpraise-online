@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useMemo } from "react";
-import { createPortal } from "react-dom"; // ✅ Added for portaling into Sidebar
+import { createPortal } from "react-dom";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
@@ -62,19 +62,20 @@ interface SectionTimingMap {
   };
 }
 
+// ✅ SURGICAL FIX: Dark-mode ready section palette colors matching the dashboard aesthetic
 const SECTION_BASE_CATALOG = [
-  { id: "V", display: "Verse", abbr: "V", color: "text-sky-500 border-sky-300 bg-sky-50" },
-  { id: "PC", display: "Pre-Chorus", abbr: "PC", color: "text-orange-500 border-orange-300 bg-orange-50" },
-  { id: "C",  display: "Chorus", abbr: "C", color: "text-orange-500 border-orange-300 bg-orange-50" },
-  { id: "PoC", display: "Post-Chorus", abbr: "PoC", color: "text-orange-500 border-orange-300 bg-orange-50" },
-  { id: "R",  display: "Refrain", abbr: "R", color: "text-orange-500 border-orange-300 bg-orange-50" },
-  { id: "B",  display: "Bridge", abbr: "B", color: "text-blue-500 border-blue-300 bg-blue-50" },
-  { id: "IN", display: "Intro", abbr: "IN", color: "text-emerald-500 border-emerald-300 bg-emerald-50" },
-  { id: "I",  display: "Instrumental", abbr: "I", color: "text-emerald-500 border-emerald-300 bg-emerald-50" },
-  { id: "IT", display: "Interlude", Leit: "IT", color: "text-emerald-500 border-emerald-300 bg-emerald-50" },
-  { id: "O",  display: "Outro", abbr: "O", color: "text-purple-500 border-purple-300 bg-purple-50" },
-  { id: "T",  display: "Tag", abbr: "T", color: "text-amber-500 border-amber-300 bg-amber-50" },
-  { id: "AD", display: "Ad Lib", abbr: "AL", color: "text-rose-500 border-rose-300 bg-rose-50" }
+  { id: "V", display: "Verse", abbr: "V", color: "text-sky-400 border-sky-500/30 bg-sky-500/10" },
+  { id: "PC", display: "Pre-Chorus", abbr: "PC", color: "text-orange-400 border-orange-500/30 bg-orange-500/10" },
+  { id: "C",  display: "Chorus", abbr: "C", color: "text-orange-400 border-orange-500/30 bg-orange-500/10" },
+  { id: "PoC", display: "Post-Chorus", abbr: "PoC", color: "text-orange-400 border-orange-500/30 bg-orange-500/10" },
+  { id: "R",  display: "Refrain", abbr: "R", color: "text-orange-400 border-orange-500/30 bg-orange-500/10" },
+  { id: "B",  display: "Bridge", abbr: "B", color: "text-primary border-primary/30 bg-primary/10" },
+  { id: "IN", display: "Intro", abbr: "IN", color: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" },
+  { id: "I",  display: "Instrumental", abbr: "I", color: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" },
+  { id: "IT", display: "Interlude", abbr: "IT", color: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" },
+  { id: "O",  display: "Outro", abbr: "O", color: "text-purple-400 border-purple-500/30 bg-purple-500/10" },
+  { id: "T",  display: "Tag", abbr: "T", color: "text-secondary border-secondary/30 bg-secondary/10" },
+  { id: "AD", display: "Ad Lib", abbr: "AL", color: "text-rose-400 border-rose-500/30 bg-rose-500/10" }
 ];
 
 const CHRISTIAN_THEMES_PRESETS = [
@@ -199,14 +200,14 @@ const ChordWheelOverlay = ({ config, deck, onSelect, onCancel }: { config: any, 
 
   return (
     <div className="fixed inset-0 z-[600000] touch-none select-none overflow-hidden animate-in fade-in duration-150">
-      <div className="absolute inset-0 bg-zinc-950/20 backdrop-blur-[2px]" />
+      <div className="absolute inset-0 bg-[#111113]/40 backdrop-blur-[2px]" />
       
       <div 
-        className="absolute shadow-2xl bg-white/90 backdrop-blur-xl"
+        className="absolute shadow-2xl bg-surface-container/95 backdrop-blur-xl"
         style={{
            left: config.x, top: config.y, width: 260, height: 260,
            transform: 'translate(-50%, -50%)', borderRadius: '50%',
-           clipPath: clipStyle, boxShadow: '0 30px 60px rgba(0,0,0,0.3), inset 0 0 0 1px rgba(0,0,0,0.05)'
+           clipPath: clipStyle, boxShadow: '0 30px 60px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.05)'
         }}
       >
          <svg width="260" height="260" viewBox="-130 -130 260 260" className="absolute top-0 left-0 opacity-10 pointer-events-none">
@@ -217,7 +218,7 @@ const ChordWheelOverlay = ({ config, deck, onSelect, onCancel }: { config: any, 
               else lineTheta = 270 - (i * 30) - 15;
               const lx = Math.cos(lineTheta * Math.PI / 180) * 130;
               const ly = Math.sin(lineTheta * Math.PI / 180) * 130;
-              return <line key={i} x1="0" y1="0" x2={lx} y2={ly} stroke="#000" strokeWidth="2.5" />;
+              return <line key={i} x1="0" y1="0" x2={lx} y2={ly} stroke="#fff" strokeWidth="2.5" />;
            })}
          </svg>
       </div>
@@ -228,20 +229,20 @@ const ChordWheelOverlay = ({ config, deck, onSelect, onCancel }: { config: any, 
          return (
             <div 
               key={i}
-              className={`absolute w-16 h-16 -ml-8 -mt-8 rounded-full flex flex-col items-center justify-center transition-all duration-150 leading-none ${isActive ? 'bg-blue-600 text-white scale-125 shadow-xl font-black' : 'bg-transparent text-zinc-700 font-bold'}`}
+              className={`absolute w-16 h-16 -ml-8 -mt-8 rounded-full flex flex-col items-center justify-center transition-all duration-150 leading-none ${isActive ? 'bg-primary text-on-primary scale-125 shadow-xl font-black' : 'bg-transparent text-on-surface font-bold'}`}
               style={{ left: config.x + pos.x, top: config.y + pos.y }}
             >
               <span className={isActive ? 'text-[22px]' : 'text-[18px]'}>{chord.root}</span>
-              {chord.suffix && <span className={`text-[10px] mt-0.5 ${isActive ? 'text-blue-100' : 'text-zinc-400'}`}>{chord.suffix}</span>}
+              {chord.suffix && <span className={`text-[10px] mt-0.5 ${isActive ? 'text-primary-container' : 'text-on-surface-variant'}`}>{chord.suffix}</span>}
             </div>
          );
       })}
 
       <div 
-        className={`absolute w-14 h-14 -ml-7 -mt-7 rounded-full shadow-lg border flex items-center justify-center font-black text-xl transition-all duration-150 ${activeIndex === null ? 'scale-110 bg-white text-zinc-900 border-zinc-200' : 'scale-95 bg-zinc-100 text-zinc-400 border-zinc-200'}`}
+        className={`absolute w-14 h-14 -ml-7 -mt-7 rounded-full shadow-lg border flex items-center justify-center font-black text-xl transition-all duration-150 ${activeIndex === null ? 'scale-110 bg-surface-container-high text-on-surface border-outline-variant/30' : 'scale-95 bg-surface-container text-on-surface-variant border-outline-variant/20'}`}
         style={{ left: config.x, top: config.y }}
       >
-        ✕
+        <span className="material-symbols-outlined text-[20px]">close</span>
       </div>
     </div>
   );
@@ -276,7 +277,6 @@ export default function SongEditPage() {
   const [isScrollingDown, setIsScrollingDown] = useState(false);
   const lastScrollY = useRef(0);
 
-  // ✅ SURGICAL ADDITION: Portal Mounting Engine
   const [mounted, setMounted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
 
@@ -291,7 +291,6 @@ export default function SongEditPage() {
   const { initAudioContext, playZeroLatencyAudio, fetchAndDecodeAudio } = useWebAudioEngine();
   const lastTickedBeatRef = useRef<number>(-1);
 
-  // Load the click sounds into memory when the edit page opens
   useEffect(() => {
     if (typeof window !== "undefined") {
       fetchAndDecodeAudio(`/sound_files/metronome_blip_1.wav`, `metronome_blip_1`);
@@ -334,16 +333,19 @@ export default function SongEditPage() {
   const [ytDuration, setYtDuration] = useState(0);
   const ytTimeTrackerRef = useRef<number | null>(null);
 
-  // ✅ SURGICAL ADDITION: Tell the Sidebar to slide down to 68px when playing!
+  // ✅ SURGICAL ADDITION: Real-time Metronome Mute state
+  const [isMetronomeMuted, setIsMetronomeMuted] = useState(false);
+  const isMetronomeMutedRef = useRef(false);
+  useEffect(() => {
+    isMetronomeMutedRef.current = isMetronomeMuted;
+  }, [isMetronomeMuted]);
+
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: ytPlaying }));
     }
   }, [ytPlaying]);
 
-  // ============================================================================
-  // Media Player Gesture & State Engine
-  // ============================================================================
   const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
   const [playerDragY, setPlayerDragY] = useState(0);
   const isPlayerDraggingRef = useRef(false);
@@ -406,7 +408,10 @@ export default function SongEditPage() {
             if (currentBeat !== lastTickedBeatRef.current) {
               if (currentBeat > lastTickedBeatRef.current) {
                 const isDownbeat = currentBeat % 4 === 0; 
-                playZeroLatencyAudio(isDownbeat ? 'metronome_blip_1' : 'metronome_blip_2', 1.0);
+                // ✅ SURGICAL FIX: Only play the click if the user hasn't muted it
+                if (!isMetronomeMutedRef.current) {
+                  playZeroLatencyAudio(isDownbeat ? 'metronome_blip_1' : 'metronome_blip_2', 1.0);
+                }
               }
               lastTickedBeatRef.current = currentBeat;
             }
@@ -620,43 +625,32 @@ export default function SongEditPage() {
     }
   };
 
-  // ✅ SURGICAL UPDATE: Fridged the Chord Engine and mapped straight to text injection
   const handleSelectLyricsCard = async (opt: any) => {
     let baseLyrics = opt.lyrics || "";
     setIsScrapingSelection(true);
 
-    console.log("🚀 [Step 1] Starting Smart Fetch pipeline...");
-
     try {
-      // --- FETCH GENIUS LYRICS ---
       if (!baseLyrics) {
         if (!opt.url) {
           alert("Missing URL to scrape lyrics from.");
           setIsScrapingSelection(false); return;
         }
         
-        console.log("🔍 [Step 2] Fetching base lyrics from Genius URL...");
         const res = await fetch(`/api/lyrics?url=${encodeURIComponent(opt.url)}&action=scrape`);
         const data = await res.json();
         
         if (res.ok && data.lyrics) {
           baseLyrics = data.lyrics;
-          console.log("✅ [Step 2] Genius lyrics fetched successfully!");
         } else {
           alert(data.error || "Failed to extract Genius lyrics.");
           setIsScrapingSelection(false); return;
         }
       }
 
-      // --- GITHUB CHORD SCRAPING FRIDGED ---
-      console.log("🎸 [Step 3] Chord Engine Fridged. Injecting plain lyrics.");
       setPastedRawLyricsText(baseLyrics);
-
-      console.log("🎉 [Step 4] Pipeline complete. Opening editor view.");
       setFetchedLyricsOptions(null); 
       
     } catch (err) {
-      console.error("🚨 [Fatal Pipeline Error]:", err);
       alert("A critical error occurred processing the song data. Check console.");
     } finally {
       setIsScrapingSelection(false);
@@ -1553,7 +1547,36 @@ export default function SongEditPage() {
   const isCommentInputBlank = customCommentInputValue.trim() === "";
 
   if (loading) {
-    return <GlobalLoader message="LOADING SONGS DETAILS..." />;
+    return (
+      <div className="h-[100dvh] w-full overflow-hidden bg-surface flex flex-col relative animate-in slide-in-from-right-full fade-in duration-300 ease-out">
+        {/* SKELETON HEADER */}
+        <header className="sticky top-0 z-[100] w-full flex-shrink-0 bg-surface/90 border-b border-outline-variant/30 shadow-sm">
+          <div className="flex items-center justify-between px-4 md:px-8 py-3.5 w-full">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-surface-container-high animate-pulse" />
+              <div className="w-48 h-5 bg-surface-container-high rounded animate-pulse" />
+            </div>
+            <div className="hidden md:flex items-center gap-2">
+              <div className="w-24 h-7 rounded-lg bg-surface-container-high animate-pulse" />
+              <div className="w-32 h-7 rounded-lg bg-surface-container-high animate-pulse" />
+            </div>
+          </div>
+          <div className="px-4 md:px-8 flex items-center border-t border-outline-variant/30 bg-surface-container-lowest/30">
+            <div className="py-4 flex gap-4 w-full">
+              <div className="w-16 h-3 bg-surface-container-high rounded animate-pulse" />
+              <div className="w-16 h-3 bg-surface-container-high rounded animate-pulse" />
+              <div className="w-20 h-3 bg-surface-container-high rounded animate-pulse" />
+            </div>
+          </div>
+        </header>
+        
+        {/* SKELETON CANVAS */}
+        <div className="flex-1 p-4 md:p-8 space-y-4">
+          <div className="w-full h-[250px] bg-surface-container-low border border-outline-variant/30 rounded-2xl animate-pulse shadow-sm" />
+          <div className="w-full h-[400px] bg-surface-container-low border border-outline-variant/30 rounded-2xl animate-pulse shadow-sm" />
+        </div>
+      </div>
+    );
   }
 
   const isAnySectionMismatchedAcrossModal = formSections.some((checkSec) => {
@@ -1582,17 +1605,21 @@ export default function SongEditPage() {
   const isSaveDisabled = isMismatched || !hasUnsavedChanges; 
   
   return (
-    <div ref={editorContentContainerRef} className="h-screen w-full border-[#333333] overflow-hidden bg-[#333333] flex flex-col relative animate-in fade-in duration-200">
+    <div 
+      ref={editorContentContainerRef} 
+      // ✅ SURGICAL FIX: Applied slide-in-from-right-full to match the skeleton
+      className="h-[100dvh] w-full overflow-hidden bg-surface flex flex-col relative animate-in slide-in-from-right-full fade-in duration-300 ease-out"
+    >
       <style dangerouslySetInnerHTML={{__html: `@import url('https://fonts.googleapis.com/css2?family=Nothing+You+Could+Do&display=swap');`}} />
 
       {/* --- UNIFIED SEMANTIC STICKY HEADER --- */}
-      <header className="sticky top-0 z-[100] w-full flex-shrink-0 bg-white border-b border-zinc-200 shadow-sm supports-[backdrop-filter]:bg-white/95 supports-[backdrop-filter]:backdrop-blur-sm">
+      <header className="sticky top-0 z-[100] w-full flex-shrink-0 bg-surface/90 border-b border-outline-variant/30 shadow-sm supports-[backdrop-filter]:backdrop-blur-xl">
         <div className="flex items-center justify-between px-4 md:px-8 py-3.5 w-full">
           <div className="flex items-center gap-3">
-            <button type="button" onClick={handleAttemptDismissal} className="w-8 h-8 rounded-full bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-bold flex items-center justify-center transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+            <button type="button" onClick={handleAttemptDismissal} className="w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant font-bold flex items-center justify-center transition-colors">
+              <span className="material-symbols-outlined text-[18px]">arrow_back</span>
             </button>
-            <h1 className="font-black text-base md:text-lg text-zinc-900 tracking-tight" style={{ fontFamily: "Georgia, serif" }}>
+            <h1 className="font-black text-base md:text-lg text-on-surface tracking-tight" style={{ fontFamily: "Georgia, serif" }}>
               Modify Worship Arrangement
             </h1>
           </div>
@@ -1601,36 +1628,44 @@ export default function SongEditPage() {
           <div className="hidden md:flex items-center gap-2 select-none">
             {editorActiveTab === "content" && (
               <>
-                <button type="button" onClick={handleOpenImportModal} className="px-3 py-1.5 text-[11px] font-black text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg block shadow-sm">📥 Import Raw</button>
-                <button type="button" onClick={() => { const nextState = !isRealtimePreviewActive; setIsRealtimePreviewActive(nextState); if (!nextState) { setChordMode("Off"); setIsAddNotesModeActive(false); } }} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all ${isRealtimePreviewActive ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-white border-zinc-200 text-zinc-700'}`}> {isRealtimePreviewActive ? "👁️ Hide Preview" : "👁️ Show Preview"} </button>
+                <button type="button" onClick={handleOpenImportModal} className="px-3 py-1.5 text-[11px] font-black text-primary bg-primary-container/20 border border-primary/20 hover:bg-primary-container/40 rounded-lg shadow-sm flex items-center transition-colors">
+                  <span className="material-symbols-outlined text-[14px] mr-1">download</span> Import Raw
+                </button>
+                <button type="button" onClick={() => { const nextState = !isRealtimePreviewActive; setIsRealtimePreviewActive(nextState); if (!nextState) { setChordMode("Off"); setIsAddNotesModeActive(false); } }} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all flex items-center ${isRealtimePreviewActive ? 'bg-primary border-primary/50 text-on-primary shadow-md' : 'bg-surface-container border-outline-variant/30 text-on-surface-variant'}`}>
+                  <span className="material-symbols-outlined text-[14px] mr-1">{isRealtimePreviewActive ? 'visibility_off' : 'visibility'}</span> 
+                  {isRealtimePreviewActive ? "Hide Preview" : "Show Preview"}
+                </button>
           
-                <button type="button" disabled={!isRealtimePreviewActive} onClick={cycleChordMode} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all disabled:opacity-40 min-w-[110px] ${chordMode !== "Off" ? 'bg-amber-500 border-amber-400 text-white' : 'bg-white border-zinc-200 text-zinc-700'}`}> 
-                  🎸 Chords: {chordMode}
+                <button type="button" disabled={!isRealtimePreviewActive} onClick={cycleChordMode} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all disabled:opacity-40 min-w-[110px] flex items-center ${chordMode !== "Off" ? 'bg-secondary border-secondary/50 text-on-secondary shadow-md' : 'bg-surface-container border-outline-variant/30 text-on-surface-variant'}`}> 
+                  <span className="material-symbols-outlined text-[14px] mr-1">music_note</span>
+                  Chords: {chordMode}
                 </button>
                 
-                <button type="button" disabled={!isRealtimePreviewActive} onClick={() => { setIsAddNotesModeActive(!isAddNotesModeActive); setChordMode("Off"); }} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all disabled:opacity-40 ${isAddNotesModeActive ? 'bg-purple-600 border-purple-500 text-white shadow-md' : 'bg-white border-zinc-200 text-zinc-700'}`}> 📝 Add Notes </button>
+                <button type="button" disabled={!isRealtimePreviewActive} onClick={() => { setIsAddNotesModeActive(!isAddNotesModeActive); setChordMode("Off"); }} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all disabled:opacity-40 flex items-center ${isAddNotesModeActive ? 'bg-purple-500 border-purple-400/50 text-white shadow-md' : 'bg-surface-container border-outline-variant/30 text-on-surface-variant'}`}>
+                  <span className="material-symbols-outlined text-[14px] mr-1">edit_note</span> Add Notes 
+                </button>
               </>
             )}
 
-            <div className="w-px h-6 bg-zinc-200 mx-1" />
+            <div className="w-px h-6 bg-outline-variant/30 mx-1" />
             {(activeRole === "admin" || activeRole === "member") && (
               <button 
                 type="button" 
                 disabled={isSaveDisabled} 
-                className={`px-4 py-1.5 rounded-lg font-black text-[11px] uppercase tracking-wider transition-all ${isSaveDisabled ? "bg-zinc-100 text-zinc-400 border border-zinc-200 cursor-not-allowed opacity-80" : "bg-blue-600 hover:bg-blue-700 text-white shadow-md cursor-pointer"}`} 
+                className={`px-4 py-1.5 rounded-lg font-black text-[11px] uppercase tracking-wider transition-all flex items-center ${isSaveDisabled ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed opacity-80" : "bg-primary hover:bg-primary/90 text-on-primary shadow-md cursor-pointer"}`} 
                 onClick={handleCommitSongChangesToDB}
               >
-                {isMismatched ? "🔒 Mismatch" : (!hasUnsavedChanges ? "No Changes" : "Save Arrangement")}
+                {isMismatched ? <><span className="material-symbols-outlined text-[14px] mr-1">lock</span> Mismatch</> : (!hasUnsavedChanges ? "No Changes" : "Save Arrangement")}
               </button>
             )}
           </div>
         </div>
 
-        <nav className="flex flex-col select-none w-full border-t border-zinc-100">
-          <div className="px-4 md:px-8 flex justify-between items-center bg-zinc-50/30">
+        <nav className="flex flex-col select-none w-full border-t border-outline-variant/30">
+          <div className="px-4 md:px-8 flex justify-between items-center bg-surface-container-lowest/30">
             <div className="flex gap-4 text-xs font-bold">
               {(["details", "content", "structure"] as const).map(tab => (
-                <button key={tab} type="button" onClick={() => setEditorActiveTab(tab)} className={`py-3 capitalize tracking-wide transition-all border-b-2 font-black ${editorActiveTab === tab ? 'border-blue-600 text-blue-600' : 'border-transparent text-zinc-400 hover:text-zinc-600'}`}>{tab}</button>
+                <button key={tab} type="button" onClick={() => setEditorActiveTab(tab)} className={`py-3 capitalize tracking-wide transition-all border-b-2 font-black ${editorActiveTab === tab ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}>{tab}</button>
               ))}
             </div>
 
@@ -1639,7 +1674,7 @@ export default function SongEditPage() {
                 <button 
                   type="button" 
                   disabled={isSaveDisabled} 
-                  className={`px-3 py-1.5 rounded-md font-black text-[9px] uppercase tracking-wider transition-all shadow-sm ${isSaveDisabled ? "bg-zinc-100 text-zinc-400 border border-zinc-200 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700 text-white"}`} 
+                  className={`px-3 py-1.5 rounded-md font-black text-[9px] uppercase tracking-wider transition-all shadow-sm flex items-center ${isSaveDisabled ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed" : "bg-primary hover:bg-primary/90 text-on-primary"}`} 
                   onClick={handleCommitSongChangesToDB}
                 >
                   {isMismatched ? "Error" : (!hasUnsavedChanges ? "Saved" : "Save")}
@@ -1650,14 +1685,21 @@ export default function SongEditPage() {
 
           {/* Mobile Quick Action Action Row */}
           {editorActiveTab === "content" && (
-            <div className="w-full bg-zinc-50/80 p-2 flex items-center gap-1.5 overflow-x-auto overflow-y-hidden flex-nowrap scrollbar-none border-t border-zinc-100 md:hidden">
-              <button type="button" onClick={handleOpenImportModal} className="px-2.5 py-1.5 bg-white border border-zinc-200 rounded-md text-[9px] font-black uppercase tracking-wider text-zinc-700 shrink-0 shadow-sm">📥 Import</button>
-              <button type="button" onClick={() => { const nextState = !isRealtimePreviewActive; setIsRealtimePreviewActive(nextState); if (!nextState) { setChordMode("Off"); setIsAddNotesModeActive(false); } }} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border shadow-sm transition-colors ${isRealtimePreviewActive ? 'bg-blue-600 border-blue-500 text-white' : 'bg-white border-zinc-200 text-zinc-700'}`}>👁️ {isRealtimePreviewActive ? "Hide Live" : "Preview"}</button>
-              <button type="button" disabled={!isRealtimePreviewActive} onClick={cycleChordMode} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border transition-all disabled:opacity-40 ${chordMode !== "Off" ? 'bg-amber-500 border-amber-400 text-white shadow-sm' : 'bg-white border-zinc-200 text-zinc-700'}`}>
-                🎸 {chordMode === "Off" ? "Chords" : `Mode: ${chordMode}`}
+            <div className="w-full bg-surface-container p-2 flex items-center gap-1.5 overflow-x-auto overflow-y-hidden flex-nowrap scrollbar-none border-t border-outline-variant/30 md:hidden">
+              <button type="button" onClick={handleOpenImportModal} className="px-2.5 py-1.5 bg-surface-container-low border border-outline-variant/30 rounded-md text-[9px] font-black uppercase tracking-wider text-on-surface shrink-0 shadow-sm flex items-center">
+                <span className="material-symbols-outlined text-[14px] mr-1">download</span> Import
               </button>
-              
-              <button type="button" disabled={!isRealtimePreviewActive} onClick={() => { setIsAddNotesModeActive(!isAddNotesModeActive); setChordMode("Off"); }} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border transition-all disabled:opacity-40 ${isAddNotesModeActive ? 'bg-purple-600 border-purple-500 text-white shadow-sm' : 'bg-white border-zinc-200 text-zinc-700'}`}>📝 Note Rows</button>
+              <button type="button" onClick={() => { const nextState = !isRealtimePreviewActive; setIsRealtimePreviewActive(nextState); if (!nextState) { setChordMode("Off"); setIsAddNotesModeActive(false); } }} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border shadow-sm transition-colors flex items-center ${isRealtimePreviewActive ? 'bg-primary border-primary/50 text-on-primary' : 'bg-surface-container-low border-outline-variant/30 text-on-surface'}`}>
+                <span className="material-symbols-outlined text-[14px] mr-1">{isRealtimePreviewActive ? 'visibility_off' : 'visibility'}</span> 
+                {isRealtimePreviewActive ? "Hide Live" : "Preview"}
+              </button>
+              <button type="button" disabled={!isRealtimePreviewActive} onClick={cycleChordMode} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border transition-all disabled:opacity-40 flex items-center ${chordMode !== "Off" ? 'bg-secondary border-secondary/50 text-on-secondary shadow-sm' : 'bg-surface-container-low border-outline-variant/30 text-on-surface'}`}>
+                <span className="material-symbols-outlined text-[14px] mr-1">music_note</span>
+                {chordMode === "Off" ? "Chords" : `Mode: ${chordMode}`}
+              </button>
+              <button type="button" disabled={!isRealtimePreviewActive} onClick={() => { setIsAddNotesModeActive(!isAddNotesModeActive); setChordMode("Off"); }} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border transition-all disabled:opacity-40 flex items-center ${isAddNotesModeActive ? 'bg-purple-500 border-purple-400/50 text-white shadow-sm' : 'bg-surface-container-low border-outline-variant/30 text-on-surface'}`}>
+                <span className="material-symbols-outlined text-[14px] mr-1">edit_note</span> Note Rows
+              </button>
             </div>
           )}
         </nav>
@@ -1665,21 +1707,21 @@ export default function SongEditPage() {
 
       {/* FULL-BLEED WORKSPACE CANVAS */}
       <div 
-        className={`flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full ${youtubeVideoId ? 'pb-[80px]' : ''}`} 
+        className={`flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full pb-[64px] ${youtubeVideoId ? 'pb-[80px]' : ''}`} 
         onScroll={handleCanvasScroll}
       >
         {editorActiveTab === "details" && (
           <div className="w-full animate-in fade-in">
-            <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-zinc-200 space-y-4 shadow-sm">
+            <div className="bg-surface-container-lowest p-4 md:p-6 rounded-xl md:rounded-2xl border border-outline-variant/30 space-y-4 shadow-sm">
               <div className="relative">
-                <label className="text-[9px] font-black text-zinc-400 uppercase tracking-widest block mb-1">Track Title Signature *</label>
-                <input type="text" value={formTitle} onFocus={() => setIsTitleDropdownFocused(true)} onBlur={() => setTimeout(() => setIsTitleDropdownFocused(false), 200)} onChange={e => { setHasUnsavedChanges(true); setFormTitle(e.target.value); }} className="w-full border border-zinc-200 focus:border-blue-500 rounded-xl p-2.5 text-xs font-bold text-zinc-800 bg-zinc-50/50 outline-none transition-all" placeholder="e.g. Washed" />
+                <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block mb-1">Track Title Signature *</label>
+                <input type="text" value={formTitle} onFocus={() => setIsTitleDropdownFocused(true)} onBlur={() => setTimeout(() => setIsTitleDropdownFocused(false), 200)} onChange={e => { setHasUnsavedChanges(true); setFormTitle(e.target.value); }} className="w-full border border-outline-variant/30 focus:border-primary rounded-xl p-2.5 text-xs font-bold text-on-surface bg-surface-container outline-none transition-all" placeholder="e.g. Washed" />
                 {isTitleDropdownFocused && filteredTitleSuggestions.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-zinc-200 rounded-xl max-h-48 overflow-y-auto z-[3000] shadow-xl custom-scrollbar">
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-surface-container-high border border-outline-variant/50 rounded-xl max-h-48 overflow-y-auto z-[3000] shadow-xl custom-scrollbar">
                     {filteredTitleSuggestions.map(song => (
-                      <button key={song.id} type="button" className="w-full px-3 py-2 text-left block border-b border-zinc-100 last:border-0 hover:bg-zinc-50 transition-colors" onClick={() => { setHasUnsavedChanges(true); setFormTitle(song.title); if (song.artist && song.artist !== "Unknown Artist") setFormArtist(song.artist); }}>
-                        <div className="text-xs font-bold text-zinc-700">{song.title}</div>
-                        <div className="text-[9px] font-bold text-zinc-400">{song.artist}</div>
+                      <button key={song.id} type="button" className="w-full px-3 py-2 text-left block border-b border-outline-variant/30 last:border-0 hover:bg-surface-bright transition-colors" onClick={() => { setHasUnsavedChanges(true); setFormTitle(song.title); if (song.artist && song.artist !== "Unknown Artist") setFormArtist(song.artist); }}>
+                        <div className="text-xs font-bold text-on-surface">{song.title}</div>
+                        <div className="text-[9px] font-bold text-on-surface-variant">{song.artist}</div>
                       </button>
                     ))}
                   </div>
@@ -1687,60 +1729,62 @@ export default function SongEditPage() {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[9px] font-black text-zinc-400 uppercase tracking-widest block mb-1">BPM Tempo Count</label>
+                  <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block mb-1">BPM Tempo Count</label>
                   <div className="relative flex items-center">
-                    <input type="number" value={formTempo} className="w-full border border-zinc-200 focus:border-blue-500 rounded-xl p-2.5 text-xs outline-none pr-16 bg-zinc-50/50" onChange={e => { setHasUnsavedChanges(true); setFormTempo(e.target.value); }} />
-                    <button type="button" onClick={() => { setTapTimestamps([]); setIsTapBpmModalOpen(true); }} className="absolute right-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors shadow-sm">TAP</button>
+                    <input type="number" value={formTempo} className="w-full border border-outline-variant/30 focus:border-primary rounded-xl p-2.5 text-xs outline-none pr-16 bg-surface-container text-on-surface" onChange={e => { setHasUnsavedChanges(true); setFormTempo(e.target.value); }} />
+                    <button type="button" onClick={() => { setTapTimestamps([]); setIsTapBpmModalOpen(true); }} className="absolute right-1.5 px-3 py-1.5 bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors shadow-sm">TAP</button>
                   </div>
                 </div>
                 <div>
-                  <label className="text-[9px] font-black text-zinc-400 uppercase tracking-widest block mb-1">Original Target Key Signature *</label>
-                  <button type="button" onClick={() => handleOpenKeySelectionPopup()} className="w-full border border-zinc-200 focus:border-blue-500 rounded-xl p-2.5 text-xs font-bold text-zinc-800 bg-zinc-50/50 text-left flex justify-between items-center outline-none">
+                  <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block mb-1">Original Target Key Signature *</label>
+                  <button type="button" onClick={() => handleOpenKeySelectionPopup()} className="w-full border border-outline-variant/30 focus:border-primary rounded-xl p-2.5 text-xs font-bold text-on-surface bg-surface-container text-left flex justify-between items-center outline-none">
                     <span>{formKey ? `Key of ${formKey}` : "Select Key"}</span>
-                    <span className="text-[10px] text-zinc-400">▼</span>
+                    <span className="text-[10px] text-on-surface-variant">▼</span>
                   </button>
                 </div>
               </div>
               
               <div className="relative">
-                <label className="text-[9px] font-black text-zinc-400 uppercase tracking-widest block mb-1">Artist / Author Label Signature *</label>
-                <input type="text" value={formArtist} onFocus={() => setIsArtistDropdownFocused(true)} onBlur={() => setTimeout(() => setIsArtistDropdownFocused(false), 200)} onChange={e => { setHasUnsavedChanges(true); setFormArtist(e.target.value); }} className="w-full border border-zinc-200 focus:border-blue-500 rounded-xl p-2.5 text-xs font-bold text-zinc-800 bg-zinc-50/50 outline-none transition-all" placeholder="e.g. Hillsong Worship" />
+                <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block mb-1">Artist / Author Label Signature *</label>
+                <input type="text" value={formArtist} onFocus={() => setIsArtistDropdownFocused(true)} onBlur={() => setTimeout(() => setIsArtistDropdownFocused(false), 200)} onChange={e => { setHasUnsavedChanges(true); setFormArtist(e.target.value); }} className="w-full border border-outline-variant/30 focus:border-primary rounded-xl p-2.5 text-xs font-bold text-on-surface bg-surface-container outline-none transition-all" placeholder="e.g. Hillsong Worship" />
                 {isArtistDropdownFocused && filteredArtistSuggestions.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-zinc-200 rounded-xl max-h-36 overflow-y-auto z-[3000] shadow-xl custom-scrollbar">
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-surface-container-high border border-outline-variant/50 rounded-xl max-h-36 overflow-y-auto z-[3000] shadow-xl custom-scrollbar">
                     {filteredArtistSuggestions.map(artist => (
-                      <button key={artist} type="button" className="w-full px-3 py-2 text-left text-xs font-bold block border-b border-zinc-100 last:border-0 hover:bg-zinc-50 transition-colors text-zinc-700" onClick={() => { setHasUnsavedChanges(true); setFormArtist(artist); }}>{artist}</button>
+                      <button key={artist} type="button" className="w-full px-3 py-2 text-left text-xs font-bold block border-b border-outline-variant/30 last:border-0 hover:bg-surface-bright transition-colors text-on-surface" onClick={() => { setHasUnsavedChanges(true); setFormArtist(artist); }}>{artist}</button>
                     ))}
                   </div>
                 )}
               </div>
               <div className="relative">
-                <label className="text-[9px] font-black text-zinc-400 uppercase tracking-wider block mb-1">Themes / Set Categories</label>
-                <div className="w-full border rounded-xl p-1.5 bg-zinc-50/50 flex flex-wrap gap-1.5 items-center shadow-inner">
-                  {formThemes.map(tag => <span key={tag} className="px-2.5 py-0.5 bg-zinc-950 text-white rounded-lg text-[10px] font-bold flex items-center gap-1">{tag}<button type="button" className="text-[9px] text-zinc-400" onClick={() => { setHasUnsavedChanges(true); setFormThemes(prev => prev.filter(t => t !== tag)); }}>✕</button></span>)}
-                  <input type="text" value={themeInputSearchValue} onFocus={() => setIsThemeDropdownFocused(true)} onBlur={() => setTimeout(() => setIsThemeDropdownFocused(false), 200)} placeholder="Add themes..." className="flex-1 bg-transparent border-0 outline-none text-xs font-bold p-1 text-zinc-800" onChange={e => setThemeInputSearchValue(e.target.value)} />
+                <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-wider block mb-1">Themes / Set Categories</label>
+                <div className="w-full border-outline-variant/30 border rounded-xl p-1.5 bg-surface-container flex flex-wrap gap-1.5 items-center shadow-inner">
+                  {formThemes.map(tag => <span key={tag} className="px-2.5 py-0.5 bg-surface-container-highest text-on-surface border border-outline-variant/30 rounded-lg text-[10px] font-bold flex items-center gap-1">{tag}<button type="button" className="text-[9px] text-on-surface-variant hover:text-error transition-colors" onClick={() => { setHasUnsavedChanges(true); setFormThemes(prev => prev.filter(t => t !== tag)); }}>✕</button></span>)}
+                  <input type="text" value={themeInputSearchValue} onFocus={() => setIsThemeDropdownFocused(true)} onBlur={() => setTimeout(() => setIsThemeDropdownFocused(false), 200)} placeholder="Add themes..." className="flex-1 bg-transparent border-0 outline-none text-xs font-bold p-1 text-on-surface" onChange={e => setThemeInputSearchValue(e.target.value)} />
                 </div>
                 {isThemeDropdownFocused && filteredThemeCatalogSuggestions.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 mt-0.5 bg-white border rounded-xl max-h-36 overflow-y-auto z-[3000] shadow-xl">{filteredThemeCatalogSuggestions.map(th => <button key={th} type="button" className="w-full px-3 py-2 text-left text-xs font-bold block border-b" onClick={() => { setHasUnsavedChanges(true); setFormThemes([...formThemes, th]); setThemeInputSearchValue(""); }}>{th}</button>)}</div>
+                  <div className="absolute top-full left-0 right-0 mt-0.5 bg-surface-container-high border border-outline-variant/50 rounded-xl max-h-36 overflow-y-auto z-[3000] shadow-xl">{filteredThemeCatalogSuggestions.map(th => <button key={th} type="button" className="w-full px-3 py-2 text-left text-xs font-bold block border-b border-outline-variant/30 text-on-surface hover:bg-surface-bright" onClick={() => { setHasUnsavedChanges(true); setFormThemes([...formThemes, th]); setThemeInputSearchValue(""); }}>{th}</button>)}</div>
                 )}
               </div>
-              <div className="pt-4 mt-2 border-t border-zinc-100 space-y-4">
+              <div className="pt-4 mt-2 border-t border-outline-variant/30 space-y-4">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-full bg-red-100 text-red-600 flex items-center justify-center font-black text-xs shrink-0 shadow-inner">▶</div>
+                  <div className="w-8 h-8 rounded-full bg-error/10 text-error flex items-center justify-center font-black text-xs shrink-0 shadow-inner">
+                    <span className="material-symbols-outlined text-[18px]">play_arrow</span>
+                  </div>
                   <div>
-                    <h4 className="text-[13px] font-black text-zinc-900 tracking-tight">YouTube Live Sync Engine</h4>
-                    <p className="text-[10px] font-bold text-zinc-400 leading-tight">Lock the stage metronome to an absolute master track.</p>
+                    <h4 className="text-[13px] font-black text-on-surface tracking-tight">YouTube Live Sync Engine</h4>
+                    <p className="text-[10px] font-bold text-on-surface-variant leading-tight">Lock the stage metronome to an absolute master track.</p>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between bg-zinc-50 p-3 rounded-xl border border-zinc-200 shadow-sm transition-all">
+                <div className="flex items-center justify-between bg-surface-container-low p-3 rounded-xl border border-outline-variant/30 shadow-sm transition-all">
                   <div className="pr-4">
-                    <span className="text-[11px] font-black text-zinc-800 uppercase tracking-widest block mb-0.5">Performance Ready</span>
-                    <p className="text-[9px] font-bold text-zinc-500 leading-tight">Toggle this ON to badge this track as Stage-Ready when the offset and chords are perfectly synced.</p>
+                    <span className="text-[11px] font-black text-on-surface uppercase tracking-widest block mb-0.5">Performance Ready</span>
+                    <p className="text-[9px] font-bold text-on-surface-variant leading-tight">Toggle this ON to badge this track as Stage-Ready when the offset and chords are perfectly synced.</p>
                   </div>
                   <button 
                     type="button" 
                     onClick={() => { setHasUnsavedChanges(true); setFormIsYoutubeSyncValidated(!formIsYoutubeSyncValidated); }} 
-                    className={`w-12 h-6 rounded-full flex items-center p-1 transition-colors shadow-inner shrink-0 ${formIsYoutubeSyncValidated ? 'bg-green-500' : 'bg-zinc-200'}`}
+                    className={`w-12 h-6 rounded-full flex items-center p-1 transition-colors shadow-inner shrink-0 ${formIsYoutubeSyncValidated ? 'bg-emerald-500' : 'bg-surface-container-highest border border-outline-variant/30'}`}
                   >
                     <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${formIsYoutubeSyncValidated ? 'translate-x-6' : 'translate-x-0'}`} />
                   </button>
@@ -1748,32 +1792,94 @@ export default function SongEditPage() {
 
                 <div className="space-y-3">
                   <div className="relative">
-                    <label className="text-[9px] font-black text-zinc-400 uppercase tracking-widest block mb-1">Source URL</label>
+                    <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block mb-1">Source URL</label>
                     <input 
                       type="text" 
                       value={formYoutubeUrl} 
                       onChange={e => { setHasUnsavedChanges(true); setFormYoutubeUrl(e.target.value); }} 
-                      className={`w-full border focus:border-red-500 rounded-xl p-2.5 text-xs font-bold text-zinc-800 bg-zinc-50/50 outline-none transition-all ${formYoutubeUrl && !youtubeVideoId ? 'border-red-400 bg-red-50' : 'border-zinc-200'}`} 
+                      className={`w-full border focus:border-error rounded-xl p-2.5 text-xs font-bold text-on-surface outline-none transition-all ${formYoutubeUrl && !youtubeVideoId ? 'border-error/50 bg-error/10' : 'border-outline-variant/30 bg-surface-container'}`} 
                       placeholder="https://youtu.be/..." 
                     />
-                    {formYoutubeUrl && !youtubeVideoId && <span className="text-[9px] font-bold text-red-500 absolute top-1 right-2">Invalid Link</span>}
+                    {formYoutubeUrl && !youtubeVideoId && <span className="text-[9px] font-bold text-error absolute top-1 right-2">Invalid Link</span>}
                   </div>
 
                   {youtubeVideoId && (
-                    <div className="bg-zinc-50 border border-zinc-200 p-3 rounded-xl space-y-3 shadow-inner">
+                    <div className="bg-surface-container-low border border-outline-variant/30 p-3 rounded-xl space-y-3 shadow-inner">
                       <div className="flex flex-col sm:flex-row gap-2">
-                        <div className="flex-1">
-                          <div className="flex items-center justify-between mb-1 pr-1">
-                            <label className="text-[9px] font-black text-zinc-400 uppercase tracking-widest block">Downbeat Offset (ms)</label>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between mb-2 pr-1">
+                            <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block">Downbeat Offset (ms)</label>
                           </div>
-                          <div className="flex items-center gap-2 max-w-[200px]">
-                            <input 
-                              type="number" 
-                              value={formYoutubeSyncOffset} 
-                              onChange={e => { setHasUnsavedChanges(true); setFormYoutubeSyncOffset(parseInt(e.target.value) || 0); }} 
-                              className="w-full border border-zinc-200 rounded-lg p-2 text-xs font-black text-zinc-800 text-center outline-none focus:border-red-500" 
-                            />
-                            <button type="button" onClick={handleCaptureSyncPoint} className="px-3 py-2 bg-zinc-200 hover:bg-zinc-300 text-zinc-700 font-black text-[9px] uppercase tracking-wider rounded-lg shrink-0 transition-colors">Capture</button>
+                          
+                          <div className="flex items-center gap-2">
+                            {/* 1. Combined Input + Play Offset Button */}
+                            <div className="flex items-center bg-surface-container border border-outline-variant/30 rounded-lg overflow-hidden flex-1 max-w-[140px] focus-within:border-primary focus-within:ring-1 focus-within:ring-primary transition-all shadow-sm">
+                              <input 
+                                type="number" 
+                                value={formYoutubeSyncOffset} 
+                                onChange={e => { setHasUnsavedChanges(true); setFormYoutubeSyncOffset(parseInt(e.target.value) || 0); }} 
+                                className="w-full bg-transparent p-2 text-xs font-black text-on-surface text-center outline-none" 
+                                title="Offset in milliseconds"
+                              />
+                              <button 
+                                type="button" 
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  initAudioContext();
+                                  if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+                                    ytPlayerRef.current.seekTo(formYoutubeSyncOffset / 1000, true);
+                                    ytPlayerRef.current.playVideo();
+                                  }
+                                }} 
+                                className="h-[32px] px-2.5 bg-primary-container/30 hover:bg-primary text-primary hover:text-on-primary transition-colors flex items-center justify-center border-l border-outline-variant/30 cursor-pointer"
+                                title="Play from Offset"
+                              >
+                                <span className="material-symbols-outlined text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>play_arrow</span>
+                              </button>
+                            </div>
+
+                            {/* 2. Capture Button */}
+                            <button 
+                              type="button" 
+                              onClick={handleCaptureSyncPoint} 
+                              className="w-8 h-8 flex items-center justify-center bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg shrink-0 transition-colors border border-outline-variant/30 shadow-sm cursor-pointer"
+                              title="Capture Current Time"
+                            >
+                              <span className="material-symbols-outlined text-[16px]">pin_drop</span>
+                            </button>
+
+                            {/* 3. Play from 0:00 */}
+                            <button 
+                              type="button" 
+                              onClick={() => {
+                                initAudioContext();
+                                if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+                                  ytPlayerRef.current.seekTo(0, true);
+                                  ytPlayerRef.current.playVideo();
+                                }
+                              }} 
+                              className="w-8 h-8 flex items-center justify-center bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg shrink-0 transition-colors border border-outline-variant/30 shadow-sm cursor-pointer"
+                              title="Play from 0:00"
+                            >
+                              <span className="material-symbols-outlined text-[16px]">skip_previous</span>
+                            </button>
+
+                            {/* 4. Metronome Toggle */}
+                            <button 
+                              type="button" 
+                              onClick={() => setIsMetronomeMuted(!isMetronomeMuted)} 
+                              className={`w-8 h-8 flex items-center justify-center rounded-lg shrink-0 transition-colors shadow-sm cursor-pointer border ${
+                                isMetronomeMuted 
+                                  ? 'bg-error/10 text-error border-error/30 hover:bg-error/20' 
+                                  : 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/20'
+                              }`}
+                              title={isMetronomeMuted ? "Unmute Clicks" : "Mute Clicks"}
+                            >
+                              <span className="material-symbols-outlined text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>
+                                {isMetronomeMuted ? 'volume_off' : 'volume_up'}
+                              </span>
+                            </button>
+
                           </div>
                         </div>
                       </div>
@@ -1848,14 +1954,14 @@ export default function SongEditPage() {
                 };
 
                 return (
-                  <div key={sec.id} className={`border rounded-xl p-3.5 space-y-2 relative transition-all shadow-sm ${isRealtimePreviewActive && isSectionMismatched ? "bg-amber-50/40 border-amber-300 ring-4 ring-amber-500/5" : "bg-white border-zinc-200"}`}>
+                  <div key={sec.id} className={`border rounded-xl p-3.5 space-y-2 relative transition-all shadow-sm ${isRealtimePreviewActive && isSectionMismatched ? "bg-error/10 border-error/30 ring-4 ring-error/5" : "bg-surface-container-low border-outline-variant/30"}`}>
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex flex-wrap items-center gap-1.5 w-full justify-between sm:justify-start">
                         
                         <div className="flex items-center gap-2">
                           <button 
                             type="button" 
-                            className="px-2.5 py-1 bg-cyan-100 hover:bg-cyan-200 text-cyan-800 font-black text-[10px] rounded-full uppercase tracking-wider block shadow-sm flex items-center gap-1 transition-colors" 
+                            className="px-2.5 py-1 bg-primary-container/20 border border-primary/30 hover:bg-primary-container/40 text-primary font-black text-[10px] rounded-full uppercase tracking-wider block shadow-sm flex items-center gap-1 transition-colors" 
                             onClick={() => {
                               setSectionModalSearch("");
                               setSectionModalSelected(null);
@@ -1873,9 +1979,9 @@ export default function SongEditPage() {
                                 setAdjustmentsModalTab("section"); 
                                 setSectionAdjustmentsConfig({ isOpen: true, sectionType: sec.type }); 
                               }}
-                              className="px-2.5 py-1 border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-zinc-700 font-black text-[10px] rounded-lg tracking-wider block shadow-sm flex items-center lg:hidden transition-all"
+                              className="px-2.5 py-1 border border-outline-variant/30 bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface font-black text-[10px] rounded-lg tracking-wider shadow-sm flex items-center lg:hidden transition-all"
                             >
-                              ⚙️ Adjustments
+                              <span className="material-symbols-outlined text-[14px] mr-1">tune</span> Adjustments
                             </button>
                           )}
 
@@ -1888,11 +1994,11 @@ export default function SongEditPage() {
                                 onClick={() => setConfirmClearSectionId(sec.id)}
                                 className={`px-2 py-1 border rounded-lg font-black text-[10px] tracking-wider flex items-center transition-all ${
                                   hasChords 
-                                    ? 'border-red-200 bg-red-50 text-red-600 hover:bg-red-100 shadow-sm active:scale-95 cursor-pointer' 
-                                    : 'border-zinc-200 bg-zinc-50 text-zinc-400 opacity-60 cursor-not-allowed'
+                                    ? 'border-error/30 bg-error/10 text-error hover:bg-error/20 shadow-sm active:scale-95 cursor-pointer' 
+                                    : 'border-outline-variant/30 bg-surface-container text-on-surface-variant opacity-60 cursor-not-allowed'
                                 }`}
                               >
-                                <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                <span className="material-symbols-outlined text-[14px] mr-1">backspace</span>
                                 Clear
                               </button>
                             );
@@ -1900,39 +2006,41 @@ export default function SongEditPage() {
                         </div>
 
                         <div className={`flex-wrap items-center gap-1.5 ${isRealtimePreviewActive ? "hidden lg:flex" : "flex"}`}>
-                          <div className="flex items-center gap-1 bg-zinc-50 border rounded-lg px-2 py-0.5 text-[10px] font-bold text-zinc-600 shadow-inner">
-                            <span className="text-[8px] font-black uppercase text-zinc-400">M:</span>
-                            <input type="number" min={0} value={timingTuple.measures} className="w-6 bg-transparent text-center font-black text-zinc-800 outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "measures", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                          <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
+                            <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">M:</span>
+                            <input type="number" min={0} value={timingTuple.measures} className="w-6 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "measures", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
                           </div>
-                          <div className="flex items-center gap-1 bg-zinc-50 border rounded-lg px-2 py-0.5 text-[10px] font-bold text-zinc-600 shadow-inner">
-                            <span className="text-[8px] font-black uppercase text-zinc-400">B:</span>
-                            <input type="number" min={0} max={3} value={timingTuple.beats} className="w-5 bg-transparent text-center font-black text-zinc-800 outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "beats", Math.min(3, Math.max(0, parseInt(e.target.value, 10) || 0))); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                          <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
+                            <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">B:</span>
+                            <input type="number" min={0} max={3} value={timingTuple.beats} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "beats", Math.min(3, Math.max(0, parseInt(e.target.value, 10) || 0))); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
                           </div>
-                          <div className="flex items-center gap-1 bg-zinc-50 border rounded-lg px-2 py-0.5 text-[10px] font-bold text-zinc-600 shadow-inner">
-                            <span className="text-[8px] font-black uppercase text-zinc-400">R:</span>
-                            <input type="number" min={0} value={sectionRepeats} className="w-5 bg-transparent text-center font-black text-zinc-800 outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "repeats", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                          <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
+                            <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">R:</span>
+                            <input type="number" min={0} value={sectionRepeats} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "repeats", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
                           </div>
-                          <div className="flex items-center gap-1 bg-zinc-50 border rounded-lg px-2 py-0.5 text-[10px] font-bold text-zinc-600 shadow-inner">
-                            <span className="text-[8px] font-black uppercase text-zinc-400">H:</span>
-                            <input type="number" min={0} value={timingTuple.head_m} className="w-5 bg-transparent text-center font-black text-zinc-800 outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "head_m", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                          <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
+                            <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">H:</span>
+                            <input type="number" min={0} value={timingTuple.head_m} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "head_m", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
                           </div>
-                          <div className="flex items-center gap-1 bg-zinc-50 border rounded-lg px-2 py-0.5 text-[10px] font-bold text-zinc-600 shadow-inner">
-                            <span className="text-[8px] font-black uppercase text-zinc-400">T:</span>
-                            <input type="number" min={0} value={timingTuple.tail_m} className="w-5 bg-transparent text-center font-black text-zinc-800 outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "tail_m", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                          <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
+                            <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">T:</span>
+                            <input type="number" min={0} value={timingTuple.tail_m} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "tail_m", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
                           </div>
                         </div>
 
                         {activeRole === "admin" && !isRealtimePreviewActive && (
-                          <button type="button" className="w-6 h-6 rounded-lg bg-zinc-50 text-zinc-400 text-xs border flex items-center justify-center ml-auto sm:ml-2" onClick={() => { setHasUnsavedChanges(true); setFormSections(prev => prev.filter(x => x.id !== sec.id)); }}>✕</button>
+                          <button type="button" className="w-6 h-6 rounded-lg bg-surface-container hover:bg-error/20 text-on-surface-variant hover:text-error text-xs border border-outline-variant/30 flex items-center justify-center ml-auto sm:ml-2 transition-colors cursor-pointer" onClick={() => { setHasUnsavedChanges(true); setFormSections(prev => prev.filter(x => x.id !== sec.id)); }}>
+                            <span className="material-symbols-outlined text-[16px]">close</span>
+                          </button>
                         )}
                       </div>
                     </div>
 
                     {isRealtimePreviewActive ? (
-                      <div className="border border-dashed border-zinc-200 rounded-xl p-4 bg-zinc-50/15 space-y-4">
+                      <div className="border border-dashed border-outline-variant/30 rounded-xl p-4 bg-surface-container/30 space-y-4">
                         {isSectionMismatched && (
-                          <div className="text-[10px] font-black text-amber-700 bg-amber-100/70 border border-amber-200 p-2 rounded-lg leading-snug">
-                            ⚠️ Alignment Warning: Line values sum up to <span className="font-mono">{Math.floor(totalManualAbsoluteBeats / 4)}m + {totalManualAbsoluteBeats % 4}b</span>. Please adjust properties to equal master total <span className="font-mono">{timingTuple.measures}m + {timingTuple.beats}b</span>.
+                          <div className="text-[10px] font-black text-amber-400 bg-amber-500/10 border border-amber-500/30 p-2 rounded-lg leading-snug">
+                            <span className="material-symbols-outlined text-[14px] align-middle mr-1">warning</span> Alignment Warning: Line values sum up to <span className="font-mono">{Math.floor(totalManualAbsoluteBeats / 4)}m + {totalManualAbsoluteBeats % 4}b</span>. Please adjust properties to equal master total <span className="font-mono">{timingTuple.measures}m + {timingTuple.beats}b</span>.
                           </div>
                         )}
 
@@ -1946,7 +2054,7 @@ export default function SongEditPage() {
                                                     (chordMode === "Chords" && chordPickerConfig?.sectionType === sec.type && chordPickerConfig?.lineIdx === lineIdx && chordPickerConfig?.wordIdx === targetWordIdx);
 
                             return (
-                              <div key={lineIdx} className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 py-1.5 border-b border-zinc-100/40 last:border-0 group min-h-[44px]">
+                              <div key={lineIdx} className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 py-1.5 border-b border-outline-variant/10 last:border-0 group min-h-[44px]">
                                 <div className="flex flex-wrap items-end gap-x-1.5 gap-y-2 py-0.5 leading-none flex-1">
                                   
                                   {wordsArray.map((chunk, currentWordIdx) => {
@@ -1983,7 +2091,7 @@ export default function SongEditPage() {
                                             });
                                           }
                                         }} 
-                                        className={`flex flex-col items-start relative select-none rounded-lg px-2 py-0.5 transition-all duration-150 cursor-pointer ${chordMode !== "Off" ? hasNotation ? 'border border-blue-500 bg-blue-50/40 ring-1 ring-blue-400/20 shadow-sm' : 'border border-zinc-200 bg-white hover:bg-zinc-100 hover:border-zinc-300' : 'border border-transparent'} ${isTargetedCoordinate ? '!bg-blue-600 !text-white ring-2 ring-blue-500/30 !scale-105 z-10' : ''}`}
+                                        className={`flex flex-col items-start relative select-none rounded-lg px-2 py-0.5 transition-all duration-150 cursor-pointer ${chordMode !== "Off" ? hasNotation ? 'border border-primary/50 bg-primary-container/20 ring-1 ring-primary/20 shadow-sm' : 'border border-outline-variant/30 bg-surface-container-lowest hover:bg-surface-container hover:border-outline-variant/50' : 'border border-transparent'} ${isTargetedCoordinate ? '!bg-primary !text-on-primary ring-2 ring-primary/30 !scale-105 z-10' : ''}`}
                                       >
                                         {hasNotation && (
                                           <div className="min-h-[1rem] text-[10px] font-mono font-black flex flex-wrap gap-0.5 mb-0.5 leading-none">
@@ -2013,7 +2121,7 @@ export default function SongEditPage() {
                                                       });
                                                     }
                                                   }}
-                                                  className={`px-0.5 rounded border font-bold transition-all cursor-pointer ${isMultiSelected ? '!bg-amber-500 !text-white !border-amber-600 shadow-sm scale-110' : isTargetedCoordinate ? 'text-white border-transparent' : 'text-blue-600 bg-blue-100/50 border-blue-200 hover:bg-blue-200/50'}`}
+                                                  className={`px-0.5 rounded border font-bold transition-all cursor-pointer ${isMultiSelected ? '!bg-secondary !text-on-secondary !border-secondary shadow-sm scale-110' : isTargetedCoordinate ? 'text-on-primary border-transparent' : 'text-primary bg-primary-container/30 border-primary/30 hover:bg-primary-container/50'}`}
                                                 >
                                                   {ch}
                                                 </span>
@@ -2021,7 +2129,7 @@ export default function SongEditPage() {
                                             })}
                                           </div>
                                         )}
-                                        <div className={`text-[13px] font-sans font-bold leading-tight ${isTargetedCoordinate ? 'text-white' : 'text-zinc-800'}`}>
+                                        <div className={`text-[13px] font-sans font-bold leading-tight ${isTargetedCoordinate ? 'text-on-primary' : 'text-on-surface'}`}>
                                           {cleanWordDisplay || " "}
                                         </div>
                                       </div>
@@ -2052,11 +2160,11 @@ export default function SongEditPage() {
                                       }}
                                       className={`flex items-center justify-center h-[26px] min-w-[44px] px-2 border-2 border-dashed rounded-lg transition-all duration-150 cursor-pointer ${
                                         isGhostTargeted 
-                                          ? 'bg-blue-50 border-blue-500 shadow-md scale-105 z-10 opacity-100' 
-                                          : 'bg-transparent border-zinc-300 opacity-40 hover:opacity-100 hover:border-blue-400 hover:bg-blue-50/30'
+                                          ? 'bg-primary-container/20 border-primary shadow-md scale-105 z-10 opacity-100' 
+                                          : 'bg-transparent border-outline-variant/40 opacity-40 hover:opacity-100 hover:border-primary/50 hover:bg-primary-container/10'
                                       }`}
                                     >
-                                      <span className={`text-[16px] font-black leading-none pb-0.5 ${isGhostTargeted ? 'text-blue-600' : 'text-zinc-400'}`}>+</span>
+                                      <span className={`text-[16px] font-black leading-none pb-0.5 ${isGhostTargeted ? 'text-primary' : 'text-on-surface-variant'}`}>+</span>
                                     </div>
                                   )}
 
@@ -2068,7 +2176,7 @@ export default function SongEditPage() {
                       </div>
                     ) : (
                       <div>
-                        <textarea rows={Math.max(4, sec.content.split("\n").length)} value={sec.content} className="w-full border rounded-xl p-2.5 font-mono text-xs resize-none outline-none focus:border-zinc-400 bg-zinc-50/20 overflow-hidden" onChange={(e) => { setHasUnsavedChanges(true); setFormSections(formSections.map(x => x.type === sec.type ? { ...x, content: e.target.value } : x)); }} />
+                        <textarea rows={Math.max(4, sec.content.split("\n").length)} value={sec.content} className="w-full border border-outline-variant/30 rounded-xl p-2.5 font-mono text-xs resize-none outline-none focus:border-primary bg-surface-container/50 overflow-hidden text-on-surface transition-colors" onChange={(e) => { setHasUnsavedChanges(true); setFormSections(formSections.map(x => x.type === sec.type ? { ...x, content: e.target.value } : x)); }} />
                       </div>
                     )}
                   </div>
@@ -2076,7 +2184,9 @@ export default function SongEditPage() {
               })}
             </div>
             {activeRole === "admin" && (
-              <button type="button" className="w-full border border-dashed py-3.5 text-center rounded-2xl text-blue-600 font-black text-xs uppercase tracking-wider block hover:bg-zinc-50 transition-colors shadow-sm bg-white" onClick={() => { setSectionModalSearch(""); setSectionModalSelected(null); setSectionModalConfig({ isOpen: true, mode: "add" }); }}>＋ Add New Section Enclosures</button>
+              <button type="button" className="w-full border border-dashed border-outline-variant/50 py-3.5 text-center rounded-2xl text-primary hover:text-primary/80 font-black text-xs uppercase tracking-wider block hover:bg-surface-container-high transition-colors shadow-sm bg-surface-container-low flex items-center justify-center gap-1 cursor-pointer" onClick={() => { setSectionModalSearch(""); setSectionModalSelected(null); setSectionModalConfig({ isOpen: true, mode: "add" }); }}>
+                <span className="material-symbols-outlined text-[18px]">add_circle</span> Add New Section Enclosures
+              </button>
             )}
           </div>
         )}
@@ -2084,24 +2194,26 @@ export default function SongEditPage() {
         {editorActiveTab === "structure" && (
           <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-4 pb-6 animate-in fade-in select-none">
             <div className="space-y-2">
-              <h4 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-1">Active Performance Sequence</h4>
-              <div className="space-y-1.5 min-h-[220px] h-fit bg-zinc-50/40 p-3 rounded-xl border border-zinc-200/60 shadow-inner">
+              <h4 className="text-[10px] font-black text-on-surface-variant uppercase tracking-widest mb-1">Active Performance Sequence</h4>
+              <div className="space-y-1.5 min-h-[220px] h-fit bg-surface-container p-3 rounded-xl border border-outline-variant/30 shadow-inner">
                 {formSections.map((sec, idx) => {
                   const isBeingDragged = draggedStructureIndex === idx;
                   const isHoveredTarget = dragOverStructureIndex === idx;
                   const isSelectedNode = selectedSequenceId === sec.id;
 
                   return (
-                    <div key={sec.id} draggable={activeRole === "admin"} onDragStart={() => setDraggedStructureIndex(idx)} onDragOver={(e) => { e.preventDefault(); if (dragOverStructureIndex !== idx) setDragOverStructureIndex(idx); }} onDragLeave={() => { if (dragOverStructureIndex === idx) setDragOverStructureIndex(null); }} onDragEnd={() => { setDraggedStructureIndex(null); setDragOverStructureIndex(null); }} onDrop={(e) => handleStructureDropOverride(e, idx)} onClick={() => setSelectedSequenceId(isSelectedNode ? null : sec.id)} className={`flex items-center justify-between p-3.5 border rounded-xl transition-all duration-150 ${isBeingDragged ? "opacity-30 bg-zinc-150 border-zinc-300 cursor-grabbing" : isHoveredTarget ? "border-blue-500 bg-blue-50/50 scale-[1.01] ring-2 ring-blue-400/20 shadow-md cursor-pointer" : isSelectedNode ? "border-blue-600 bg-blue-50/80 scale-[1.005] ring-2 ring-blue-500/30 shadow-md cursor-pointer" : "bg-white border-zinc-200/80 shadow-sm cursor-grab hover:bg-zinc-50"}`}>
+                    <div key={sec.id} draggable={activeRole === "admin"} onDragStart={() => setDraggedStructureIndex(idx)} onDragOver={(e) => { e.preventDefault(); if (dragOverStructureIndex !== idx) setDragOverStructureIndex(idx); }} onDragLeave={() => { if (dragOverStructureIndex === idx) setDragOverStructureIndex(null); }} onDragEnd={() => { setDraggedStructureIndex(null); setDragOverStructureIndex(null); }} onDrop={(e) => handleStructureDropOverride(e, idx)} onClick={() => setSelectedSequenceId(isSelectedNode ? null : sec.id)} className={`flex items-center justify-between p-3.5 border rounded-xl transition-all duration-150 ${isBeingDragged ? "opacity-30 bg-surface-container-high border-outline-variant/50 cursor-grabbing" : isHoveredTarget ? "border-primary bg-primary-container/20 scale-[1.01] ring-2 ring-primary/20 shadow-md cursor-pointer" : isSelectedNode ? "border-primary bg-primary-container/30 scale-[1.005] ring-2 ring-primary/30 shadow-md cursor-pointer" : "bg-surface-container-lowest border-outline-variant/30 shadow-sm cursor-grab hover:bg-surface-container-low"}`}>
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="text-[11px] text-zinc-400 font-mono font-bold shrink-0">#{idx + 1}</span>
-                        <span className="text-xs font-black uppercase tracking-wider text-zinc-700 truncate">{sec.type}</span>
+                        <span className="text-[11px] text-on-surface-variant font-mono font-bold shrink-0">#{idx + 1}</span>
+                        <span className="text-xs font-black uppercase tracking-wider text-on-surface truncate">{sec.type}</span>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         {activeRole === "admin" && (
-                          <button type="button" onClick={(e) => { e.stopPropagation(); setHasUnsavedChanges(true); setFormSections(prev => prev.filter(x => x.id !== sec.id)); if (isSelectedNode) setSelectedSequenceId(null); }} className="text-[10px] font-bold text-zinc-400 hover:text-red-500 px-1 transition-colors cursor-pointer">✕ Remove</button>
+                          <button type="button" onClick={(e) => { e.stopPropagation(); setHasUnsavedChanges(true); setFormSections(prev => prev.filter(x => x.id !== sec.id)); if (isSelectedNode) setSelectedSequenceId(null); }} className="text-[10px] font-bold text-on-surface-variant hover:text-error px-1 transition-colors cursor-pointer flex items-center">
+                            <span className="material-symbols-outlined text-[14px]">close</span> Remove
+                          </button>
                         )}
-                        <span className="text-zinc-300 text-sm font-bold select-none">☰</span>
+                        <span className="material-symbols-outlined text-outline text-[16px] select-none">drag_handle</span>
                       </div>
                     </div>
                   );
@@ -2109,12 +2221,17 @@ export default function SongEditPage() {
               </div>
             </div>
             <div className="space-y-2">
-              <h4 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-1">Add Block Element</h4>
-              <div className="grid grid-cols-1 gap-1.5 bg-zinc-50/40 p-3 rounded-xl border border-zinc-200/60 shadow-inner h-fit">
+              <h4 className="text-[10px] font-black text-on-surface-variant uppercase tracking-widest mb-1">Add Block Element</h4>
+              <div className="grid grid-cols-1 gap-1.5 bg-surface-container p-3 rounded-xl border border-outline-variant/30 shadow-inner h-fit">
                 {uniqueContentSectionsList.map(tmpl => (
-                  <div key={tmpl.id} className="p-2.5 border border-zinc-200/80 bg-white hover:bg-blue-50/10 hover:border-blue-300 rounded-xl flex items-center justify-between shadow-sm transition-all group select-none">
-                    <span className="text-xs font-black text-zinc-700 uppercase tracking-wider flex items-center gap-1.5"><span className="opacity-60 text-xs shrink-0">🏷️</span> {tmpl.type}</span>
-                    <button type="button" onClick={() => handleAddSectionBelow(tmpl)} className="w-6 h-6 rounded-lg bg-zinc-50 hover:bg-blue-600 border border-zinc-200 hover:border-blue-500 text-zinc-400 group-hover:text-white flex items-center justify-center font-black text-xs transition-colors cursor-pointer">＋</button>
+                  <div key={tmpl.id} className="p-2.5 border border-outline-variant/30 bg-surface-container-lowest hover:bg-primary-container/10 hover:border-primary/50 rounded-xl flex items-center justify-between shadow-sm transition-all group select-none">
+                    <span className="text-xs font-black text-on-surface uppercase tracking-wider flex items-center gap-1.5">
+                      <span className="material-symbols-outlined text-[14px] opacity-60 shrink-0 text-on-surface-variant">label</span> 
+                      {tmpl.type}
+                    </span>
+                    <button type="button" onClick={() => handleAddSectionBelow(tmpl)} className="w-6 h-6 rounded-lg bg-surface-container hover:bg-primary border border-outline-variant/30 hover:border-primary text-on-surface-variant group-hover:text-on-primary flex items-center justify-center font-black text-xs transition-colors cursor-pointer">
+                      <span className="material-symbols-outlined text-[16px]">add</span>
+                    </button>
                   </div>
                 ))}
               </div>
@@ -2133,34 +2250,34 @@ export default function SongEditPage() {
       </div>
 
       {confirmClearSectionId && (
-        <div className="fixed inset-0 bg-zinc-900/40 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
-          <div className="bg-white border border-zinc-200 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4 text-center animate-in zoom-in-95 duration-200">
-            <div className="w-12 h-12 bg-red-100 text-red-600 rounded-full flex items-center justify-center text-xl mx-auto mb-2 shadow-sm border border-red-200">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
+          <div className="bg-surface-container border border-outline-variant/30 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4 text-center animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 bg-error/10 text-error rounded-full flex items-center justify-center text-xl mx-auto mb-2 shadow-sm border border-error/20">
+              <span className="material-symbols-outlined text-[24px]">backspace</span>
             </div>
             <div className="space-y-1">
-              <h4 className="font-extrabold text-base text-zinc-900 tracking-tight">Clear All Chords?</h4>
-              <p className="text-[13px] text-zinc-500 font-medium leading-relaxed">
+              <h4 className="font-extrabold text-base text-on-surface tracking-tight">Clear All Chords?</h4>
+              <p className="text-[13px] text-on-surface-variant font-medium leading-relaxed">
                 Are you sure you want to remove all chords from this section? This action cannot be undone.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-2 pt-2">
-              <button type="button" onClick={() => setConfirmClearSectionId(null)} className="py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer">Cancel</button>
-              <button type="button" onClick={executeClearChords} className="py-3 bg-red-600 hover:bg-red-700 text-white text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-95 cursor-pointer">Clear Chords</button>
+              <button type="button" onClick={() => setConfirmClearSectionId(null)} className="py-3 bg-surface-container-high hover:bg-surface-bright text-on-surface text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer">Cancel</button>
+              <button type="button" onClick={executeClearChords} className="py-3 bg-error hover:bg-error/90 text-on-error text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-95 cursor-pointer">Clear Chords</button>
             </div>
           </div>
         </div>
       )}
 
       {isConfirmExitModalOpen && (
-        <div className="fixed inset-0 bg-zinc-900/40 backdrop-blur-sm z-[20000] flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
-          <div className="bg-white border border-zinc-200 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[20000] flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
+          <div className="bg-surface-container border border-outline-variant/30 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4">
             <div className="space-y-1">
-              <h4 className="font-extrabold text-base text-zinc-900 tracking-tight">Unsaved Modifications</h4>
-              <p className="text-xs text-zinc-500 font-medium leading-relaxed">You have active modifications inside your arrangement canvas layers. Discard changes and close workspace?</p>
+              <h4 className="font-extrabold text-base text-on-surface tracking-tight">Unsaved Modifications</h4>
+              <p className="text-xs text-on-surface-variant font-medium leading-relaxed">You have active modifications inside your arrangement canvas layers. Discard changes and close workspace?</p>
             </div>
             <div className="grid grid-cols-2 gap-2 pt-1">
-              <button type="button" onClick={() => { setIsConfirmExitModalOpen(false); setPendingNavigationUrl(null); }} className="py-2.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer">Keep Editing</button>
+              <button type="button" onClick={() => { setIsConfirmExitModalOpen(false); setPendingNavigationUrl(null); }} className="py-2.5 bg-surface-container-high hover:bg-surface-bright text-on-surface text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer">Keep Editing</button>
               <button type="button" onClick={() => { 
                   setHasUnsavedChanges(false); 
                   setIsConfirmExitModalOpen(false); 
@@ -2170,7 +2287,7 @@ export default function SongEditPage() {
                     router.back(); 
                   }
                 }} 
-                className="py-2.5 bg-red-600 hover:bg-red-700 text-white text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
+                className="py-2.5 bg-error hover:bg-error/90 text-on-error text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
               >
                 Discard & Exit
               </button>
@@ -2180,58 +2297,60 @@ export default function SongEditPage() {
       )}
 
       {duplicateWarning && (
-        <div className="fixed inset-0 bg-zinc-900/40 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
-          <div className="bg-white border border-zinc-200 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4">
-            <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center text-2xl mb-2 shadow-sm border border-amber-200">
-              <span className="font-black">!</span>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
+          <div className="bg-surface-container border border-outline-variant/30 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4">
+            <div className="w-12 h-12 bg-secondary-container/30 text-secondary rounded-full flex items-center justify-center text-2xl mb-2 shadow-sm border border-secondary/30">
+              <span className="material-symbols-outlined text-[24px]">warning</span>
             </div>
             <div className="space-y-1">
-              <h4 className="font-extrabold text-base text-zinc-900 tracking-tight">Duplicate Song Detected</h4>
-              <p className="text-[13px] text-zinc-500 font-medium leading-relaxed">
-                <strong className="text-zinc-800">"{duplicateWarning.title}"</strong> by <strong className="text-zinc-800">{duplicateWarning.artist}</strong> is already in the database.
+              <h4 className="font-extrabold text-base text-on-surface tracking-tight">Duplicate Song Detected</h4>
+              <p className="text-[13px] text-on-surface-variant font-medium leading-relaxed">
+                <strong className="text-on-surface">"{duplicateWarning.title}"</strong> by <strong className="text-on-surface">{duplicateWarning.artist}</strong> is already in the database.
               </p>
             </div>
             <div className="grid grid-cols-1 gap-2 pt-2">
-              <button type="button" onClick={() => router.push(`/songs/${duplicateWarning.id}/edit`)} className="py-3 bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all cursor-pointer">Open Existing Song</button>
-              <button type="button" onClick={() => { setDismissedDuplicateIds(prev => [...prev, duplicateWarning.id]); setDuplicateWarning(null); }} className="py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer">Ignore & Create Anyway</button>
+              <button type="button" onClick={() => router.push(`/songs/${duplicateWarning.id}/edit`)} className="py-3 bg-primary hover:bg-primary/90 text-on-primary text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all cursor-pointer">Open Existing Song</button>
+              <button type="button" onClick={() => { setDismissedDuplicateIds(prev => [...prev, duplicateWarning.id]); setDuplicateWarning(null); }} className="py-3 bg-surface-container-high hover:bg-surface-bright text-on-surface text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer">Ignore & Create Anyway</button>
             </div>
           </div>
         </div>
       )}
 
       {sectionModalConfig.isOpen && (
-        <div className="fixed inset-0 bg-zinc-950/50 backdrop-blur-sm z-[12000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-200">
-          <div className="w-full bg-[#f2f2f6] md:bg-white rounded-t-3xl md:rounded-3xl h-[85vh] md:h-[600px] max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden">
-            <div className="relative flex items-center justify-center p-4 md:p-5 border-b border-zinc-200/60 bg-white shrink-0">
-              <button type="button" onClick={() => setSectionModalConfig({ isOpen: false, mode: "add" })} className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-500 hover:bg-zinc-200 transition-colors">✕</button>
-              <h3 className="text-base font-black text-zinc-900 tracking-tight">{sectionModalConfig.mode === "add" ? "Add New Sections" : "Reassign Section"}</h3>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[12000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-200">
+          <div className="w-full bg-surface-container-low rounded-t-3xl md:rounded-3xl h-[85vh] md:h-[600px] max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
+            <div className="relative flex items-center justify-center p-4 md:p-5 border-b border-outline-variant/30 bg-surface-container shrink-0">
+              <button type="button" onClick={() => setSectionModalConfig({ isOpen: false, mode: "add" })} className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+              <h3 className="text-base font-black text-on-surface tracking-tight">{sectionModalConfig.mode === "add" ? "Add New Sections" : "Reassign Section"}</h3>
             </div>
-            <div className="p-4 bg-[#f2f2f6] md:bg-white shrink-0">
-              <input type="text" placeholder="Search for a new section" value={sectionModalSearch} onChange={e => setSectionModalSearch(e.target.value)} className="w-full bg-zinc-200/50 md:bg-zinc-100/80 rounded-xl py-2.5 px-4 text-[13px] font-bold text-zinc-800 placeholder:text-zinc-500 outline-none" />
+            <div className="p-4 bg-surface-container shrink-0">
+              <input type="text" placeholder="Search for a new section" value={sectionModalSearch} onChange={e => setSectionModalSearch(e.target.value)} className="w-full bg-surface-container-highest rounded-xl py-2.5 px-4 text-[13px] font-bold text-on-surface placeholder:text-on-surface-variant outline-none border border-outline-variant/30 focus:border-primary transition-colors" />
             </div>
-            <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2.5 custom-scrollbar bg-[#f2f2f6] md:bg-white">
+            <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2.5 custom-scrollbar bg-surface-container-low pt-2">
               {dynamicCatalogOptions.filter(tmpl => tmpl.computedDisplay.toLowerCase().includes(sectionModalSearch.toLowerCase())).map(tmpl => {
                 const isSelected = sectionModalSelected === tmpl.computedId;
                 return (
-                  <button key={tmpl.computedId} type="button" onClick={() => setSectionModalSelected(tmpl.computedId)} className={`w-full flex items-center justify-between p-3 rounded-2xl transition-all ${isSelected ? "bg-white ring-2 ring-blue-500 shadow-sm" : "bg-white border shadow-sm"}`}>
+                  <button key={tmpl.computedId} type="button" onClick={() => setSectionModalSelected(tmpl.computedId)} className={`w-full flex items-center justify-between p-3 rounded-2xl transition-all cursor-pointer ${isSelected ? "bg-surface-container ring-2 ring-primary/50 shadow-sm" : "bg-surface-container border border-outline-variant/30 shadow-sm hover:bg-surface-container-high"}`}>
                     <div className="flex items-center gap-3.5">
-                      <div className={`w-8 h-8 rounded-full border-2 flex items-center justify-center text-[10px] font-black ${tmpl.color}`}>{tmpl.abbr}</div>
-                      <span className="text-[14px] font-bold text-zinc-900 tracking-tight">{tmpl.computedDisplay}</span>
+                      <div className={`w-8 h-8 rounded-full border flex items-center justify-center text-[10px] font-black ${tmpl.color}`}>{tmpl.abbr}</div>
+                      <span className="text-[14px] font-bold text-on-surface tracking-tight">{tmpl.computedDisplay}</span>
                     </div>
-                    <div className={`w-5 h-5 rounded-full border-[2.5px] flex items-center justify-center ${isSelected ? "border-blue-500" : "border-zinc-300"}`}>{isSelected && <div className="w-2.5 h-2.5 rounded-full bg-blue-500" />}</div>
+                    <div className={`w-5 h-5 rounded-full border-[2.5px] flex items-center justify-center ${isSelected ? "border-primary" : "border-outline-variant/40"}`}>{isSelected && <div className="w-2.5 h-2.5 rounded-full bg-primary" />}</div>
                   </button>
                 );
               })}
             </div>
-            <div className="p-4 bg-[#f2f2f6] md:bg-white border-t shrink-0">
-              <button type="button" disabled={!sectionModalSelected} onClick={handleSectionModalSubmit} className={`w-full py-3.5 rounded-xl text-[14px] font-black tracking-wide ${sectionModalSelected ? "bg-zinc-900 text-white" : "bg-zinc-300 text-zinc-500 cursor-not-allowed"}`}>Select</button>
+            <div className="p-4 bg-surface-container border-t border-outline-variant/30 shrink-0 pb-safe">
+              <button type="button" disabled={!sectionModalSelected} onClick={handleSectionModalSubmit} className={`w-full py-3.5 rounded-xl text-[14px] font-black tracking-wide transition-colors ${sectionModalSelected ? "bg-primary text-on-primary hover:bg-primary/90 cursor-pointer shadow-md" : "bg-surface-container-highest text-on-surface-variant cursor-not-allowed"}`}>Select</button>
             </div>
           </div>
         </div>
       )}
 
       {sectionAdjustmentsConfig.isOpen && sectionAdjustmentsConfig.sectionType && (
-        <div className="fixed inset-0 bg-zinc-950/50 backdrop-blur-sm z-[13000] flex items-end justify-center animate-in fade-in duration-200">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[13000] flex items-end justify-center animate-in fade-in duration-200">
           {(() => {
             const sType = sectionAdjustmentsConfig.sectionType!;
             const timingTuple = getCentralizedMetricsTuple(sType);
@@ -2279,20 +2398,22 @@ export default function SongEditPage() {
             };
 
             return (
-              <div className="w-full bg-[#f2f2f6] rounded-t-3xl max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden">
-                <div className="relative flex flex-col items-center justify-center pt-4 border-b border-zinc-200/60 bg-white shrink-0">
+              <div className="w-full bg-surface-container-low rounded-t-3xl max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
+                <div className="relative flex flex-col items-center justify-center pt-4 border-b border-outline-variant/30 bg-surface-container shrink-0">
                   <div className="flex w-full px-4 items-center justify-center mb-4 relative">
-                    <button type="button" onClick={() => setSectionAdjustmentsConfig({ isOpen: false, sectionType: null })} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-500 hover:bg-zinc-200 font-bold transition-colors">✕</button>
-                    <h3 className="text-[14px] font-black text-zinc-900 tracking-tight uppercase">{sType} Adjustments</h3>
+                    <button type="button" onClick={() => setSectionAdjustmentsConfig({ isOpen: false, sectionType: null })} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright font-bold transition-colors cursor-pointer">
+                      <span className="material-symbols-outlined text-[16px]">close</span>
+                    </button>
+                    <h3 className="text-[14px] font-black text-on-surface tracking-tight uppercase">{sType} Adjustments</h3>
                   </div>
                   
                   <div className="flex w-full px-4 gap-6 text-[11px] uppercase tracking-wider font-black select-none">
-                    <button type="button" onClick={() => setAdjustmentsModalTab("section")} className={`pb-3 transition-all border-b-[3px] ${adjustmentsModalTab === "section" ? 'border-blue-600 text-blue-600' : 'border-transparent text-zinc-400 hover:text-zinc-600'}`}>Section Master</button>
-                    <button type="button" onClick={() => setAdjustmentsModalTab("lines")} className={`pb-3 transition-all border-b-[3px] ${adjustmentsModalTab === "lines" ? 'border-blue-600 text-blue-600' : 'border-transparent text-zinc-400 hover:text-zinc-600'}`}>Line Measures</button>
+                    <button type="button" onClick={() => setAdjustmentsModalTab("section")} className={`pb-3 transition-all border-b-[3px] cursor-pointer ${adjustmentsModalTab === "section" ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}>Section Master</button>
+                    <button type="button" onClick={() => setAdjustmentsModalTab("lines")} className={`pb-3 transition-all border-b-[3px] cursor-pointer ${adjustmentsModalTab === "lines" ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}>Line Measures</button>
                   </div>
                 </div>
                 
-                <div className="p-4 md:p-5 space-y-3 flex-1 overflow-y-auto max-h-[55vh]">
+                <div className="p-4 md:p-5 space-y-3 flex-1 overflow-y-auto max-h-[55vh] custom-scrollbar">
                   {adjustmentsModalTab === "section" ? (
                     <>
                       {[
@@ -2302,12 +2423,12 @@ export default function SongEditPage() {
                         { label: "Head Padding (H)", field: "head_m" as const },
                         { label: "Tail Padding (T)", field: "tail_m" as const },
                       ].map(item => (
-                        <div key={item.field} className="flex items-center justify-between p-3.5 bg-white border border-zinc-200/60 rounded-2xl shadow-sm">
-                          <span className="text-xs font-black text-zinc-700">{item.label}</span>
-                          <div className="flex items-center bg-zinc-100 rounded-xl overflow-hidden border border-zinc-200 h-9 transition-colors focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400">
-                            <button type="button" onClick={() => handleUpdateCentralizedMetrics(sType, item.field, Math.max(0, (timingTuple[item.field] || 0) - 1))} className="w-10 h-full flex items-center justify-center text-zinc-500 font-bold hover:bg-zinc-200 hover:text-blue-600 transition-colors">－</button>
-                            <span className="w-10 text-center font-mono font-black text-zinc-800 text-xs">{timingTuple[item.field] || 0}</span>
-                            <button type="button" onClick={() => handleUpdateCentralizedMetrics(sType, item.field, Math.min(item.max ?? 999, (timingTuple[item.field] || 0) + 1))} className="w-10 h-full flex items-center justify-center text-zinc-500 font-bold hover:bg-zinc-200 hover:text-blue-600 transition-colors">＋</button>
+                        <div key={item.field} className="flex items-center justify-between p-3.5 bg-surface-container border border-outline-variant/30 rounded-2xl shadow-sm">
+                          <span className="text-xs font-black text-on-surface">{item.label}</span>
+                          <div className="flex items-center bg-surface-container-highest rounded-xl overflow-hidden border border-outline-variant/40 h-9 transition-colors focus-within:border-primary focus-within:ring-1 focus-within:ring-primary">
+                            <button type="button" onClick={() => handleUpdateCentralizedMetrics(sType, item.field, Math.max(0, (timingTuple[item.field] || 0) - 1))} className="w-10 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright hover:text-primary transition-colors cursor-pointer">－</button>
+                            <span className="w-10 text-center font-mono font-black text-on-surface text-xs">{timingTuple[item.field] || 0}</span>
+                            <button type="button" onClick={() => handleUpdateCentralizedMetrics(sType, item.field, Math.min(item.max ?? 999, (timingTuple[item.field] || 0) + 1))} className="w-10 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright hover:text-primary transition-colors cursor-pointer">＋</button>
                           </div>
                         </div>
                       ))}
@@ -2317,36 +2438,36 @@ export default function SongEditPage() {
                       {processedLines.length > 0 ? processedLines.map((line, lineIdx) => {
                          const lineMetrics = currentLinesMetrics[lineIdx];
                          return (
-                            <div key={lineIdx} className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-white border border-zinc-200/60 rounded-2xl shadow-sm gap-3">
-                              <span className="text-[11px] font-bold text-zinc-800 truncate flex-1 leading-snug">
-                                Line {lineIdx + 1}: <span className="font-medium text-zinc-500 ml-1">{line.cleanText}</span>
+                            <div key={lineIdx} className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-surface-container border border-outline-variant/30 rounded-2xl shadow-sm gap-3">
+                              <span className="text-[11px] font-bold text-on-surface truncate flex-1 leading-snug">
+                                Line {lineIdx + 1}: <span className="font-medium text-on-surface-variant ml-1">{line.cleanText}</span>
                               </span>
                               
                               <div className="flex items-center gap-2 shrink-0">
-                                  <div className="flex items-center bg-zinc-100 rounded-xl overflow-hidden border border-zinc-200 h-8 transition-colors">
-                                    <div className="px-1.5 text-[9px] font-black text-zinc-400 bg-zinc-200/50 border-r border-zinc-200/60 flex items-center h-full">M</div>
-                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "measures", -1)} className="w-7 h-full flex items-center justify-center text-zinc-500 font-bold hover:bg-zinc-200">－</button>
-                                    <span className="w-5 text-center font-mono font-black text-zinc-800 text-[11px]">{lineMetrics.measures}</span>
-                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "measures", 1)} className="w-7 h-full flex items-center justify-center text-zinc-500 font-bold hover:bg-zinc-200">＋</button>
+                                  <div className="flex items-center bg-surface-container-highest rounded-xl overflow-hidden border border-outline-variant/40 h-8 transition-colors">
+                                    <div className="px-1.5 text-[9px] font-black text-on-surface-variant opacity-70 bg-surface-container-lowest border-r border-outline-variant/30 flex items-center h-full">M</div>
+                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "measures", -1)} className="w-7 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright cursor-pointer">－</button>
+                                    <span className="w-5 text-center font-mono font-black text-on-surface text-[11px]">{lineMetrics.measures}</span>
+                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "measures", 1)} className="w-7 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright cursor-pointer">＋</button>
                                   </div>
-                                  <div className="flex items-center bg-zinc-100 rounded-xl overflow-hidden border border-zinc-200 h-8 transition-colors">
-                                    <div className="px-1.5 text-[9px] font-black text-zinc-400 bg-zinc-200/50 border-r border-zinc-200/60 flex items-center h-full">B</div>
-                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "beats", -1)} className="w-7 h-full flex items-center justify-center text-zinc-500 font-bold hover:bg-zinc-200">－</button>
-                                    <span className="w-4 text-center font-mono font-black text-zinc-800 text-[11px]">{lineMetrics.beats}</span>
-                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "beats", 1)} className="w-7 h-full flex items-center justify-center text-zinc-500 font-bold hover:bg-zinc-200">＋</button>
+                                  <div className="flex items-center bg-surface-container-highest rounded-xl overflow-hidden border border-outline-variant/40 h-8 transition-colors">
+                                    <div className="px-1.5 text-[9px] font-black text-on-surface-variant opacity-70 bg-surface-container-lowest border-r border-outline-variant/30 flex items-center h-full">B</div>
+                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "beats", -1)} className="w-7 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright cursor-pointer">－</button>
+                                    <span className="w-4 text-center font-mono font-black text-on-surface text-[11px]">{lineMetrics.beats}</span>
+                                    <button type="button" onClick={() => handleAdjustLineMetricValueLocal(lineIdx, "beats", 1)} className="w-7 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright cursor-pointer">＋</button>
                                   </div>
                               </div>
                             </div>
                          );
                       }) : (
-                        <div className="text-center py-8 text-zinc-400 text-[11px] uppercase tracking-wider font-black">No lines available in this section</div>
+                        <div className="text-center py-8 text-on-surface-variant text-[11px] uppercase tracking-wider font-black">No lines available in this section</div>
                       )}
                     </>
                   )}
                 </div>
 
-                <div className="p-4 border-t border-zinc-200/60 bg-white shrink-0 pb-safe">
-                  <button type="button" onClick={() => { setSectionAdjustmentsConfig({ isOpen: false, sectionType: null }); }} className="w-full py-3.5 bg-blue-600 text-white rounded-xl font-black text-[14px] shadow-md tracking-wide active:scale-[0.98] transition-all">
+                <div className="p-4 border-t border-outline-variant/30 bg-surface-container shrink-0 pb-safe">
+                  <button type="button" onClick={() => { setSectionAdjustmentsConfig({ isOpen: false, sectionType: null }); }} className="w-full py-3.5 bg-primary text-on-primary hover:bg-primary/90 rounded-xl font-black text-[14px] shadow-md tracking-wide active:scale-[0.98] transition-all cursor-pointer">
                     Apply Adjustments
                   </button>
                 </div>
@@ -2357,25 +2478,27 @@ export default function SongEditPage() {
       )}
 
       {chordPickerConfig.isOpen && chordPickerConfig.sectionType && (
-        <div className="fixed inset-0 bg-zinc-950/50 backdrop-blur-sm z-[14000] flex items-end justify-center animate-in fade-in duration-200">
-          <div className="w-full bg-[#f2f2f6] rounded-t-3xl max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[14000] flex items-end justify-center animate-in fade-in duration-200">
+          <div className="w-full bg-surface-container-low rounded-t-3xl max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
             
-            <div className="relative flex items-center justify-center p-4 border-b bg-white shrink-0">
-              <button type="button" onClick={() => { setMultiSelectedChords([]); setChordPickerConfig({ isOpen: false, sectionType: null, lineIdx: -1, wordIdx: -1, cleanWord: "" }); }} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-500 hover:bg-zinc-200 transition-colors">✕</button>
-              <h3 className="text-[14px] font-black text-zinc-800 tracking-tight">Assign Notation</h3>
+            <div className="relative flex items-center justify-center p-4 border-b border-outline-variant/30 bg-surface-container shrink-0">
+              <button type="button" onClick={() => { setMultiSelectedChords([]); setChordPickerConfig({ isOpen: false, sectionType: null, lineIdx: -1, wordIdx: -1, cleanWord: "" }); }} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+              <h3 className="text-[14px] font-black text-on-surface tracking-tight">Assign Notation</h3>
             </div>
 
-            <div className="p-4 bg-white border-b shrink-0">
-              <div className="border border-zinc-200 rounded-xl p-3 bg-zinc-50/50 min-h-[56px] flex flex-col justify-center">
+            <div className="p-4 bg-surface-container border-b border-outline-variant/30 shrink-0">
+              <div className="border border-outline-variant/30 rounded-xl p-3 bg-surface-container-lowest min-h-[56px] flex flex-col justify-center">
                 {stagedChordsText ? (
-                  <div className="flex flex-wrap gap-1 mb-1 font-mono font-black text-[10px] text-blue-600">
+                  <div className="flex flex-wrap gap-1 mb-1 font-mono font-black text-[10px] text-primary">
                     {stagedChordsText.split(/\s+/).filter(Boolean).map((c, i) => {
                       const isSelected = selectedStagedChordIndices.includes(i);
                       return (
                         <span 
                           key={i} 
                           onClick={() => setSelectedStagedChordIndices(prev => prev.includes(i) ? prev.filter(x => x !== i) : [...prev, i])}
-                          className={`px-1.5 py-0.5 rounded cursor-pointer transition-all border ${isSelected ? 'bg-amber-500 text-white border-amber-600 shadow-sm scale-110' : 'bg-blue-100/60 border-blue-200 hover:bg-blue-200/60'}`}
+                          className={`px-1.5 py-0.5 rounded cursor-pointer transition-all border ${isSelected ? 'bg-secondary text-on-secondary border-secondary shadow-sm scale-110' : 'bg-primary-container/30 border-primary/30 hover:bg-primary-container/50'}`}
                         >
                           {c}
                         </span>
@@ -2383,34 +2506,34 @@ export default function SongEditPage() {
                     })}
                   </div>
                 ) : (
-                  <div className="text-[10px] font-mono font-bold text-zinc-300 italic mb-1">[Staging...]</div>
+                  <div className="text-[10px] font-mono font-bold text-on-surface-variant opacity-50 italic mb-1">[Staging...]</div>
                 )}
-                <div className="text-xs font-bold text-zinc-800">
+                <div className="text-xs font-bold text-on-surface">
                   {chordPickerConfig.cleanWord}
                 </div>
               </div>
 
-              <div className="flex items-center justify-between mt-3 text-xs font-black text-zinc-500 select-none">
+              <div className="flex items-center justify-between mt-3 text-xs font-black text-on-surface-variant select-none">
                 <span>{pickerLayoutView === "family" ? `Key of ${formKey} Family` : "Manual Key Mode"}</span>
-                <button type="button" onClick={() => setPickerLayoutView(pickerLayoutView === "family" ? "manual" : "family")} className="text-blue-600 flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m17 2 4 4-4 4M3 22l4-4-4-4M21 6H9M3 18h12"/></svg>
+                <button type="button" onClick={() => setPickerLayoutView(pickerLayoutView === "family" ? "manual" : "family")} className="text-primary flex items-center gap-1.5 hover:opacity-80 transition-opacity cursor-pointer">
+                  <span className="material-symbols-outlined text-[14px]">{pickerLayoutView === "family" ? "keyboard" : "auto_awesome"}</span>
                   <span>{pickerLayoutView === "family" ? "Manual Input" : "Key Family"}</span>
                 </button>
               </div>
             </div>
 
-            <div className="p-4 space-y-3 flex-1 overflow-y-auto max-h-[45vh] bg-[#f2f2f6]">
+            <div className="p-4 space-y-3 flex-1 overflow-y-auto max-h-[45vh] bg-surface-container-low custom-scrollbar">
               {pickerLayoutView === "family" ? (
                 <div className="grid grid-cols-4 gap-2">
                   {activeScaleDiatonicDeck.map((opt, i) => {
                     const fullLabel = `${opt.root}${opt.suffix}`;
                     return (
-                      <button key={i} type="button" onClick={() => handlePickerChordTap(fullLabel)} className="h-12 bg-white hover:bg-zinc-50 active:bg-zinc-100 rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border text-zinc-800 transition-all">
+                      <button key={i} type="button" onClick={() => handlePickerChordTap(fullLabel)} className="h-12 bg-surface-container hover:bg-surface-container-high active:bg-surface-bright rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border border-outline-variant/30 text-on-surface transition-all cursor-pointer">
                         {fullLabel}
                       </button>
                     );
                   })}
-                  <button type="button" onClick={() => setStagedChordsText(p => p.trim() + "/")} className="h-12 bg-white text-blue-600 rounded-xl font-black text-sm shadow-sm flex items-center justify-center border border-zinc-200">
+                  <button type="button" onClick={() => setStagedChordsText(p => p.trim() + "/")} className="h-12 bg-surface-container text-primary rounded-xl font-black text-sm shadow-sm flex items-center justify-center border border-outline-variant/30 cursor-pointer hover:bg-surface-container-high">
                     /
                   </button>
                 </div>
@@ -2418,28 +2541,28 @@ export default function SongEditPage() {
                 <div className="space-y-3">
                   <div className="grid grid-cols-4 gap-2">
                     {["C", "D", "E", "F", "G", "A", "B"].map(letter => (
-                      <button key={letter} type="button" onClick={() => handlePickerChordTap(letter)} className="h-11 bg-white rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border text-zinc-800">
+                      <button key={letter} type="button" onClick={() => handlePickerChordTap(letter)} className="h-11 bg-surface-container hover:bg-surface-container-high rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border border-outline-variant/30 text-on-surface cursor-pointer">
                         {letter}
                       </button>
                     ))}
-                    <button type="button" onClick={() => setStagedChordsText(p => p.trim() + "/")} className="h-11 bg-white text-blue-600 rounded-xl font-black text-sm shadow-sm flex items-center justify-center border">
+                    <button type="button" onClick={() => setStagedChordsText(p => p.trim() + "/")} className="h-11 bg-surface-container hover:bg-surface-container-high text-primary rounded-xl font-black text-sm shadow-sm flex items-center justify-center border border-outline-variant/30 cursor-pointer">
                       /
                     </button>
                   </div>
 
                   <div className="grid grid-cols-4 gap-2">
                     {["m", "dim", "#", "b"].map(modifier => (
-                      <button key={modifier} type="button" onClick={() => handlePickerModifierTap(modifier)} className="h-11 bg-white rounded-xl font-black text-xs shadow-sm flex items-center justify-center border text-zinc-700 bg-zinc-50/50">
+                      <button key={modifier} type="button" onClick={() => handlePickerModifierTap(modifier)} className="h-11 bg-surface-container-highest hover:bg-surface-bright rounded-xl font-black text-xs shadow-sm flex items-center justify-center border border-outline-variant/20 text-on-surface cursor-pointer">
                         {modifier}
                       </button>
                     ))}
                   </div>
 
                   <div className="grid grid-cols-3 gap-2">
-                    <button type="button" onClick={() => handlePickerModifierTap("add")} className="h-11 bg-white rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border text-zinc-600">add</button>
-                    <button type="button" onClick={() => handlePickerModifierTap("sus")} className="h-11 bg-white rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border text-zinc-600">sus</button>
+                    <button type="button" onClick={() => handlePickerModifierTap("add")} className="h-11 bg-surface-container hover:bg-surface-container-high rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border border-outline-variant/30 text-on-surface-variant cursor-pointer">add</button>
+                    <button type="button" onClick={() => handlePickerModifierTap("sus")} className="h-11 bg-surface-container hover:bg-surface-container-high rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border border-outline-variant/30 text-on-surface-variant cursor-pointer">sus</button>
                     
-                    <div className="bg-white rounded-xl border shadow-sm flex items-center px-3 h-11 relative">
+                    <div className="bg-surface-container hover:bg-surface-container-high rounded-xl border border-outline-variant/30 shadow-sm flex items-center px-3 h-11 relative cursor-pointer">
                       <select 
                         value={manualExtensionNumber} 
                         onChange={e => {
@@ -2447,19 +2570,19 @@ export default function SongEditPage() {
                           setManualExtensionNumber(val);
                           if (val) handlePickerModifierTap(val);
                         }} 
-                        className="w-full bg-transparent text-xs font-bold text-zinc-700 outline-none appearance-none"
+                        className="w-full bg-transparent text-xs font-bold text-on-surface-variant outline-none appearance-none cursor-pointer"
                       >
                         <option value="">Number</option>
-                        {["2","4","5","6","7","9","11","13"].map(n => <option key={n} value={n}>{n}</option>)}
+                        {["2","4","5","6","7","9","11","13"].map(n => <option key={n} value={n} className="bg-surface-container text-on-surface">{n}</option>)}
                       </select>
-                      <span className="text-[9px] text-zinc-400 absolute right-3 pointer-events-none">▼</span>
+                      <span className="material-symbols-outlined text-[14px] text-on-surface-variant absolute right-3 pointer-events-none">arrow_drop_down</span>
                     </div>
                   </div>
                 </div>
               )}
             </div>
 
-            <div className="p-4 border-t bg-white flex gap-2 shrink-0 pb-safe">
+            <div className="p-4 border-t border-outline-variant/30 bg-surface-container flex gap-2 shrink-0 pb-safe">
               <button 
                 type="button" 
                 onClick={() => {
@@ -2473,11 +2596,11 @@ export default function SongEditPage() {
                     executeChordPickerRemoval();
                   }
                 }} 
-                className="flex-1 py-3.5 bg-red-100 hover:bg-red-200 text-red-600 font-black text-xs uppercase tracking-wider rounded-xl transition-all"
+                className="flex-1 py-3.5 bg-error/10 hover:bg-error/20 text-error font-black text-xs uppercase tracking-wider rounded-xl transition-all cursor-pointer"
               >
                 {selectedStagedChordIndices.length > 0 ? `Remove Selected (${selectedStagedChordIndices.length})` : "Remove All"}
               </button>
-              <button type="button" onClick={executeChordPickerConfirm} className="flex-1 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-[0.98]">
+              <button type="button" onClick={executeChordPickerConfirm} className="flex-1 py-3.5 bg-primary hover:bg-primary/90 text-on-primary font-black text-xs uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-[0.98] cursor-pointer">
                 Confirm
               </button>
             </div>
@@ -2487,8 +2610,8 @@ export default function SongEditPage() {
       )}
 
       {isImportModalOpen && (
-        <div className="fixed inset-0 bg-zinc-950/60 backdrop-blur-md z-[200000] flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl p-5 w-full max-w-xl border shadow-2xl space-y-4">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[200000] flex items-center justify-center p-4">
+          <div className="bg-surface-container rounded-xl p-5 w-full max-w-xl border border-outline-variant/30 shadow-2xl space-y-4 text-on-surface">
             
             <div className="flex justify-between items-center">
               <h4 className="text-base font-black">
@@ -2500,9 +2623,12 @@ export default function SongEditPage() {
                   type="button" 
                   onClick={handleSmartLyricsFetch} 
                   disabled={isFetchingLyrics} 
-                  className="px-3 py-1.5 text-[10px] font-black text-purple-600 bg-purple-50 border border-purple-200 hover:bg-purple-100 rounded-lg shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5"
+                  className="px-3 py-1.5 text-[10px] font-black text-purple-400 bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 rounded-lg shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
-                  {isFetchingLyrics ? "⏳ Searching..." : "✨ Smart Fetch"}
+                  <span className="material-symbols-outlined text-[14px]">
+                    {isFetchingLyrics ? "hourglass_empty" : "auto_awesome"}
+                  </span>
+                  {isFetchingLyrics ? "Searching..." : "Smart Fetch"}
                 </button>
               )}
             </div>
@@ -2515,24 +2641,26 @@ export default function SongEditPage() {
                     type="button"
                     disabled={isScrapingSelection}
                     onClick={() => handleSelectLyricsCard(opt)}
-                    className={`w-full text-left p-3.5 border border-zinc-200 rounded-xl transition-all group shadow-sm bg-zinc-50/50 flex gap-4 items-center ${
-                      isScrapingSelection ? 'opacity-50 cursor-wait' : 'hover:bg-purple-50 hover:border-purple-300'
+                    className={`w-full text-left p-3.5 border border-outline-variant/30 rounded-xl transition-all group shadow-sm bg-surface-container-lowest flex gap-4 items-center ${
+                      isScrapingSelection ? 'opacity-50 cursor-wait' : 'hover:bg-purple-500/10 hover:border-purple-500/30 cursor-pointer'
                     }`}
                   >
                     {opt.thumbnail ? (
-                       <img src={opt.thumbnail} alt="cover" className="w-16 h-16 rounded-md object-cover shadow-sm shrink-0 bg-zinc-200 border border-zinc-200" />
+                       <img src={opt.thumbnail} alt="cover" className="w-16 h-16 rounded-md object-cover shadow-sm shrink-0 bg-surface-container-highest border border-outline-variant/30" />
                     ) : (
-                       <div className="w-16 h-16 rounded-md bg-zinc-200 border border-zinc-300 flex items-center justify-center shrink-0 shadow-sm text-zinc-400 text-xl">🎵</div>
+                       <div className="w-16 h-16 rounded-md bg-surface-container-highest border border-outline-variant/30 flex items-center justify-center shrink-0 shadow-sm text-on-surface-variant text-xl">
+                         <span className="material-symbols-outlined text-[24px]">music_note</span>
+                       </div>
                     )}
                     
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-start mb-0.5">
-                        <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded shadow-sm ${idx === 0 ? 'text-purple-600 bg-purple-100' : 'text-zinc-600 bg-zinc-200'}`}>
+                        <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded shadow-sm ${idx === 0 ? 'text-purple-400 bg-purple-500/20' : 'text-on-surface-variant bg-surface-container-high'}`}>
                         {isScrapingSelection ? "Processing Plain Lyrics..." : opt.type || "Alternative Version"}
                       </span>
                       </div>
-                      <h5 className="font-black text-zinc-900 text-[15px] tracking-tight truncate">{opt.title}</h5>
-                      <p className="text-[11px] font-bold text-zinc-500 truncate">{opt.artist}</p>
+                      <h5 className="font-black text-on-surface text-[15px] tracking-tight truncate">{opt.title}</h5>
+                      <p className="text-[11px] font-bold text-on-surface-variant truncate">{opt.artist}</p>
                     </div>
                   </button>
                 ))}
@@ -2540,7 +2668,7 @@ export default function SongEditPage() {
                 <button 
                   type="button"
                   onClick={() => setFetchedLyricsOptions(null)}
-                  className="w-full py-3.5 bg-zinc-100 text-zinc-700 font-black text-[11px] uppercase tracking-wider rounded-xl hover:bg-zinc-200 transition-colors mt-2"
+                  className="w-full py-3.5 bg-surface-container-high text-on-surface font-black text-[11px] uppercase tracking-wider rounded-xl hover:bg-surface-bright transition-colors mt-2 cursor-pointer border border-outline-variant/30"
                 >
                   Cancel Selection
                 </button>
@@ -2551,14 +2679,14 @@ export default function SongEditPage() {
                   rows={16} 
                   value={pastedRawLyricsText} 
                   placeholder="Paste plain track text format layout sections (e.g. [Verse 1] lines)..." 
-                  className="w-full text-[13px] leading-relaxed p-4 border border-zinc-200 bg-zinc-50/50 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-mono resize-none transition-all shadow-inner" 
+                  className="w-full text-[13px] leading-relaxed p-4 border border-outline-variant/30 bg-surface-container-lowest rounded-xl outline-none focus:border-primary text-on-surface font-mono resize-none transition-all shadow-inner custom-scrollbar" 
                   onChange={e => setPastedRawLyricsText(e.target.value)} 
                 />
                 
                 <div className="grid grid-cols-2 gap-2">
                   <button 
                     type="button" 
-                    className="py-3 bg-zinc-100 text-zinc-700 hover:bg-zinc-200 transition-colors text-xs font-black rounded-lg" 
+                    className="py-3 bg-surface-container-high text-on-surface hover:bg-surface-bright transition-colors text-xs font-black rounded-lg cursor-pointer border border-outline-variant/30" 
                     onClick={() => {
                       if (pastedRawLyricsText !== initialModalText) {
                         if (!window.confirm("You have unsaved text changes. Discard?")) return;
@@ -2573,7 +2701,7 @@ export default function SongEditPage() {
                   <button 
                     type="button" 
                     disabled={pastedRawLyricsText === initialModalText || !pastedRawLyricsText.trim()}
-                    className="py-3 bg-blue-600 text-white hover:bg-blue-700 transition-colors text-xs font-black rounded-lg shadow-md disabled:opacity-50 disabled:cursor-not-allowed" 
+                    className="py-3 bg-primary text-on-primary hover:bg-primary/90 transition-colors text-xs font-black rounded-lg shadow-md disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer" 
                     onClick={executeRawLyricsImportAction}
                   >
                     {initialModalText.trim() ? "Apply Modifications" : "Parse & Import"}
@@ -2586,39 +2714,39 @@ export default function SongEditPage() {
       )}
 
       {isKeyPopupOpen && (
-        <div className="fixed inset-0 bg-zinc-950/50 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none">
-          <form onSubmit={handleSaveModalKeySelection} className="bg-[#f8f9fa] border border-zinc-200 rounded-xl shadow-2xl max-w-md w-full p-5 space-y-4 text-left">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none">
+          <form onSubmit={handleSaveModalKeySelection} className="bg-surface-container border border-outline-variant/30 rounded-xl shadow-2xl max-w-md w-full p-5 space-y-4 text-left">
             <div className="space-y-0.5">
-              <h3 className="text-base font-black text-zinc-900 tracking-tight">Change Key</h3>
-              <p className="text-[11px] font-black text-blue-500">Original {formKey}</p>
+              <h3 className="text-base font-black text-on-surface tracking-tight">Change Key</h3>
+              <p className="text-[11px] font-black text-primary">Original {formKey}</p>
             </div>
-            <div className="grid grid-cols-7 gap-1 bg-white p-1 rounded-xl border shadow-inner">
+            <div className="grid grid-cols-7 gap-1 bg-surface-container-lowest p-1 rounded-xl border border-outline-variant/30 shadow-inner">
               {BASE_LETTER_ROOTS.map((letter) => {
                 const isSelected = modalKeyRoot === letter;
-                return <button key={letter} type="button" className={`aspect-square rounded-lg text-center text-xs font-black flex items-center justify-center cursor-pointer ${isSelected ? "bg-blue-600 text-white shadow-sm scale-105" : "bg-zinc-50/50 text-zinc-700 hover:bg-zinc-100"}`} onClick={() => setModalKeyRoot(letter)}>{letter}</button>;
+                return <button key={letter} type="button" className={`aspect-square rounded-lg text-center text-xs font-black flex items-center justify-center cursor-pointer ${isSelected ? "bg-primary text-on-primary shadow-sm scale-105" : "bg-surface-container hover:bg-surface-container-high text-on-surface"}`} onClick={() => setModalKeyRoot(letter)}>{letter}</button>;
               })}
             </div>
-            <div className="grid grid-cols-2 divide-x bg-white rounded-xl border overflow-hidden shadow-inner h-10">
-              <button type="button" className={`text-center text-sm font-black flex items-center justify-center h-full cursor-pointer ${modalKeyAccidental === "b" ? "bg-blue-50/80 text-blue-600" : "text-zinc-600 hover:bg-zinc-50/50"}`} onClick={() => setModalKeyAccidental(modalKeyAccidental === "b" ? "" : "b")}>♭</button>
-              <button type="button" className={`text-center text-xs font-black flex items-center justify-center h-full cursor-pointer ${modalKeyAccidental === "#" ? "bg-blue-50/80 text-blue-600" : "text-zinc-600 hover:bg-zinc-50/50"}`} onClick={() => setModalKeyAccidental(modalKeyAccidental === "#" ? "" : "#")}>#</button>
+            <div className="grid grid-cols-2 divide-x divide-outline-variant/30 bg-surface-container-lowest rounded-xl border border-outline-variant/30 overflow-hidden shadow-inner h-10">
+              <button type="button" className={`text-center text-sm font-black flex items-center justify-center h-full cursor-pointer ${modalKeyAccidental === "b" ? "bg-primary-container/30 text-primary" : "text-on-surface-variant hover:bg-surface-container"}`} onClick={() => setModalKeyAccidental(modalKeyAccidental === "b" ? "" : "b")}>♭</button>
+              <button type="button" className={`text-center text-xs font-black flex items-center justify-center h-full cursor-pointer ${modalKeyAccidental === "#" ? "bg-primary-container/30 text-primary" : "text-on-surface-variant hover:bg-surface-container"}`} onClick={() => setModalKeyAccidental(modalKeyAccidental === "#" ? "" : "#")}>#</button>
             </div>
             <div className="pt-1">
-              <button type="submit" className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-widest rounded-xl shadow-md text-center">Save Key Change</button>
+              <button type="submit" className="w-full py-2.5 bg-primary hover:bg-primary/90 text-on-primary font-black text-xs uppercase tracking-widest rounded-xl shadow-md text-center cursor-pointer">Save Key Change</button>
             </div>
           </form>
         </div>
       )}
 
       {isTapBpmModalOpen && (
-        <div className="fixed inset-0 bg-zinc-950/60 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none">
-          <div className="bg-[#f8f9fa] border border-zinc-200 rounded-2xl shadow-2xl max-w-sm w-full p-6 space-y-6 text-center">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none">
+          <div className="bg-surface-container border border-outline-variant/30 rounded-2xl shadow-2xl max-w-sm w-full p-6 space-y-6 text-center">
             <div className="space-y-1">
-              <h3 className="text-xl font-black text-zinc-900 tracking-tight">Tap Tempo</h3>
-              <p className="text-[11px] font-bold text-zinc-500">Tap the button to the beat to calculate the exact BPM.</p>
+              <h3 className="text-xl font-black text-on-surface tracking-tight">Tap Tempo</h3>
+              <p className="text-[11px] font-bold text-on-surface-variant">Tap the button to the beat to calculate the exact BPM.</p>
             </div>
-            <div onClick={() => setTapTimestamps([])} className="bg-white border rounded-xl p-4 shadow-inner h-28 w-full flex items-center justify-center overflow-hidden cursor-pointer hover:bg-zinc-50 transition-colors relative group">
+            <div onClick={() => setTapTimestamps([])} className="bg-surface-container-lowest border border-outline-variant/30 rounded-xl p-4 shadow-inner h-28 w-full flex items-center justify-center overflow-hidden cursor-pointer hover:bg-surface-container-high transition-colors relative group">
               {tapTimestamps.length === 0 ? (
-                <span className="text-zinc-400 text-sm font-bold italic">Start tapping...</span>
+                <span className="text-on-surface-variant text-sm font-bold italic">Start tapping...</span>
               ) : (
                 <div className="flex flex-wrap items-center justify-center gap-y-2 gap-x-4 w-full">
                   {Array.from({ length: Math.ceil(Math.min(tapTimestamps.length, 48) / 4) }).map((_, groupIdx) => {
@@ -2630,22 +2758,22 @@ export default function SongEditPage() {
                     else if (totalTaps > 12) tapSizeClass = "text-3xl";
                     return (
                       <div key={groupIdx} className="flex gap-1.5 flex-nowrap shrink-0">
-                        {Array.from({ length: starsInGroup }).map((_, starIdx) => <span key={starIdx} className={`text-blue-600 font-black leading-none ${tapSizeClass}`}>*</span>)}
+                        {Array.from({ length: starsInGroup }).map((_, starIdx) => <span key={starIdx} className={`text-primary font-black leading-none ${tapSizeClass}`}>*</span>)}
                       </div>
                     );
                   })}
                 </div>
               )}
             </div>
-            <div className="text-5xl font-black text-zinc-900 tracking-tighter">{formTempo || "--"} <span className="text-sm font-bold text-zinc-400 tracking-normal">BPM</span></div>
-            <button type="button" onClick={(e) => { e.preventDefault(); const now = Date.now(); setTapTimestamps(prev => { if (prev.length > 0 && now - prev[prev.length - 1] > 2500) return [now]; const newTaps = [...prev, now]; if (newTaps.length >= 2) { const intervals = []; for (let i = 1; i < newTaps.length; i++) intervals.push(newTaps[i] - newTaps[i - 1]); const averageInterval = intervals.reduce((sum, val) => sum + val, 0) / intervals.length; setFormTempo(Math.round(60000 / averageInterval).toString()); setHasUnsavedChanges(true); } return newTaps; }); }} className="w-full h-32 bg-blue-600 text-white font-black text-3xl rounded-3xl shadow-lg flex items-center justify-center">TAP</button>
-            <button type="button" onClick={() => setIsTapBpmModalOpen(false)} className="w-full py-3.5 bg-zinc-200 text-zinc-700 font-black text-[11px] uppercase rounded-xl">Confirm & Close</button>
+            <div className="text-5xl font-black text-on-surface tracking-tighter">{formTempo || "--"} <span className="text-sm font-bold text-on-surface-variant tracking-normal">BPM</span></div>
+            <button type="button" onClick={(e) => { e.preventDefault(); const now = Date.now(); setTapTimestamps(prev => { if (prev.length > 0 && now - prev[prev.length - 1] > 2500) return [now]; const newTaps = [...prev, now]; if (newTaps.length >= 2) { const intervals = []; for (let i = 1; i < newTaps.length; i++) intervals.push(newTaps[i] - newTaps[i - 1]); const averageInterval = intervals.reduce((sum, val) => sum + val, 0) / intervals.length; setFormTempo(Math.round(60000 / averageInterval).toString()); setHasUnsavedChanges(true); } return newTaps; }); }} className="w-full h-32 bg-primary hover:bg-primary/90 text-on-primary font-black text-3xl rounded-3xl shadow-lg flex items-center justify-center cursor-pointer active:scale-95 transition-transform">TAP</button>
+            <button type="button" onClick={() => setIsTapBpmModalOpen(false)} className="w-full py-3.5 bg-surface-container-high hover:bg-surface-bright text-on-surface font-black text-[11px] uppercase rounded-xl cursor-pointer border border-outline-variant/30">Confirm & Close</button>
           </div>
         </div>
       )}
 
       {saveStatus !== "idle" && (
-        <div className="fixed inset-0 bg-zinc-950/70 backdrop-blur-sm z-[300000] flex items-center justify-center p-4 select-none">
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300000] flex items-center justify-center p-4 select-none">
           <style dangerouslySetInnerHTML={{__html: `
             @keyframes dart-x { 0%, 100% { transform: translateX(0) scale(1); } 2%, 6% { transform: translateX(30px) scale(0.9, 1.1) rotate(5deg); } 8%, 50% { transform: translateX(30px) scale(1) rotate(5deg); } 52%, 56% { transform: translateX(-15px) scale(1.1, 0.9) rotate(-2deg); } 58%, 95% { transform: translateX(-15px) scale(1) rotate(-2deg); } }
             @keyframes morph-squish { 0%, 100% { transform: scale(1) rotate(0deg); } 25% { transform: scale(1.2, 0.8) rotate(10deg); } 50% { transform: scale(0.9, 1.15) rotate(-5deg); } 75% { transform: scale(1.05, 0.95) rotate(15deg); } }
@@ -2678,29 +2806,33 @@ export default function SongEditPage() {
               </>
             )}
           </div>
-          <div className="bg-white rounded-[2rem] shadow-2xl p-8 max-w-sm w-full relative z-10 text-center animate-in zoom-in-95 duration-200">
+          <div className="bg-surface-container rounded-[2rem] shadow-2xl border border-outline-variant/30 p-8 max-w-sm w-full relative z-10 text-center animate-in zoom-in-95 duration-200">
             {saveStatus === "saving" && (
               <>
-                <div className="w-16 h-16 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin mx-auto mb-6" />
-                <h3 className="text-xl font-black tracking-tight text-zinc-900">Saving Matrix...</h3>
-                <p className="text-[13px] font-bold text-zinc-500 mt-2">Writing arrangement to secure database.</p>
+                <div className="w-16 h-16 border-4 border-primary/20 border-t-primary rounded-full animate-spin mx-auto mb-6" />
+                <h3 className="text-xl font-black tracking-tight text-on-surface">Saving Matrix...</h3>
+                <p className="text-[13px] font-bold text-on-surface-variant mt-2">Writing arrangement to secure database.</p>
               </>
             )}
             {saveStatus === "success" && (
               <div>
-                <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center text-3xl mx-auto mb-6">✓</div>
-                <h3 className="text-xl font-black tracking-tight text-zinc-900">Saved Successfully</h3>
-                <p className="text-[13px] font-bold text-zinc-500 mt-2">Your changes have been safely logged.</p>
+                <div className="w-16 h-16 bg-emerald-500/20 text-emerald-500 rounded-full flex items-center justify-center text-3xl mx-auto mb-6 border border-emerald-500/30">
+                  <span className="material-symbols-outlined text-[32px]">check</span>
+                </div>
+                <h3 className="text-xl font-black tracking-tight text-on-surface">Saved Successfully</h3>
+                <p className="text-[13px] font-bold text-on-surface-variant mt-2">Your changes have been safely logged.</p>
               </div>
             )}
             {saveStatus === "error" && (
               <div>
-                <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center text-3xl mx-auto mb-6">✕</div>
-                <h3 className="text-xl font-black tracking-tight text-zinc-900">Save Failed</h3>
-                <div className="bg-red-50 border border-red-100 rounded-xl p-3 mt-4 mb-6">
-                  <p className="text-[11px] font-bold text-red-600 font-mono break-words">{saveErrorMessage}</p>
+                <div className="w-16 h-16 bg-error/20 text-error rounded-full flex items-center justify-center text-3xl mx-auto mb-6 border border-error/30">
+                  <span className="material-symbols-outlined text-[32px]">close</span>
                 </div>
-                <button onClick={() => setSaveStatus("idle")} className="w-full py-3.5 bg-zinc-900 text-white rounded-xl font-black text-xs uppercase shadow-md">Close & Try Again</button>
+                <h3 className="text-xl font-black tracking-tight text-on-surface">Save Failed</h3>
+                <div className="bg-error/10 border border-error/20 rounded-xl p-3 mt-4 mb-6">
+                  <p className="text-[11px] font-bold text-error font-mono break-words">{saveErrorMessage}</p>
+                </div>
+                <button onClick={() => setSaveStatus("idle")} className="w-full py-3.5 bg-surface-container-high hover:bg-surface-bright text-on-surface rounded-xl font-black text-xs uppercase shadow-md border border-outline-variant/30 cursor-pointer">Close & Try Again</button>
               </div>
             )}
           </div>
@@ -2727,7 +2859,7 @@ export default function SongEditPage() {
               className="flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-lg transition-transform active:scale-[0.99] border-t border-outline-variant/10"
             >
               <div className="flex items-center gap-3 min-w-0 flex-1">
-                <div className="w-10 h-10 rounded-md bg-surface-container flex items-center justify-center shrink-0 overflow-hidden shadow-sm">
+                <div className="w-10 h-10 rounded-md bg-surface-container flex items-center justify-center shrink-0 overflow-hidden shadow-sm border border-outline-variant/20">
                   <img src={`https://img.youtube.com/vi/${youtubeVideoId}/default.jpg`} alt="thumbnail" className="w-full h-full object-cover opacity-90" />
                 </div>
                 <div className="flex flex-col min-w-0 pr-2 pb-0.5">
@@ -2773,16 +2905,16 @@ export default function SongEditPage() {
                
                {isMobile && (
                  <div className="flex items-center justify-between w-full shrink-0 mb-6 pt-safe px-6 mt-4">
-                   <button type="button" onClick={() => setIsPlayerExpanded(false)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer">
-                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="text-on-surface"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                   <button type="button" onClick={() => setIsPlayerExpanded(false)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer border border-outline-variant/30 text-on-surface">
+                     <span className="material-symbols-outlined text-[20px]">keyboard_arrow_down</span>
                    </button>
-                   <span className="text-[10px] font-black uppercase tracking-widest text-zinc-400">Now Playing</span>
+                   <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Now Playing</span>
                    <div className="w-10"></div> 
                  </div>
                )}
 
                <div className={`flex flex-col items-center justify-center flex-1 ${isMobile ? "px-8" : ""}`}>
-                  <div className={`w-full aspect-square rounded-2xl overflow-hidden shadow-2xl mb-8 ${isMobile ? "max-w-[320px]" : "max-h-[240px] mb-4"}`}>
+                  <div className={`w-full aspect-square rounded-2xl overflow-hidden shadow-2xl mb-8 border border-outline-variant/20 ${isMobile ? "max-w-[320px]" : "max-h-[240px] mb-4"}`}>
                     <img src={`https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg`} alt="cover" className="w-full h-full object-cover opacity-90" />
                   </div>
                   

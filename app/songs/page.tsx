@@ -9,47 +9,59 @@ import GlobalLoader from '../../components/GlobalLoader';
 
 import { getSongContentType, SongContentType } from "../setlists/[id]/live/utils/setlist-helpers";
 
-// Standardized Filter Options
 const KEYWORD_SUGGESTIONS_CATALOG = [
   { token: ":artist:", hint: "Filter by author or band name" },
   { token: ":key:", hint: "Filter by core song key signature (e.g., G, C#m)" },
   { token: ":bpm:", hint: "Filter by exact tempo (e.g., 74)" },
   { token: ":bpm-range:", hint: "Filter by tempo range (e.g., 70-90)" },
   { token: ":theme:", hint: "Filter by set categories or preset themes" },
-  { token: ":lyrics:", hint: "Scan song line rows for exact phrases" }
+  { token: ":lyrics:", hint: "Scan song line rows for exact phrases" },
+  // ✅ SURGICAL ADDITION: New Relational Commands
+  { token: ":user:", hint: "Filter by a team member who played this song" },
+  { token: ":role:", hint: "Filter by the role they played (e.g. Musician)" }
 ];
+
 
 const QUICK_FILTERS = [
   { id: "all", label: "All Songs", count: true },
-  { id: "chords-lyrics", label: "🎸+📝 Chords & Lyrics" },
-  { id: "pending", label: "Pending Review", count: true },
-  { id: "bookmarked", label: "Bookmarked", count: true },
-  // ✅ SURGICAL FIX: Replaced obsolete filters with requested YouTube filters
+  { id: "chords-lyrics", label: "Chords & Lyrics" },
+  { id: "fast-praise", label: "Fast / Praise" },
+  { id: "slow-worship", label: "Slow / Worship" },
   { id: "youtube-included", label: "YouTube Included" },
-  { id: "youtube-sync", label: "YouTube Sync Validated" }
+  { id: "youtube-sync", label: "YouTube Sync Validated" },
+  { id: "bookmarked", label: "Bookmarked", count: true },
+  { id: "pending", label: "Pending Review", count: true }
 ];
 
 const ContentTypeBadge = ({ type }: { type: SongContentType }) => {
   if (type === "Empty") return null;
 
   let colorClasses = "bg-surface-container-highest text-on-surface-variant border-outline-variant/30"; 
-  let icon = "";
 
   if (type === "Chords + Lyrics") {
     colorClasses = "bg-tertiary-container text-on-tertiary border-tertiary/20";
-    icon = "🎸+📝";
   } else if (type === "Chords") {
     colorClasses = "bg-surface-container-highest text-on-surface-variant border-outline-variant/30";
-    icon = "🎸";
   } else if (type === "Lyrics") {
     colorClasses = "bg-secondary-container text-on-secondary-container border-secondary/20";
-    icon = "📝";
   }
 
   return (
-    <span className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest inline-flex items-center gap-1 border shadow-sm ${colorClasses}`}>
-      <span className="text-[9px] leading-none">{icon}</span>
-      <span>{type}</span>
+    <span className={`h-5 px-2 rounded-full text-[8px] font-black uppercase tracking-widest inline-flex items-center justify-center gap-1 border shadow-sm ${colorClasses}`}>
+      {type === "Chords + Lyrics" && (
+        <span className="flex items-center gap-0.5">
+          <span className="material-symbols-outlined leading-none" style={{ fontSize: '11px' }}>music_note</span>
+          <span className="text-[8px] leading-none opacity-60">+</span>
+          <span className="material-symbols-outlined leading-none" style={{ fontSize: '11px' }}>subject</span>
+        </span>
+      )}
+      {type === "Chords" && (
+        <span className="material-symbols-outlined leading-none" style={{ fontSize: '11px' }}>music_note</span>
+      )}
+      {type === "Lyrics" && (
+        <span className="material-symbols-outlined leading-none" style={{ fontSize: '11px' }}>subject</span>
+      )}
+      <span className="leading-none pt-px">{type === "Chords + Lyrics" ? "Chords + Lyrics" : type}</span>
     </span>
   );
 };
@@ -87,11 +99,51 @@ export default function SongsListPage() {
   const [activeFilterId, setActiveFilterId] = useState("all");
   const [bookmarkedSongIds, setBookmarkedSongIds] = useState<string[]>([]);
   
+  // ✅ SURGICAL ADDITION: DOM Batching limits how many cards render at once
+  const [visibleCount, setVisibleCount] = useState(24);
+
+  // ✅ SURGICAL ADDITION: Local Storage Search History Engine
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+
+  useEffect(() => {
+    try {
+      const hist = JSON.parse(localStorage.getItem("onpraise_search_history") || "[]");
+      setSearchHistory(hist);
+    } catch(e){}
+  }, []);
+
+  const saveSearchToHistory = () => {
+    const currentFullString = [
+      songSearchQuery.trim(),
+      ...Object.entries(activeFilters).filter(([_, v]) => v).map(([k, v]) => `:${k}: ${v}`)
+    ].filter(Boolean).join(" ").trim();
+    
+    if (!currentFullString) return;
+    
+    setSearchHistory(prev => {
+      const next = [currentFullString, ...prev.filter(s => s !== currentFullString)].slice(0, 3);
+      localStorage.setItem("onpraise_search_history", JSON.stringify(next));
+      return next;
+    });
+  };
+
+  
+  
   // Interceptor Engine States
   const [activeFilters, setActiveFilters] = useState<Record<string, string>>({
-    artist: "", key: "", lyrics: "", theme: "", bpm: "", bpmRange: ""
+    artist: "", key: "", lyrics: "", theme: "", bpm: "", bpmRange: "", user: "", role: "" // ✅ Added user and role
   });
+  
+  // ✅ SURGICAL ADDITION: Autofill Dictionaries
+  const [availableUsers, setAvailableUsers] = useState<string[]>([]);
+  const [availableRoles, setAvailableRoles] = useState<string[]>([]);
+
   const [editingFilter, setEditingFilter] = useState<string | null>(null);
+
+  // Reset the visible chunk back to 24 anytime the user searches or filters
+  useEffect(() => {
+    setVisibleCount(24);
+  }, [songSearchQuery, activeFilterId, activeFilters]);
 
   // Add Modal States
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -121,8 +173,33 @@ export default function SongsListPage() {
       
       const { data: sls } = await supabase.from("setlists").select("id, event_id");
       const { data: slSongs } = await supabase.from("setlist_songs").select("song_id, setlist_id");
+      
+      // ✅ SURGICAL ADDITION: Fetch Roster and Profiles for the new User/Role commands
+      const { data: profiles } = await supabase.from("profiles").select("id, full_name");
+      const { data: rosters } = await supabase.from("event_rosters").select("event_id, user_id, role");
+      
+      const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p.full_name]));
+      const eventRosterMap: Record<string, { userName: string, role: string }[]> = {};
+      
+      const uniqueUsers = new Set<string>();
+      const uniqueRoles = new Set<string>();
 
-      const usageMap: Record<string, { activeEventTitle?: string; pastEventCount: number }> = {};
+      if (rosters) {
+        rosters.forEach(r => {
+          if (!eventRosterMap[r.event_id]) eventRosterMap[r.event_id] = [];
+          const uName = profileMap[r.user_id] || "Unknown";
+          const rName = r.role || "Unknown";
+          
+          eventRosterMap[r.event_id].push({ userName: uName, role: rName });
+          uniqueUsers.add(uName);
+          uniqueRoles.add(rName);
+        });
+      }
+      
+      setAvailableUsers(Array.from(uniqueUsers));
+      setAvailableRoles(Array.from(uniqueRoles));
+
+      const usageMap: Record<string, { activeEventTitle?: string; pastEventCount: number; participants: {userName: string, role: string}[] }> = {};
       
       if (evts && sls && slSongs) {
         const todayString = new Date().toISOString().split("T")[0];
@@ -137,7 +214,7 @@ export default function SongsListPage() {
           const songId = ss.song_id;
           const event = setlistToEvent[ss.setlist_id];
           
-          if (!usageMap[songId]) usageMap[songId] = { pastEventCount: 0 };
+          if (!usageMap[songId]) usageMap[songId] = { pastEventCount: 0, participants: [] };
           
           if (event) {
             const isFuture = (event.event_date ? event.event_date.split('T')[0] : "2026-06-12") >= todayString;
@@ -145,6 +222,10 @@ export default function SongsListPage() {
               usageMap[songId].activeEventTitle = event.title;
             } else {
               usageMap[songId].pastEventCount += 1;
+            }
+            // ✅ Append event participants to this song's historical matrix
+            if (eventRosterMap[event.id]) {
+              usageMap[songId].participants.push(...eventRosterMap[event.id]);
             }
           }
         });
@@ -297,7 +378,7 @@ export default function SongsListPage() {
     setTimeout(() => document.getElementById(`edit-${filterKey}`)?.focus(), 50);
   };
 
-  const renderInteractiveChip = (tokenPrefix: string, filterKey: string) => {
+  const renderInteractiveChip = (tokenPrefix: string, filterKey: string, datalistId?: string) => {
     const isActive = activeFilters[filterKey] !== "" || editingFilter === filterKey;
     if (!isActive) return null;
     const isEditing = editingFilter === filterKey;
@@ -312,6 +393,7 @@ export default function SongsListPage() {
         {isEditing ? (
           <input
             id={`edit-${filterKey}`}
+            list={datalistId} // ✅ Added datalist binding
             value={activeFilters[filterKey]}
             onChange={(e) => setActiveFilters(prev => ({ ...prev, [filterKey]: e.target.value }))}
             onKeyDown={(e) => {
@@ -353,9 +435,37 @@ export default function SongsListPage() {
     if (activeFilterId === "pending" && song.approval_status !== "pending") return false;
     if (activeFilterId === "bookmarked" && !bookmarkedSongIds.includes(song.id)) return false;
     
-    // ✅ SURGICAL FIX: Filter by YouTube presence or validation status
+    // Fast / Slow Presets
+    if (activeFilterId === "fast-praise") {
+      const tempo = parseInt(String(song.tempo || 0), 10);
+      if (tempo < 110) return false; 
+    }
+    if (activeFilterId === "slow-worship") {
+      const tempo = parseInt(String(song.tempo || 0), 10);
+      if (tempo >= 110 || tempo === 0) return false; 
+    }
+
+    // YouTube Filters
     if (activeFilterId === "youtube-included" && !song.youtube_url) return false;
     if (activeFilterId === "youtube-sync" && !song.is_youtube_sync_validated) return false;
+
+    // ✅ SURGICAL ADDITION: Relational User/Role Matrix Scan
+    if (activeFilters.user || activeFilters.role) {
+      const usage = songUsageData[song.id] as any; // By-pass type checking for the new property
+      if (!usage || !usage.participants || usage.participants.length === 0) return false;
+
+      const targetUser = activeFilters.user.toLowerCase();
+      const targetRole = activeFilters.role.toLowerCase();
+
+      // Ensure the target user and target role co-occurred in the SAME event
+      const hasMatch = usage.participants.some((p: any) => {
+         const matchUser = targetUser ? p.userName.toLowerCase().includes(targetUser) : true;
+         const matchRole = targetRole ? p.role.toLowerCase().includes(targetRole) : true;
+         return matchUser && matchRole;
+      });
+
+      if (!hasMatch) return false;
+    }
 
     return true;
   });
@@ -384,26 +494,34 @@ export default function SongsListPage() {
             </button>
           )}
           <div className="flex flex-col">
-            <h1 className="text-[20px] font-extrabold tracking-tight leading-tight">Songs Repertoire</h1>
+            <h1 className="text-[20px] font-extrabold tracking-tight leading-tight">Songs</h1>
             <span className="font-label-sm text-[11px] text-on-surface-variant">{allDatabaseSongs.length} Live Arrangements</span>
           </div>
         </div>
         
         {canApproveSongs && pendingSongsCount > 0 && (
           <button 
-            // ✅ SURGICAL FIX: Route directly to the approvals dashboard
             onClick={() => router.push("/songs/approvals")}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-surface-container-high text-on-surface active:bg-surface-container-highest transition-colors shadow-sm cursor-pointer border border-outline-variant/30"
+            className="flex items-center gap-2.5 px-2 py-2 "
           >
-            <span className="w-2 h-2 rounded-full bg-secondary animate-ping"></span>
-            <span className="font-badge-caps text-[10px] uppercase tracking-wider text-secondary">{pendingSongsCount} Review</span>
-            <span className="material-symbols-outlined text-[16px] text-on-surface-variant">chevron_right</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+            <span className="font-bold text-[8px] uppercase tracking-widest text-secondary">{pendingSongsCount} Review</span>
+            <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
           </button>
         )}
       </div>
 
       {/* Search Input Well & Command Interceptor */}
       <div className="relative w-full mt-1 flex flex-col overflow-visible">
+        
+        {/* ✅ Datalists for native browser autofill */}
+        <datalist id="user-suggestions">
+          {availableUsers.map(u => <option key={u} value={u} />)}
+        </datalist>
+        <datalist id="role-suggestions">
+          {availableRoles.map(r => <option key={r} value={r} />)}
+        </datalist>
+
         <div className="flex flex-wrap items-center w-full bg-surface-container-low rounded-xl px-4 py-2.5 shadow-inner border border-outline-variant/30 gap-1.5 focus-within:bg-surface-container focus-within:border-secondary transition-all cursor-text" onClick={() => searchInputRef.current?.focus()}>
           <span className="material-symbols-outlined text-outline text-[18px] mr-1">search</span>
           
@@ -414,12 +532,18 @@ export default function SongsListPage() {
           {renderInteractiveChip(":theme:", "theme")}
           {renderInteractiveChip(":bpm:", "bpm")}
           {renderInteractiveChip(":bpm-range:", "bpmRange")}
+          {/* ✅ Render the new chips with datalist IDs */}
+          {renderInteractiveChip(":user:", "user", "user-suggestions")}
+          {renderInteractiveChip(":role:", "role", "role-suggestions")}
 
           <input 
             ref={searchInputRef}
             type="text" 
             value={songSearchQuery}
             onChange={handleSearchInputChange}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') saveSearchToHistory();
+            }}
             className="flex-1 bg-transparent text-[13px] font-semibold text-on-surface placeholder:text-outline focus:outline-none min-w-[140px]" 
             placeholder="Search titles, artists, or type a command... (e.g. :artist:)" 
           />
@@ -449,12 +573,48 @@ export default function SongsListPage() {
 
       {/* Quick Filter Scrollable Bar */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar mt-1">
-        {QUICK_FILTERS.map(filter => {
+        <button 
+          onClick={() => { setActiveFilterId("all"); setSongSearchQuery(""); setActiveFilters({ artist: "", key: "", lyrics: "", theme: "", bpm: "", bpmRange: "" }); }}
+          className={`whitespace-nowrap px-3 py-1 rounded-full text-[10px] font-bold shadow-sm transition-all border cursor-pointer ${
+            activeFilterId === "all" 
+              ? 'bg-primary-container text-on-primary border-primary/30' 
+              : 'bg-surface-container-high text-on-surface-variant hover:text-on-surface border-transparent'
+          }`}
+        >
+          All Songs ({allDatabaseSongs.length})
+        </button>
+
+        {/* ✅ Dynamic Search History Pills */}
+        {searchHistory.map((histStr, idx) => (
+          <button 
+            key={`hist-${idx}`}
+            onClick={() => {
+              let query = histStr;
+              const newFilters = { artist: "", key: "", lyrics: "", theme: "", bpm: "", bpmRange: "", user: "", role: "" };
+              // ✅ SURGICAL FIX: Added user and role to the regex capture group
+              const regex = /:(artist|key|lyrics|theme|bpm|bpm-range|user|role):\s*([^\s:]+(?:\s+[^\s:]+)*)/gi;
+              let match;
+              while ((match = regex.exec(histStr)) !== null) {
+                const filterKey = match[1].toLowerCase() === "bpm-range" ? "bpmRange" : match[1].toLowerCase();
+                newFilters[filterKey as keyof typeof newFilters] = match[2].trim();
+                query = query.replace(match[0], "");
+              }
+              setSongSearchQuery(query.trim());
+              setActiveFilters(newFilters);
+              setActiveFilterId("all");
+            }}
+            className="whitespace-nowrap px-3 py-1 rounded-full text-[10px] font-bold shadow-sm transition-all border border-secondary/30 bg-secondary-container/10 text-secondary hover:bg-secondary-container/30 cursor-pointer flex items-center gap-1.5"
+          >
+            <span className="material-symbols-outlined leading-none" style={{ fontSize: '12px' }}>history</span>
+            {histStr}
+          </button>
+        ))}
+
+        {QUICK_FILTERS.filter(f => f.id !== "all").map(filter => {
           const isActive = activeFilterId === filter.id;
           let displayLabel = filter.label;
           
           if (filter.count) {
-            if (filter.id === "all") displayLabel += ` (${allDatabaseSongs.length})`;
             if (filter.id === "pending") displayLabel += ` (${pendingSongsCount})`;
             if (filter.id === "bookmarked") displayLabel += ` (${bookmarkedSongIds.length})`;
           }
@@ -479,93 +639,124 @@ export default function SongsListPage() {
     {/* ========================================= */}
     {/* 2. SCROLLING CARDS                        */}
     {/* ========================================= */}
-    <main ref={scrollContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-6 pb-safe-bottom-stage custom-scrollbar w-full">
+    <main 
+      ref={scrollContainerRef} 
+      // ✅ SURGICAL FIX: Listen for scroll. If they hit the bottom 400px, load 24 more cards!
+      onScroll={(e) => {
+        const target = e.currentTarget;
+        if (target.scrollTop + target.clientHeight >= target.scrollHeight - 400) {
+          if (visibleCount < filteredSongs.length) {
+            setVisibleCount(prev => prev + 24);
+          }
+        }
+      }}
+      className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-6 pb-safe-bottom-stage custom-scrollbar w-full"
+    >
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 w-full">
         
-        {filteredSongs.map(song => {
+        {/* ✅ SURGICAL FIX: Only render up to the visibleCount limit */}
+        {filteredSongs.slice(0, visibleCount).map(song => {
           const isBookmarked = bookmarkedSongIds.includes(song.id);
           const contentType = getSongContentType(song.chordpro_content);
           const usageInfo = songUsageData[song.id] || { pastEventCount: 0 };
+          
+          // Extract the 11-character YouTube ID if a link exists
+          const ytId = song.youtube_url ? song.youtube_url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/)?.[1] : null;
 
           return (
             <article 
               key={song.id} 
-              className="bg-surface-container-low rounded-2xl p-4 shadow-sm flex flex-col gap-3 transition-all duration-200 border border-outline-variant/30 hover:border-outline-variant/50"
+              className="relative overflow-hidden z-0 bg-surface-container-low rounded-2xl p-4 shadow-sm flex flex-col h-full transition-all duration-200 border border-outline-variant/30 hover:border-outline-variant/50"
             >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-1.5 mb-0.5">
-                  <ContentTypeBadge type={contentType} />
+              {/* YouTube Background Overlay */}
+              {ytId && (
+                <div 
+                  className="absolute inset-0 z-[-1] opacity-[0.25] pointer-events-none bg-cover bg-center mix-blend-luminosity"
+                  style={{ backgroundImage: `url('https://img.youtube.com/vi/${ytId}/hqdefault.jpg')` }}
+                />
+              )}
 
-                  {song.approval_status === 'pending' && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-error/10 text-error text-[8px] font-black uppercase tracking-widest border border-error/20 shadow-sm">
-                      <span className="w-1.5 h-1.5 rounded-full bg-error animate-pulse"></span>
-                      Pending Approval
-                    </span>
-                  )}
-                  
-                  {song.youtube_url && song.approval_status !== 'pending' && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-surface-container-high text-secondary text-[8px] font-black uppercase tracking-widest border border-outline-variant/30 shadow-sm">
-                      <span className="material-symbols-outlined text-[12px]">smart_display</span>
-                      Youtube Included
-                    </span>
-                  )}
+              {/* Absolute Bookmark Button */}
+              <button 
+                onClick={(e) => handleToggleBookmark(e, song.id)}
+                className={`absolute top-4 right-4 z-10 cursor-pointer transition-transform active:scale-125 ${isBookmarked ? 'text-primary' : 'text-outline hover:text-primary'}`}
+              >
+                <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: isBookmarked ? "'FILL' 1" : "'FILL' 0" }}>bookmark</span>
+              </button>
 
-                  {song.themes && song.themes.split(",").length > 0 && (
-                     <span className="px-2 py-0.5 rounded-full bg-surface-container-highest text-on-surface-variant text-[8px] font-black uppercase tracking-widest border border-outline-variant/30 shadow-sm">
-                       {song.themes.split(",")[0].trim()}
-                     </span>
-                  )}
-                </div>
-                <button 
-                  onClick={(e) => handleToggleBookmark(e, song.id)}
-                  className={`cursor-pointer transition-transform active:scale-125 ${isBookmarked ? 'text-primary' : 'text-outline hover:text-primary'}`}
-                >
-                  <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: isBookmarked ? "'FILL' 1" : "'FILL' 0" }}>bookmark</span>
-                </button>
+              {/* Badges Row */}
+              <div className="flex flex-wrap items-center gap-1.5 mb-4 pr-8 relative z-10">
+                <ContentTypeBadge type={contentType} />
+
+                {song.approval_status === 'pending' && (
+                  <span className="h-5 inline-flex items-center justify-center gap-1 px-2 rounded-full bg-error/10 text-error text-[8px] font-black uppercase tracking-widest border border-error/20 shadow-sm">
+                    <span className="material-symbols-outlined leading-none" style={{ fontSize: '11px' }}>schedule</span>
+                    <span className="leading-none pt-px">Pending</span>
+                  </span>
+                )}
+                
+                {song.youtube_url && song.approval_status !== 'pending' && (
+                  <span className="h-5 inline-flex items-center justify-center gap-1 px-2 rounded-full bg-red-500/10 text-red-500 text-[8px] font-black uppercase tracking-widest border border-red-500/30 shadow-sm">
+                    <svg viewBox="0 0 24 24" className="w-[11px] h-[11px] fill-red-500 shrink-0">
+                      <path d="M21.582,6.186c-0.23-0.86-0.908-1.538-1.768-1.768C18.254,4,12,4,12,4S5.746,4,4.186,4.418 c-0.86,0.23-1.538,0.908-1.768,1.768C2,7.746,2,12,2,12s0,4.254,0.418,5.814c0.23,0.86,0.908,1.538,1.768,1.768 C5.746,20,12,20,12,20s6.254,0,7.814-0.418c0.861-0.23,1.538-0.908,1.768-1.768C22,16.254,22,12,22,12S22,7.746,21.582,6.186z M9.996,15.505V8.495L15.993,12L9.996,15.505z" />
+                    </svg>
+                    <span className="leading-none pt-px">YouTube</span>
+                  </span>
+                )}
+
+                {song.themes && song.themes.split(",").length > 0 && (
+                   <span className="h-5 inline-flex items-center justify-center px-2 rounded-full bg-surface-container-highest text-on-surface-variant text-[8px] font-black uppercase tracking-widest border border-outline-variant/30 shadow-sm">
+                     <span className="leading-none pt-px">{song.themes.split(",")[0].trim()}</span>
+                   </span>
+                )}
               </div>
 
-              <div className="flex flex-col mt-0.5">
-                <h2 className="text-[20px] text-on-surface font-extrabold tracking-tight truncate leading-tight">{song.title}</h2>
-                <div className="flex items-center gap-1 mt-1 text-secondary">
-                  <span className="material-symbols-outlined text-[14px]">mic</span>
-                  <span className="text-[11px] font-bold truncate">{song.artist || "Unknown Artist"}</span>
+              {/* Title & Artist Row */}
+              <div className="flex flex-col mb-4 relative z-10 pr-8">
+                <h2 className="text-[20px] text-on-surface font-extrabold tracking-tight truncate leading-tight mb-1">{song.title}</h2>
+                <div className="flex items-center gap-1.5 text-on-surface-variant">
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>mic</span>
+                  <span className="text-[13px] font-semibold truncate">{song.artist || "Unknown Artist"}</span>
                 </div>
               </div>
 
-              <div className="flex items-center justify-between pt-1">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-md bg-surface-container-highest border border-outline-variant/30 flex items-center justify-center text-on-surface font-bold text-[11px] shadow-inner">
-                    {song.original_key || "G"}
-                  </div>
+              {/* Metrics Row (Key & BPM) */}
+              <div className="flex items-center gap-2.5 mb-5 relative z-10">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-outline-variant/30 text-primary font-medium text-[11px] shadow-sm">
+                  <span className="material-symbols-outlined leading-none" style={{ fontSize: '12px' }}>music_note</span>
+                  <span>Key: <span className="text-on-surface ml-0.5">{song.original_key || "G"}</span></span>
                 </div>
-                <div className="flex items-center">
-                  <span className="text-[10px] text-on-surface-variant font-bold tnum">{song.tempo || "--"} BPM</span>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-outline-variant/30 text-on-surface-variant font-medium text-[11px] shadow-sm tnum">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-80">
+                    <path d="m15.5 19-3-11.5a1.8 1.8 0 0 0-3.5 0L6 19h9.5z"/>
+                    <path d="M12.5 11 11 16"/>
+                  </svg>
+                  <span>{song.tempo || "--"} BPM</span>
                 </div>
               </div>
 
               {/* Dynamic Footer Actions */}
-              <div className="flex items-center justify-between bg-surface-container/40 -mx-4 -mb-4 px-4 py-2.5 rounded-b-2xl border-t border-outline-variant/20 mt-2">
+              <div className="mt-auto shrink-0 flex items-center justify-between bg-surface-container/75 backdrop-blur-md -mx-4 -mb-4 px-4 py-3 rounded-b-2xl border-t border-outline-variant/20 relative z-10 gap-2">
                 {song.approval_status === 'pending' ? (
                   <>
                     <span className="text-[9px] font-bold text-error uppercase tracking-widest shrink-0 pr-2 truncate">
-                      Requires Signoff
+                      For Review
                     </span>
                     <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
                       {canEditLibrary && (
                         <button 
-                          // ✅ SURGICAL FIX: Reverted to standard edit route and label
                           onClick={() => router.push(`/songs/${song.id}/edit`)}
-                          className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold hover:bg-surface-bright flex items-center justify-center gap-1 cursor-pointer border border-outline-variant/30 shadow-sm shrink-0"
+                          className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold hover:bg-surface-bright flex items-center justify-center gap-1 cursor-pointer border border-outline-variant/30 shadow-sm shrink-0 transition-colors active:scale-95"
                         >
-                          
-                          <span>Edit</span>
+                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>edit</span>
+                          <span className="hidden sm:inline">Edit</span>
                         </button>
                       )}
                       <button 
                         onClick={() => router.push(`/songs/${song.id}`)}
-                        className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-transform flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
+                        className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-colors flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
-                        <span className="material-symbols-outlined text-[10px]">library_music</span>
+                        <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_music</span>
                         <span>Open</span>
                       </button>
                     </div>
@@ -575,18 +766,18 @@ export default function SongsListPage() {
                     <span className="text-[9px] font-bold flex items-center gap-1 shrink-0 pr-2 truncate">
                       {usageInfo.activeEventTitle ? (
                         <>
-                          <span className="material-symbols-outlined text-[12px] text-secondary">event_available</span>
+                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>event_available</span>
                           <span className="text-secondary truncate">In {usageInfo.activeEventTitle}</span>
                         </>
                       ) : usageInfo.pastEventCount > 0 ? (
                         <>
-                          <span className="material-symbols-outlined text-[12px] text-outline">history</span>
-                          <span className="text-outline">Used in {usageInfo.pastEventCount} event{usageInfo.pastEventCount !== 1 && 's'}</span>
+                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>history</span>
+                          <span className="text-on-surface-variant">Used in {usageInfo.pastEventCount} event{usageInfo.pastEventCount !== 1 && 's'}</span>
                         </>
                       ) : (
                         <>
-                          <span className="material-symbols-outlined text-[12px] text-outline">library_add</span>
-                          <span className="text-outline">Newly Added</span>
+                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_add</span>
+                          <span className="text-on-surface-variant">Newly Added</span>
                         </>
                       )}
                     </span>
@@ -594,16 +785,17 @@ export default function SongsListPage() {
                       {canEditLibrary && (
                         <button 
                           onClick={() => router.push(`/songs/${song.id}/edit`)}
-                          className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold active:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm flex items-center justify-center shrink-0"
+                          className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold active:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm flex items-center justify-center gap-1 shrink-0"
                         >
-                          Edit
+                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>edit</span>
+                          <span className="hidden sm:inline">Edit</span>
                         </button>
                       )}
                       <button 
                         onClick={() => router.push(`/songs/${song.id}`)}
                         className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-transform flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
-                        <span className="material-symbols-outlined text-[14px]">library_music</span>
+                        <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_music</span>
                         <span>Open</span>
                       </button>
                     </div>
