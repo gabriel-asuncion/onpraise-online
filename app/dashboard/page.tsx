@@ -91,9 +91,10 @@ export default function DashboardPage() {
   const [liveSearchQuery, setLiveSearchQuery] = useState("");
   const [activePracticeSong, setActivePracticeSong] = useState<any>(null);
   
-  // ✅ SURGICAL ADDITION: Portal Mounting Engine
+  // ✅ SURGICAL ADDITION: Portal Mounting Engine & Expanded State
   const [mounted, setMounted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -111,6 +112,7 @@ export default function DashboardPage() {
   const [ytCurrentTime, setYtCurrentTime] = useState(0);
   const [ytDuration, setYtDuration] = useState(0);
   const ytTimeTrackerRef = useRef<number | null>(null);
+  const dashboardProgressRef = useRef<HTMLDivElement | null>(null);
 
   // ✅ SURGICAL ADDITION: Tell the Sidebar to slide down to 68px when playing!
   useEffect(() => {
@@ -355,13 +357,25 @@ export default function DashboardPage() {
   useEffect(() => {
     const updateScrubber = () => {
       if (ytPlaying && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
-        setYtCurrentTime(ytPlayerRef.current.getCurrentTime());
+        const currentTime = ytPlayerRef.current.getCurrentTime();
+        
+        // 1. Direct DOM update for buttery smooth 60fps progress bar
+        if (dashboardProgressRef.current) {
+           const duration = ytPlayerRef.current.getDuration() || 1;
+           const progress = currentTime / duration;
+           dashboardProgressRef.current.style.transform = `scaleX(${progress})`;
+        }
+
+        // 2. Only trigger massive React re-renders if the slider UI is visible
+        if (!isMobile || isPlayerExpanded) {
+           setYtCurrentTime(currentTime);
+        }
       }
       ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
     };
     if (ytPlaying) ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
     return () => { if (ytTimeTrackerRef.current) cancelAnimationFrame(ytTimeTrackerRef.current); };
-  }, [ytPlaying]);
+  }, [ytPlaying, isMobile, isPlayerExpanded]);
 
   const todayStr = new Date().toISOString().split("T")[0];
   const futureActiveEvents = eventsList.filter(e => (e.event_date ? e.event_date.split("T")[0] : "2026-06-12") >= todayStr).sort((a, b) => a.event_date.localeCompare(b.event_date));
@@ -490,12 +504,82 @@ export default function DashboardPage() {
 
             {/* MEDIA PLAYER (Portaled on Mobile) */}
             {mounted && activePracticeSong && (() => {
-              const PlayerContent = (
-                <div className={`relative overflow-hidden shadow-sm border border-outline-variant/20 transition-all ${isMobile ? "w-full h-[64px] bg-[#18181A] rounded-t-2xl px-4 flex items-center justify-between cursor-pointer border-t" : "rounded-xl bg-surface-container-low p-4 mt-1"}`}>
-                  
+              
+              // 1. The Full-Screen Expanded Overlay (Safely Portaled to the absolute Root)
+              const ExpandedPlayer = isMobile && isPlayerExpanded ? createPortal(
+                <div className="fixed inset-0 z-[250000] bg-surface flex flex-col p-6 animate-in slide-in-from-bottom-full duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]">
+                  <div className="flex items-center justify-between w-full shrink-0 mb-6 pt-safe mt-4">
+                    <button onClick={() => setIsPlayerExpanded(false)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer">
+                      <span className="material-symbols-outlined text-[24px] text-on-surface">keyboard_arrow_down</span>
+                    </button>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Now Playing</span>
+                    <div className="w-10"></div> 
+                  </div>
+
+                  <div className="flex flex-col items-center justify-center flex-1">
+                    <div className="w-full aspect-square max-w-[320px] rounded-2xl overflow-hidden shadow-2xl mb-8 border border-outline-variant/20 bg-surface-container-high">
+                      {activeYoutubeId ? (
+                        <img src={`https://img.youtube.com/vi/${activeYoutubeId}/hqdefault.jpg`} alt="cover" className="w-full h-full object-cover opacity-90" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <span className="material-symbols-outlined text-[64px] text-outline-variant">music_note</span>
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="w-full text-center mb-8">
+                      <h2 className="font-black text-2xl text-on-surface tracking-tight mb-1 truncate">{activePracticeSong?.title || "Unknown Track"}</h2>
+                      <p className="font-bold text-sm text-on-surface-variant truncate">{activePracticeSong?.artist || "Unknown Artist"}</p>
+                    </div>
+
+                    <div className="w-full max-w-sm mb-8">
+                      <input 
+                        type="range" 
+                        min="0" max={ytDuration || 100} step="0.1"
+                        value={ytCurrentTime} 
+                        onChange={(e) => {
+                          const t = parseFloat(e.target.value);
+                          setYtCurrentTime(t);
+                          if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') ytPlayerRef.current.seekTo(t, true);
+                        }}
+                        className="w-full h-[6px] rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-primary [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all mb-2"
+                        style={{ background: `linear-gradient(to right, #38BDF8 ${seekPercentage}%, #333336 ${seekPercentage}%)`, WebkitAppearance: 'none' }}
+                      />
+                      <div className="flex justify-between text-[11px] font-mono font-bold text-on-surface-variant pointer-events-none">
+                        <span>{formatTime(ytCurrentTime)}</span>
+                        <span>-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
+                      </div>
+                    </div>
+
+                    <button 
+                      type="button"
+                      className="w-20 h-20 bg-primary text-on-primary rounded-full flex items-center justify-center shadow-[0_8px_24px_rgba(38,185,255,0.4)] active:scale-95 transition-transform cursor-pointer outline-none mb-4"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
+                        if (ytPlaying) ytPlayerRef.current.pauseVideo();
+                        else ytPlayerRef.current.playVideo();
+                      }}
+                    >
+                      {ytPlaying ? (
+                        <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor ml-2"><path d="M8 5v14l11-7z" /></svg>
+                      )}
+                    </button>
+                  </div>
+                </div>,
+                document.body
+              ) : null;
+
+              // 2. The Inline or Docked Player
+              const CollapsedPlayer = (
+                <div 
+                  onClick={() => { if (isMobile) setIsPlayerExpanded(true); }}
+                  className={`relative overflow-hidden shadow-sm border border-outline-variant/20 transition-all ${isMobile ? "w-full h-[64px] bg-[#18181A] rounded-t-2xl px-4 flex items-center justify-between cursor-pointer border-t" : "rounded-xl bg-surface-container-low p-4 mt-1"} ${isMobile && isPlayerExpanded ? "hidden" : ""}`}
+                >
                   {!isMobile && <div className="absolute -top-12 -right-12 w-36 h-36 rounded-full bg-primary-container/10 blur-2xl pointer-events-none"></div>}
                   
-                  {/* MOBILE COLLAPSED LAYOUT */}
                   {isMobile ? (
                     <>
                       <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -515,27 +599,36 @@ export default function DashboardPage() {
                           </span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2.5 shrink-0">
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation(); 
-                            if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-                            if (ytPlaying) ytPlayerRef.current.pauseVideo();
-                            else ytPlayerRef.current.playVideo();
-                          }}
-                          disabled={!activeYoutubeId}
-                          className="w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 disabled:opacity-50"
-                        >
-                          {ytPlaying ? (
-                            <svg viewBox="0 0 24 24" className="w-8 h-8 fill-white"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
-                          ) : (
-                            <svg viewBox="0 0 24 24" className="w-8 h-8 fill-white ml-1"><path d="M8 5v14l11-7z" /></svg>
-                          )}
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    /* DESKTOP INLINE LAYOUT */
+                      <div className="flex items-center gap-2.5 shrink-0 z-10">
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation(); 
+                              if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
+                              if (ytPlaying) ytPlayerRef.current.pauseVideo();
+                              else ytPlayerRef.current.playVideo();
+                            }}
+                            disabled={!activeYoutubeId}
+                            className="w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 disabled:opacity-50"
+                          >
+                            {ytPlaying ? (
+                              <svg viewBox="0 0 24 24" className="w-8 h-8 fill-white"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+                            ) : (
+                              <svg viewBox="0 0 24 24" className="w-8 h-8 fill-white ml-1"><path d="M8 5v14l11-7z" /></svg>
+                            )}
+                          </button>
+                        </div>
+                        
+                        {/* ✅ SURGICAL FIX: Swapped to hardware-accelerated CSS Transforms via Callback Ref */}
+                        <div className="absolute bottom-0 left-0 w-full h-[2px] bg-surface-container-highest z-50">
+                          <div 
+                            ref={(el) => { if (dashboardProgressRef) dashboardProgressRef.current = el; }}
+                            className="h-full bg-primary origin-left transition-transform duration-100 ease-linear" 
+                            style={{ transform: 'scaleX(0)' }} 
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      /* DESKTOP INLINE LAYOUT */
                     <>
                       <div className="flex items-center gap-3.5 relative z-10">
                         <div className="w-[80px] h-[56px] bg-surface-container-highest rounded-lg overflow-hidden shrink-0 relative shadow-inner border border-outline-variant/30 flex items-center justify-center">
@@ -581,7 +674,6 @@ export default function DashboardPage() {
                         </div>
                       </div>
 
-                      {/* Seek Slider WITH TIMESTAMP */}
                       <div className="w-full mt-4 mb-3 relative z-10">
                         <div className="text-[10px] font-mono font-bold text-on-surface-variant mb-1.5 ml-1 select-none tracking-widest">
                           {formatTime(ytCurrentTime)} / {formatTime(ytDuration)}
@@ -607,7 +699,6 @@ export default function DashboardPage() {
                         />
                       </div>
 
-                      {/* Play & Lyrics Buttons */}
                       <div className="grid grid-cols-2 gap-3 relative z-10">
                         <button 
                           onClick={handleTogglePlay}
@@ -634,11 +725,18 @@ export default function DashboardPage() {
                 </div>
               );
 
+              // 3. Mount Logic
               if (isMobile) {
                 const portalSlot = document.getElementById("media-player-portal-slot");
-                return portalSlot ? createPortal(PlayerContent, portalSlot) : null;
+                return (
+                  <>
+                    {ExpandedPlayer}
+                    {portalSlot ? createPortal(CollapsedPlayer, portalSlot) : null}
+                  </>
+                );
               }
-              return PlayerContent;
+              
+              return CollapsedPlayer;
             })()}
           </div>
 

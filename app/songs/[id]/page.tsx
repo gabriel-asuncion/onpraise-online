@@ -133,6 +133,7 @@ export default function SoloPracticeRoomPage() {
   const accentProgressBarRef = useRef<HTMLDivElement | null>(null);
   const simplifiedProgressBarRef = useRef<HTMLDivElement | null>(null);
   
+  
   // ✅ EXACT MATCH: Uses the exact array structure as the Live Page to guarantee the internal refs attach properly[cite: 5]
   const mockedSoloTrackList = useMemo(() => activeSong ? [{ id: "solo", songs: activeSong, custom_key: activeDisplayKey, custom_structure: sections }] : [], [activeSong, activeDisplayKey, sections]);
   

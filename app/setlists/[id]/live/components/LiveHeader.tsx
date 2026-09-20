@@ -47,19 +47,23 @@ export function LiveHeader({
   const [isExpanded, setIsExpanded] = useState(false);
   const [isNavVisible, setIsNavVisible] = useState(true);
   
-  // React Portal Mounting State
   const [mounted, setMounted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [hasInitiallyMounted, setHasInitiallyMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
+    const timer = setTimeout(() => setHasInitiallyMounted(true), 350);
+    
     const checkMobile = () => setIsMobile(window.innerWidth < 768);
     checkMobile();
     window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
+    return () => {
+      window.removeEventListener('resize', checkMobile);
+      clearTimeout(timer);
+    };
   }, []);
 
-  // Instant scroll direction detection engine for desktop hiding
   useEffect(() => {
     const scrollEl = scrollContainerRef?.current;
     if (!scrollEl) return;
@@ -93,10 +97,10 @@ export function LiveHeader({
   // =========================================
   // 1. COLLAPSED VIEW (Mobile Docked Player)
   // =========================================
-  const CollapsedMobilePlayer = () => (
+  const renderCollapsedPlayer = () => (
     <div 
       onClick={() => setIsExpanded(true)}
-      className="flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-lg transition-transform active:scale-[0.99] border-t border-outline-variant/10"
+      className="flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-lg transition-transform active:scale-[0.99] border-t border-outline-variant/10 relative overflow-hidden"
     >
       <div className="flex items-center gap-3 min-w-0 flex-1">
         <div className="w-10 h-10 rounded-md bg-surface-container flex items-center justify-center shrink-0 overflow-hidden shadow-sm">
@@ -131,16 +135,25 @@ export function LiveHeader({
         </div>
       </div>
 
-      <div className="flex items-center gap-2.5 shrink-0">
+      <div className="flex items-center gap-1.5 shrink-0 z-10">
         {showSyncBack && handleSyncBack && (
           <button 
             onClick={(e) => { e.stopPropagation(); handleSyncBack(); }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-amber-500/50 text-amber-500 hover:bg-amber-500/10 active:scale-95 transition-all animate-in fade-in"
+            className="w-8 h-8 flex items-center justify-center rounded-full border border-amber-500/50 text-amber-500 hover:bg-amber-500/10 active:scale-95 transition-all animate-in fade-in"
+            title="Sync Back to Band"
           >
-            <span className="w-1.5 h-1.5 rounded-full border border-amber-500 bg-transparent"></span>
-            <span className="font-black text-[9px] uppercase tracking-widest">Sync Back</span>
+            <span className="material-symbols-outlined text-[16px]">my_location</span>
           </button>
         )}
+
+        <button 
+          onClick={(e) => { e.stopPropagation(); setIsSettingsModalOpen?.(true); }}
+          className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10 active:scale-95 transition-colors"
+          title="Settings & Mixer"
+        >
+          <span className="material-symbols-outlined text-[18px]">settings</span>
+        </button>
+
         <button 
           onClick={(e) => {
             e.stopPropagation(); 
@@ -152,16 +165,35 @@ export function LiveHeader({
           {isPlayingFlow ? <PauseIcon /> : <PlayIcon />}
         </button>
       </div>
+
+      {/* ✅ SURGICAL FIX: Callback ref ensures standard inline scaling, z-50 prevents overlapping cutoff */}
+      <div className="absolute bottom-0 left-0 w-full h-[2px] bg-surface-container-highest z-50">
+        <div 
+          ref={(el) => { if (accentProgressBarRef) accentProgressBarRef.current = el; }} 
+          className="h-full bg-primary origin-left transition-transform duration-100 ease-linear" 
+          style={{ transform: 'scaleX(0)' }}
+        />
+      </div>
     </div>
   );
 
   // =========================================
   // 2. EXPANDED VIEW (Mobile Full Screen)
   // =========================================
-  const ExpandedMobilePlayer = () => (
-    <div className="fixed inset-0 z-[200000] bg-surface flex flex-col p-6 animate-in slide-in-from-bottom-full duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]">
-      <div className="flex items-center justify-between w-full shrink-0 mb-6 pt-safe">
-        <button onClick={() => setIsExpanded(false)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer">
+  const renderExpandedPlayer = () => (
+    <div 
+      className={`fixed inset-0 z-[200000] bg-surface flex flex-col p-6 ${
+        !hasInitiallyMounted ? "animate-in slide-in-from-bottom-full duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]" : ""
+      }`}
+    >
+      <div className="flex items-center justify-between w-full shrink-0 mb-6 pt-safe mt-4">
+        <button 
+          onClick={() => {
+            setHasInitiallyMounted(false); 
+            setIsExpanded(false);
+          }} 
+          className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer"
+        >
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="text-on-surface"><polyline points="6 9 12 15 18 9"></polyline></svg>
         </button>
         
@@ -184,9 +216,7 @@ export function LiveHeader({
             ))}
         </div>
         
-        <button onClick={() => setIsSettingsModalOpen?.(true)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer border border-outline-variant/30">
-          <span className="material-symbols-outlined text-[20px] opacity-70">settings</span>
-        </button>
+        <div className="w-10 h-10 pointer-events-none" />
       </div>
 
       <div className="flex gap-4 mb-6 shrink-0 bg-surface-container-low shadow-md rounded-3xl p-4 border border-outline-variant/20">
@@ -281,6 +311,15 @@ export function LiveHeader({
         })()}
       </div>
 
+      {/* ✅ SURGICAL FIX: Callback ref ensures inline scaling works reliably after DOM swaps */}
+      <div className="w-full h-[2px] bg-surface-container-highest shrink-0 my-2">
+        <div 
+          ref={(el) => { if (accentProgressBarRef) accentProgressBarRef.current = el; }} 
+          className="h-full bg-primary origin-left transition-transform duration-100 ease-linear" 
+          style={{ transform: 'scaleX(0)' }}
+        />
+      </div>
+
       <div className="mt-auto shrink-0 flex justify-center pb-safe pt-2">
          <button 
             onClick={(e) => {
@@ -303,10 +342,15 @@ export function LiveHeader({
   // =========================================
   // 3. DESKTOP VIEW (Fixed Top Bar)
   // =========================================
-  const DesktopHeader = () => (
+  const renderDesktopHeader = () => (
     <header className="fixed top-0 left-20 right-0 bg-surface/90 backdrop-blur-xl z-50 overflow-hidden border-b border-outline-variant/30 select-none hidden md:block">
+      {/* ✅ SURGICAL FIX: Callback ref ensures inline scaling works reliably after DOM swaps */}
       <div className="absolute top-0 left-0 w-full h-[2px] bg-surface-container-highest z-0">
-        <div ref={accentProgressBarRef} className="h-full bg-primary origin-left scale-x-0 transition-transform duration-100 ease-linear" />
+        <div 
+          ref={(el) => { if (accentProgressBarRef) accentProgressBarRef.current = el; }} 
+          className="h-full bg-primary origin-left transition-transform duration-100 ease-linear" 
+          style={{ transform: 'scaleX(0)' }}
+        />
       </div>
 
       <div className="flex items-center justify-between h-[72px] px-6 relative z-10 w-full max-w-5xl mx-auto">
@@ -363,15 +407,11 @@ export function LiveHeader({
     const portalSlot = document.getElementById("media-player-portal-slot");
     return (
       <>
-        {/* Render the Collapsed player INTO the Sidebar's DOM slot if it exists */}
-        {portalSlot && !isExpanded ? createPortal(<CollapsedMobilePlayer />, portalSlot) : null}
-        
-        {/* Render the Expanded player as a full-screen overlay */}
-        {isExpanded && <ExpandedMobilePlayer />}
+        {portalSlot && !isExpanded ? createPortal(renderCollapsedPlayer(), portalSlot) : null}
+        {isExpanded ? renderExpandedPlayer() : null}
       </>
     );
   }
 
-  // Desktop simply renders inline normally
-  return <DesktopHeader />;
+  return renderDesktopHeader();
 }
