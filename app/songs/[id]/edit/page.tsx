@@ -2316,8 +2316,9 @@ export default function SongEditPage() {
         </div>
       )}
 
-      {sectionModalConfig.isOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[12000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-200">
+     {sectionModalConfig.isOpen && (
+        // ✅ SURGICAL FIX: Bumped from z-[12000] to z-[250000]
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[250000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-200">
           <div className="w-full bg-surface-container-low rounded-t-3xl md:rounded-3xl h-[85vh] md:h-[600px] max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
             <div className="relative flex items-center justify-center p-4 md:p-5 border-b border-outline-variant/30 bg-surface-container shrink-0">
               <button type="button" onClick={() => setSectionModalConfig({ isOpen: false, mode: "add" })} className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
@@ -2350,7 +2351,8 @@ export default function SongEditPage() {
       )}
 
       {sectionAdjustmentsConfig.isOpen && sectionAdjustmentsConfig.sectionType && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[13000] flex items-end justify-center animate-in fade-in duration-200">
+        // ✅ SURGICAL FIX: Bumped from z-[13000] to z-[250000]
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[250000] flex items-end justify-center animate-in fade-in duration-200">
           {(() => {
             const sType = sectionAdjustmentsConfig.sectionType!;
             const timingTuple = getCentralizedMetricsTuple(sType);
@@ -2478,7 +2480,8 @@ export default function SongEditPage() {
       )}
 
       {chordPickerConfig.isOpen && chordPickerConfig.sectionType && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[14000] flex items-end justify-center animate-in fade-in duration-200">
+        // ✅ SURGICAL FIX: Bumped from z-[14000] to z-[250000]
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[250000] flex items-end justify-center animate-in fade-in duration-200">
           <div className="w-full bg-surface-container-low rounded-t-3xl max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
             
             <div className="relative flex items-center justify-center p-4 border-b border-outline-variant/30 bg-surface-container shrink-0">
@@ -2856,7 +2859,12 @@ export default function SongEditPage() {
           {isMobile && !isPlayerExpanded && document.getElementById("media-player-portal-slot") && createPortal(
             <div 
               onClick={() => setIsPlayerExpanded(true)}
-              className="flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-lg transition-transform active:scale-[0.99] border-t border-outline-variant/10"
+              // ✅ SURGICAL FIX: Added dynamic translate-y-full based on modal visibility
+              className={`flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-[0_-4px_20px_rgba(0,0,0,0.4)] transition-transform duration-300 ease-in-out border-t border-outline-variant/10 ${
+                (chordPickerConfig.isOpen || sectionAdjustmentsConfig.isOpen || sectionModalConfig.isOpen || isKeyPopupOpen || isTapBpmModalOpen || isImportModalOpen) 
+                  ? "translate-y-full pointer-events-none" 
+                  : "translate-y-0 active:scale-[0.99]"
+              }`}
             >
               <div className="flex items-center gap-3 min-w-0 flex-1">
                 <div className="w-10 h-10 rounded-md bg-surface-container flex items-center justify-center shrink-0 overflow-hidden shadow-sm border border-outline-variant/20">
