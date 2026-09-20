@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useRef, useCallback } from "react";
+import { createPortal } from "react-dom"; // ✅ SURGICAL FIX: Added missing import
 import { useRouter } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
 import { useWebAudioEngine } from "../setlists/[id]/live/hooks/useWebAudioEngine";
@@ -55,8 +56,9 @@ const MASTER_DYNAMIC_CUES = [
 
 const COUNT_CUES = ["count_1", "count_2", "count_3", "count_4"];
 
-const DEFAULT_PAGE_1 = ["Intro", "Verse 1", "Verse 2", "Pre Chorus", "Chorus", "Bridge", "Instrumental", "Tag", "Outro", "Ad Lib", "Ending", "Turnaround"];
-const DEFAULT_PAGE_2 = ["D_All In", "D_Bass", "D_Big Ending", "D_Break", "D_Build", "D_Drums In", "D_Drums", "D_Hits", "D_Hold", "D_Key Change Up", "D_Swell", "D_Worship Freely"];
+// ✅ SURGICAL FIX: Trimmed to exactly 9 items for the 3x3 grid
+const DEFAULT_PAGE_1 = ["Intro", "Verse 1", "Verse 2", "Pre Chorus", "Chorus", "Bridge", "Instrumental", "Tag", "Outro"];
+const DEFAULT_PAGE_2 = ["D_All In", "D_Bass", "D_Big Ending", "D_Break", "D_Build", "D_Drums In", "D_Drums", "D_Hits", "D_Hold"];
 
 interface MDTrack {
   id: string;
@@ -73,6 +75,7 @@ export default function MDLivePage() {
   // STATE MANAGEMENT
   // ============================================================================
   const [mounted, setMounted] = useState(false);
+  const [isMobile, setIsMobile] = useState(false); // ✅ Added mobile tracking
   const [tracks, setTracks] = useState<MDTrack[]>([{ id: "trk-1", title: "Track 1", bpm: 120 }]);
   const [activeTrackId, setActiveTrackId] = useState<string>("trk-1");
   const [isExpanded, setIsExpanded] = useState(false);
@@ -87,6 +90,19 @@ export default function MDLivePage() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [visualBeat, setVisualBeat] = useState(1);
   const [isCountingIn, setIsCountingIn] = useState(false);
+
+  // ✅ SURGICAL FIX: Tell the global layout to hide the bottom nav when playing
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: isPlaying }));
+    }
+    // Safety cleanup: Ensure the nav comes back if the user exits the page while playing
+    return () => {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: false }));
+      }
+    };
+  }, [isPlaying]);
   
   // Interaction States
   const [idleArmedGuideId, setIdleArmedGuideId] = useState<string | null>(null);
@@ -124,6 +140,12 @@ export default function MDLivePage() {
   // ============================================================================
   useEffect(() => {
     setMounted(true);
+    
+    // ✅ Track mobile viewport to properly portal the player above the bottom nav
+    const checkMobile = () => setIsMobile(window.innerWidth < 768);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+
     if (typeof window !== "undefined") {
       MASTER_NORMAL_CUES.forEach(cue => fetchAndDecodeAudio(`/sound_files/${cue.file}`, cue.id));
       MASTER_DYNAMIC_CUES.forEach(cue => fetchAndDecodeAudio(`/sound_files/${cue.file}`, cue.id));
@@ -131,6 +153,8 @@ export default function MDLivePage() {
       fetchAndDecodeAudio(`/sound_files/metronome_blip_1.wav`, `metronome_blip_1`);
       fetchAndDecodeAudio(`/sound_files/metronome_blip_2.wav`, `metronome_blip_2`);
     }
+
+    return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
   useEffect(() => { queuedGuideIdRef.current = queuedGuideId; }, [queuedGuideId]);
@@ -355,7 +379,8 @@ export default function MDLivePage() {
   const renderCollapsedPlayer = () => (
     <div 
       onClick={() => setIsExpanded(true)}
-      className="fixed bottom-0 left-0 right-0 h-[68px] bg-[#18181A] shadow-[0_-4px_20px_rgba(0,0,0,0.4)] transition-transform active:scale-[0.99] border-t border-outline-variant/10 z-[150000] flex items-center justify-between px-4 cursor-pointer pb-safe"
+      // ✅ SURGICAL FIX: Removed fixed/bottom-0 classes so it can be portaled flawlessly!
+      className="w-full h-[64px] bg-[#18181A] rounded-t-2xl shadow-[0_-4px_20px_rgba(0,0,0,0.4)] transition-transform active:scale-[0.99] border-t border-outline-variant/10 flex items-center justify-between px-4 cursor-pointer relative overflow-hidden"
     >
       <div className="flex items-center gap-3 min-w-0 flex-1">
         <div className="w-10 h-10 rounded-md bg-surface-container-highest flex items-center justify-center shrink-0 border border-outline-variant/30 shadow-inner">
@@ -446,7 +471,8 @@ export default function MDLivePage() {
   const currentMasterDictionary = activePadPage === 1 ? MASTER_NORMAL_CUES : MASTER_DYNAMIC_CUES;
 
   return (
-    <div className="h-[100dvh] w-full flex flex-col bg-[#09090b] text-zinc-100 overflow-hidden font-sans select-none" onContextMenu={e => e.preventDefault()}>
+    // ✅ SURGICAL FIX: Swapped h-[100dvh] for h-full to allow the layout's global bottom nav to render!
+    <div className="bg-[#09090b] text-zinc-100 font-sans flex flex-col h-full w-full overflow-hidden select-none" onContextMenu={e => e.preventDefault()}>
       
       {/* ========================================= */}
       {/* MAIN STAGE                                */}
@@ -523,7 +549,8 @@ export default function MDLivePage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-3 md:grid-cols-4 gap-3 md:gap-4">
+            {/* ✅ SURGICAL FIX: Removed md:grid-cols-4 to lock it to a 3x3 grid */}
+            <div className="grid grid-cols-3 gap-3 md:gap-4">
               {currentCuesList.map((cueId) => {
                 const cue = currentMasterDictionary.find(c => c.id === cueId) || currentMasterDictionary[0];
                 const isArmedIdle = !isPlaying && idleArmedGuideId === cue.id;
@@ -588,7 +615,28 @@ export default function MDLivePage() {
       {/* ========================================= */}
       {/* PORTALS & MODALS                          */}
       {/* ========================================= */}
-      {isExpanded ? renderExpandedPlayer() : renderCollapsedPlayer()}
+      {/* ✅ SURGICAL FIX: Safely portal the docked player just like the Dashboard does */}
+      {mounted && (() => {
+        if (isMobile) {
+          const portalSlot = document.getElementById("media-player-portal-slot");
+          return (
+            <>
+              {portalSlot && !isExpanded ? createPortal(renderCollapsedPlayer(), portalSlot) : null}
+              {isExpanded ? renderExpandedPlayer() : null}
+            </>
+          );
+        }
+        return (
+          <>
+            {!isExpanded && (
+               <div className="fixed bottom-0 left-0 right-0 z-[150000]">
+                 {renderCollapsedPlayer()}
+               </div>
+            )}
+            {isExpanded && renderExpandedPlayer()}
+          </>
+        );
+      })()}
 
       {/* Hot Swap Modal */}
       {hotSwapTarget !== null && (
