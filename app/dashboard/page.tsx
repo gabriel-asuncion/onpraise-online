@@ -978,24 +978,24 @@ export default function DashboardPage() {
             </div>
           </div>
 
-        {/* ✅ SURGICAL FIX: MD Live Studio Launcher styled to match Upcoming Events */}
+        {/* ✅ SURGICAL FIX: MD Live Studio Launcher styled precisely to the new layout */}
           <div 
             onClick={() => router.push('/md-live')}
-            className="flex items-center justify-between p-3 rounded-xl bg-surface-container border border-primary/20 hover:border-primary/40 transition-colors cursor-pointer group mt-2 shadow-sm"
+            className="flex items-center justify-between p-3 md:p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/40 hover:border-primary/50 transition-colors cursor-pointer group shadow-sm mt-1"
           >
-            <div className="flex items-center gap-3.5 min-w-0">
-              <div className="w-12 h-12 rounded-xl bg-primary flex items-center justify-center shrink-0 shadow-inner">
-                <span className="material-symbols-outlined text-[24px] text-on-primary">graphic_eq</span>
+            <div className="flex items-center gap-4 min-w-0">
+              <div className="w-14 h-14 rounded-2xl bg-[#3B82F6] flex items-center justify-center shrink-0 shadow-[0_0_20px_-5px_rgba(59,130,246,0.6)] group-hover:shadow-[0_0_25px_-5px_rgba(59,130,246,0.8)] transition-shadow">
+                <span className="material-symbols-outlined text-[28px] text-white" style={{ fontVariationSettings: "'FILL' 1" }}>graphic_eq</span>
               </div>
               <div className="flex flex-col min-w-0 pr-2">
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className="font-extrabold text-[15px] md:text-[16px] text-on-surface leading-none truncate group-hover:text-primary transition-colors">MD Live Studio</span>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="font-extrabold text-[18px] md:text-[20px] text-on-surface leading-none truncate tracking-tight">MD Live Studio</span>
                 </div>
-                <span className="font-black text-[9px] text-primary uppercase tracking-widest truncate block">Standalone Metronome & Cues</span>
+                <span className="font-black text-[10px] text-[#38BDF8] uppercase tracking-[0.1em] truncate block">Standalone Metronome & Cues</span>
               </div>
             </div>
-            <div className="w-8 h-8 rounded-full bg-primary-container/30 flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-on-primary transition-colors shrink-0 mr-1">
-              <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
+            <div className="w-10 h-10 rounded-full bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-outline group-hover:bg-primary-container/20 group-hover:border-primary/30 group-hover:text-primary transition-colors shrink-0">
+              <span className="material-symbols-outlined text-[20px]">arrow_forward</span>
             </div>
           </div>
 
