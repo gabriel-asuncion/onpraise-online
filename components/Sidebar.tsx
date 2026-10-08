@@ -10,6 +10,14 @@ import { DayPicker, DateRange } from "react-day-picker";
 import "react-day-picker/dist/style.css";
 import { format, eachDayOfInterval } from "date-fns";
 
+// ✅ SURGICAL FIX: Added YouTube ID extractor
+function extractYouTubeID(url: string) {
+  if (!url) return null;
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+  const match = url.match(regExp);
+  return (match && match[2].length === 11) ? match[2] : null;
+}
+
 interface UserProfile {
   id: string;
   full_name: string;
@@ -25,6 +33,7 @@ interface AssignedSetlist {
   eventId: string;
   eventTitle: string;
   eventDate: string;
+  youtubeId?: string | null; // ✅ SURGICAL FIX: Added field for thumbnail
 }
 
 export default function Sidebar() {
@@ -60,44 +69,91 @@ export default function Sidebar() {
   const [assignedSetlists, setAssignedSetlists] = useState<AssignedSetlist[]>([]);
   const [isSetlistDrawerOpen, setIsSetlistDrawerOpen] = useState(false);
 
-  useEffect(() => {
-    async function fetchAssignments() {
-      if (!simulatedUserId || simulatedUserId === "00000000-0000-0000-0000-000000000000") return;
+  // ✅ SURGICAL FIX: Wrapped in useCallback and added Realtime Postgres Listener
+  const fetchAssignments = useCallback(async () => {
+    if (!simulatedUserId || simulatedUserId === "00000000-0000-0000-0000-000000000000") return;
 
-      try {
-        const { data: rosters } = await supabase.from("event_rosters").select("event_id").eq("user_id", simulatedUserId);
-        if (!rosters || rosters.length === 0) return;
-        const eventIds = rosters.map(r => r.event_id);
-
-        const { data: events } = await supabase.from("events").select("id, title, event_date").in("id", eventIds);
-        if (!events || events.length === 0) return;
-
-        const { data: setlists } = await supabase.from("setlists").select("id, name, event_id").in("event_id", eventIds);
-
-        const combined = (setlists || []).map(sl => {
-          const ev = events.find(e => e.id === sl.event_id);
-          return {
-            setlistId: sl.id,
-            setlistName: sl.name,
-            eventId: ev?.id || "",
-            eventTitle: ev?.title || "Unknown Event",
-            eventDate: ev?.event_date || new Date().toISOString()
-          };
-        });
-
-        const todayString = new Date().toISOString().split("T")[0];
-        const activeAssignments = combined.filter(item => {
-          const eventDateStr = item.eventDate.split("T")[0];
-          return eventDateStr >= todayString;
-        });
-
-        setAssignedSetlists(activeAssignments);
-      } catch (err) {
-        console.error("Failed to load navigation assignments", err);
+    try {
+      const { data: rosters } = await supabase.from("event_rosters").select("event_id").eq("user_id", simulatedUserId);
+      if (!rosters || rosters.length === 0) {
+        setAssignedSetlists([]);
+        return;
       }
+      const eventIds = rosters.map(r => r.event_id);
+
+      const { data: events } = await supabase.from("events").select("id, title, event_date").in("id", eventIds);
+      if (!events || events.length === 0) return;
+
+      const { data: setlists } = await supabase.from("setlists").select("id, name, event_id").in("event_id", eventIds);
+
+      // ✅ SURGICAL FIX: Fetch the songs inside these setlists to grab a thumbnail
+      let setlistSongsMap: Record<string, any[]> = {};
+      if (setlists && setlists.length > 0) {
+         const slIds = setlists.map(s => s.id);
+         const { data: slSongs } = await supabase
+           .from("setlist_songs")
+           .select("setlist_id, sequence_order, song:songs(youtube_url)")
+           .in("setlist_id", slIds)
+           .order("sequence_order", { ascending: true });
+           
+         if (slSongs) {
+           slSongs.forEach(ss => {
+             if (!setlistSongsMap[ss.setlist_id]) setlistSongsMap[ss.setlist_id] = [];
+             setlistSongsMap[ss.setlist_id].push(ss);
+           });
+         }
+      }
+
+      const combined = (setlists || []).map(sl => {
+        const ev = events.find(e => e.id === sl.event_id);
+        
+        // ✅ SURGICAL FIX: Find the first song with a valid YouTube link
+        let ytId = null;
+        const songsForThisSl = setlistSongsMap[sl.id] || [];
+        for (const ss of songsForThisSl) {
+           const url = ss.song?.youtube_url;
+           if (url) {
+             const match = extractYouTubeID(url);
+             if (match) { ytId = match; break; }
+           }
+        }
+
+        return {
+          setlistId: sl.id,
+          setlistName: sl.name,
+          eventId: ev?.id || "",
+          eventTitle: ev?.title || "Unknown Event",
+          eventDate: ev?.event_date || new Date().toISOString(),
+          youtubeId: ytId // ✅ Attach to payload
+        };
+      });
+
+      const todayString = new Date().toISOString().split("T")[0];
+      const activeAssignments = combined.filter(item => {
+        const eventDateStr = item.eventDate.split("T")[0];
+        return eventDateStr >= todayString;
+      });
+
+      setAssignedSetlists(activeAssignments);
+    } catch (err) {
+      console.error("Failed to load navigation assignments", err);
     }
+  }, [simulatedUserId, supabase]);
+
+  useEffect(() => {
     fetchAssignments();
-  }, [simulatedUserId]);
+    
+    if (!simulatedUserId || simulatedUserId === "00000000-0000-0000-0000-000000000000") return;
+
+    // ✅ INSTANT SYNC: Listens for any roster insertions/deletions for this specific user
+    const rosterChannel = supabase.channel('roster_listener')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'event_rosters', filter: `user_id=eq.${simulatedUserId}` }, () => {
+        fetchAssignments();
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(rosterChannel); };
+  }, [fetchAssignments, simulatedUserId, supabase]);
 
   const handleSetlistClick = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -341,21 +397,48 @@ export default function Sidebar() {
                 </div>
               )}
               {assignedSetlists.map((sl, i) => (
-                <button 
+                <div 
                   key={i} 
-                  onClick={() => { setIsSetlistDrawerOpen(false); router.push(`/setlists/${sl.setlistId}/live`); }} 
-                  className="p-4 rounded-xl bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 text-left flex flex-col gap-1 transition-colors active:scale-[0.98] cursor-pointer shadow-sm group"
+                  className="p-4 rounded-xl bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 flex flex-col gap-1 transition-colors shadow-sm group relative overflow-hidden z-0"
                 >
-                  <div className="flex items-center gap-2">
+                  {/* ✅ SURGICAL FIX: YouTube Thumbnail Background Overlay */}
+                  {sl.youtubeId && (
+                    <div 
+                      className="absolute inset-0 z-[-1] opacity-[0.15] pointer-events-none bg-cover bg-center mix-blend-luminosity transition-opacity group-hover:opacity-[0.25]"
+                      style={{ backgroundImage: `url('https://img.youtube.com/vi/${sl.youtubeId}/hqdefault.jpg')` }}
+                    />
+                  )}
+
+                  <div className="flex items-center gap-2 relative z-10">
                     <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse shadow-[0_0_8px_rgba(37,99,235,0.6)]"></span>
-                    <span className="font-extrabold text-[15px] text-on-surface tracking-tight group-hover:text-primary transition-colors">{sl.eventTitle}</span>
+                    <span className="font-extrabold text-[15px] text-on-surface tracking-tight truncate max-w-[200px]">{sl.eventTitle}</span>
                   </div>
-                  <span className="text-[12px] font-bold text-on-surface-variant ml-3.5">{sl.setlistName}</span>
-                  <span className="text-[10px] font-black text-outline uppercase tracking-widest ml-3.5 mt-1 flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[12px]">calendar_month</span>
+                  <span className="text-[12px] font-bold text-on-surface-variant ml-3.5 relative z-10">{sl.setlistName}</span>
+                  
+                  <span className="text-[10px] font-black text-outline uppercase tracking-widest ml-3.5 mt-1 flex items-center gap-1 relative z-10">
+                    {/* ✅ SURGICAL FIX: Downsized Calendar Icon */}
+                    <span className="material-symbols-outlined" style={{ fontSize: '11px' }}>calendar_month</span>
                     {new Date(sl.eventDate).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
                   </span>
-                </button>
+
+                  {/* ✅ SURGICAL FIX: Square Action Buttons Overlay with Smaller Icons */}
+                  <div className="absolute right-4 bottom-4 flex items-center gap-2 z-10">
+                    <button 
+                      onClick={() => { setIsSetlistDrawerOpen(false); router.push(`/setlists/${sl.setlistId}/live`); }} 
+                      className="w-9 h-9 rounded-lg bg-surface-container-highest border border-outline-variant/40 flex flex-col items-center justify-center text-primary hover:bg-primary hover:text-on-primary hover:border-primary transition-all active:scale-95 shadow-sm cursor-pointer"
+                      title="View Setlist"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>queue_music</span>
+                    </button>
+                    <button 
+                      onClick={() => { setIsSetlistDrawerOpen(false); router.push(`/events/${sl.eventId}`); }} 
+                      className="w-9 h-9 rounded-lg bg-surface-container-highest border border-outline-variant/40 flex flex-col items-center justify-center text-secondary hover:bg-secondary hover:text-on-secondary hover:border-secondary transition-all active:scale-95 shadow-sm cursor-pointer"
+                      title="View Event Cockpit"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>dashboard</span>
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
@@ -437,9 +520,10 @@ export default function Sidebar() {
                           className="flex-1 bg-surface border border-outline-variant/50 rounded-lg px-3 py-2 text-xs font-black uppercase tracking-wider text-on-surface focus:outline-none focus:border-primary transition-all"
                           maxLength={10}
                         />
+                        {/* ✅ SURGICAL FIX: Dropped the character threshold from 10 to 5 so standard short-codes activate the button */}
                         <button
                           onClick={handleJoinFromProfile}
-                          disabled={isJoining || modalJoinCode.trim().length < 10}
+                          disabled={isJoining || modalJoinCode.trim().length < 5}
                           className="px-4 bg-primary hover:bg-primary/80 disabled:bg-surface-container-highest disabled:text-outline-variant disabled:cursor-not-allowed text-on-primary text-[10px] font-black uppercase tracking-widest rounded-lg transition-all cursor-pointer"
                         >
                           {isJoining ? "..." : "Join"}

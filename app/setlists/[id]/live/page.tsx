@@ -1199,12 +1199,37 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       <TransposerModal 
         isTransposerOpen={isTransposerOpen} setIsTransposerOpen={setIsTransposerOpen} activeSong={activeSong}
         modalRoot={modalRoot} setModalRoot={setModalRoot} modalAccidental={modalAccidental as ""|"#"|"b"} setModalAccidental={setModalAccidental}
-        handleCommitTranspositionSave={(e) => {
-          e.preventDefault(); if (!activeSong) return;
+        handleCommitTranspositionSave={async (e) => {
+          e.preventDefault(); 
+          if (!activeSong) return;
+          
           const formatted = `${modalRoot}${modalAccidental}${activeSong.original_key.endsWith("m") ? "m" : ""}`;
-          setActiveDisplayKey(formatted); setIsTransposerOpen(false);
-          supabase.from("setlist_songs").update({ custom_key: formatted }).eq("id", tracksList[currentTrackIndex]?.id);
-          setTracksList(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, custom_key: formatted } : t)); handleResetFlowTrigger();
+          
+          // 1. Instantly update the local React State
+          setActiveDisplayKey(formatted); 
+          setIsTransposerOpen(false);
+          setTracksList(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, custom_key: formatted } : t)); 
+          handleResetFlowTrigger();
+          
+          // 2. ✅ SURGICAL FIX: Find the junction row using match()
+          // activeSong.id is the UUID from the `songs` table.
+          if (activeSong.id && setlistId) {
+            
+            // Note: If a user adds the exact same song twice to the same setlist block,
+            // this will transpose BOTH of them. This is usually the desired behavior.
+            const { error } = await supabase
+              .from("setlist_songs")
+              .update({ custom_key: formatted })
+              .match({ 
+                setlist_id: setlistId, 
+                song_id: activeSong.id 
+              });
+              
+            if (error) {
+              console.error("Failed to save transposition:", error.message);
+              alert("Could not save the key change permanently to the database.");
+            }
+          }
         }}
       />
 

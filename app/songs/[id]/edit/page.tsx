@@ -258,7 +258,8 @@ export default function SongEditPage() {
   const editingSongId = params.id as string;
 
   const editorContentContainerRef = useRef<HTMLDivElement | null>(null);
-  const { activeRole } = useEngine();
+  // ✅ SURGICAL FIX: Extract the simulatedUserId to stamp new songs
+  const { activeRole, simulatedUserId } = useEngine();
 
   useEffect(() => {
     if (activeRole === "member") {
@@ -458,7 +459,7 @@ export default function SongEditPage() {
     }
   }, [tapTimestamps]);
 
-  const [formKey, setFormKey] = useState("G");
+  const [formKey, setFormKey] = useState(""); // ✅ SURGICAL FIX: Changed from "G" to empty string
   const [formArtist, setFormArtist] = useState("");
 
   const [availableArtists, setAvailableArtists] = useState<string[]>([]);
@@ -498,6 +499,7 @@ export default function SongEditPage() {
   const [isKeyPopupOpen, setIsKeyPopupOpen] = useState(false);
   const [modalKeyRoot, setModalKeyRoot] = useState("G");
   const [modalKeyAccidental, setModalKeyAccidental] = useState<"" | "#" | "b">("");
+  const [transposeChordsInText, setTransposeChordsInText] = useState(true); // ✅ SURGICAL FIX: Toggle State
 
   const [isRealtimePreviewActive, setIsRealtimePreviewActive] = useState(false);
 
@@ -775,7 +777,7 @@ export default function SongEditPage() {
         
         setFormTitle(song.title || "");
         setFormTempo(song.tempo || "");
-        setFormKey(song.original_key || "G");
+        setFormKey(song.original_key || ""); // ✅ SURGICAL FIX: Changed fallback from "G" to ""
         setFormArtist(song.artist || "");
         setFormYoutubeUrl(song.youtube_url || "");
         setFormYoutubeSyncOffset(song.youtube_sync_offset_ms || 0);
@@ -1049,18 +1051,23 @@ export default function SongEditPage() {
 
   const handleSelectNewKeySignature = (newKey: string) => {
     if (newKey === formKey) return;
-    const oldIdx = CHROMATIC_SCALE.indexOf(normalizeKeyNote(formKey.endsWith("m") ? formKey.slice(0, -1) : formKey));
-    const newIdx = CHROMATIC_SCALE.indexOf(normalizeKeyNote(newKey.endsWith("m") ? newKey.slice(0, -1) : newKey));
-    if (oldIdx !== -1 && newIdx !== -1) {
-      const semitoneDelta = (newIdx - oldIdx + 12) % 12;
-      if (semitoneDelta !== 0) {
-        setHasUnsavedChanges(true);
-        setFormSections(prev => prev.map(sec => ({ 
-          ...sec, 
-          content: sec.content.replace(/\[([^\]]+)\]/g, (m, inner) => `[${transposeBracketContent(inner, semitoneDelta)}]`) 
-        })));
+    
+    // ✅ SURGICAL FIX: Only transpose the text content if the toggle is checked!
+    if (transposeChordsInText && formKey) {
+      const oldIdx = CHROMATIC_SCALE.indexOf(normalizeKeyNote(formKey.endsWith("m") ? formKey.slice(0, -1) : formKey));
+      const newIdx = CHROMATIC_SCALE.indexOf(normalizeKeyNote(newKey.endsWith("m") ? newKey.slice(0, -1) : newKey));
+      if (oldIdx !== -1 && newIdx !== -1) {
+        const semitoneDelta = (newIdx - oldIdx + 12) % 12;
+        if (semitoneDelta !== 0) {
+          setHasUnsavedChanges(true);
+          setFormSections(prev => prev.map(sec => ({ 
+            ...sec, 
+            content: sec.content.replace(/\[([^\]]+)\]/g, (m, inner) => `[${transposeBracketContent(inner, semitoneDelta)}]`) 
+          })));
+        }
       }
     }
+    
     setFormKey(newKey); 
     setIsKeyPopupOpen(false);
   };
@@ -1415,7 +1422,12 @@ export default function SongEditPage() {
       setIsConfirmExitModalOpen(true);
       return;
     }
-    router.back(); 
+    // ✅ SURGICAL FIX: Hard route to the song page instead of browser back
+    if (editingSongId !== "new") {
+      router.push(`/songs/${editingSongId}`);
+    } else {
+      router.push('/songs');
+    }
   };
 
   const handleCommitSongChangesToDB = async () => {
@@ -1489,7 +1501,9 @@ export default function SongEditPage() {
           youtube_url: formYoutubeUrl.trim(),
           youtube_sync_offset_ms: formYoutubeSyncOffset,
           is_youtube_sync_validated: formIsYoutubeSyncValidated, 
-          approval_status: ["admin", "moderator"].includes(activeRole) ? "pending" : "approved"
+          // ✅ SURGICAL FIX: Force all new creations to pending status unconditionally
+          approval_status: "pending",
+          created_by: simulatedUserId
         };
 
         if (currentTeamId) insertPayload.team_id = currentTeamId;
@@ -1508,7 +1522,10 @@ export default function SongEditPage() {
             chordpro_content: compiledChordPro,
             youtube_url: formYoutubeUrl.trim(),
             youtube_sync_offset_ms: formYoutubeSyncOffset,
-            is_youtube_sync_validated: formIsYoutubeSyncValidated 
+            is_youtube_sync_validated: formIsYoutubeSyncValidated,
+            // ✅ SURGICAL FIX: Force all edits to revert to pending status unconditionally
+            approval_status: "pending",
+            reviewer_feedback: null 
           }).eq("id", finalSongId);
         if (songUpdateError) throw songUpdateError;
 
@@ -1532,6 +1549,9 @@ export default function SongEditPage() {
       setSaveStatus("success");
       
       setTimeout(() => {
+        // ✅ SURGICAL FIX: Force Next.js to flush its cache so the new "pending" status appears globally!
+        router.refresh(); 
+        
         if (isNewSong) router.replace(`/songs/${finalSongId}/edit`);
         else setSaveStatus("idle");
       }, 1500);
@@ -1737,9 +1757,9 @@ export default function SongEditPage() {
                 </div>
                 <div>
                   <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block mb-1">Original Target Key Signature *</label>
-                  <button type="button" onClick={() => handleOpenKeySelectionPopup()} className="w-full border border-outline-variant/30 focus:border-primary rounded-xl p-2.5 text-xs font-bold text-on-surface bg-surface-container text-left flex justify-between items-center outline-none">
-                    <span>{formKey ? `Key of ${formKey}` : "Select Key"}</span>
-                    <span className="text-[10px] text-on-surface-variant">▼</span>
+                  <button type="button" onClick={() => handleOpenKeySelectionPopup()} className={`w-full border focus:border-primary rounded-xl p-2.5 text-xs font-bold text-left flex justify-between items-center outline-none transition-colors ${formKey ? 'border-outline-variant/30 text-on-surface bg-surface-container' : 'border-error/50 bg-error/10 text-error'}`}>
+                    <span>{formKey ? `Key of ${formKey}` : "Required: Select Key"}</span>
+                    <span className="text-[10px] opacity-70">▼</span>
                   </button>
                 </div>
               </div>
@@ -2281,10 +2301,13 @@ export default function SongEditPage() {
               <button type="button" onClick={() => { 
                   setHasUnsavedChanges(false); 
                   setIsConfirmExitModalOpen(false); 
+                  // ✅ SURGICAL FIX: Hard route execution on discard
                   if (pendingNavigationUrl) {
                     router.push(pendingNavigationUrl);
+                  } else if (editingSongId !== "new") {
+                    router.push(`/songs/${editingSongId}`);
                   } else {
-                    router.back(); 
+                    router.push('/songs');
                   }
                 }} 
                 className="py-2.5 bg-error hover:bg-error/90 text-on-error text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
@@ -2718,23 +2741,42 @@ export default function SongEditPage() {
 
       {isKeyPopupOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 select-none">
-          <form onSubmit={handleSaveModalKeySelection} className="bg-surface-container border border-outline-variant/30 rounded-xl shadow-2xl max-w-md w-full p-5 space-y-4 text-left">
+          <form onSubmit={handleSaveModalKeySelection} className="bg-surface-container border border-outline-variant/30 rounded-xl shadow-2xl max-w-md w-full p-5 space-y-4 text-left relative">
+            {/* ✅ SURGICAL FIX: Close Button */}
+            <button type="button" onClick={() => setIsKeyPopupOpen(false)} className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant transition-colors cursor-pointer">
+              <span className="material-symbols-outlined text-[18px]">close</span>
+            </button>
+            
             <div className="space-y-0.5">
               <h3 className="text-base font-black text-on-surface tracking-tight">Change Key</h3>
-              <p className="text-[11px] font-black text-primary">Original {formKey}</p>
+              <p className="text-[11px] font-black text-primary">{formKey ? `Original ${formKey}` : "No Key Assigned"}</p>
             </div>
+            
             <div className="grid grid-cols-7 gap-1 bg-surface-container-lowest p-1 rounded-xl border border-outline-variant/30 shadow-inner">
               {BASE_LETTER_ROOTS.map((letter) => {
                 const isSelected = modalKeyRoot === letter;
                 return <button key={letter} type="button" className={`aspect-square rounded-lg text-center text-xs font-black flex items-center justify-center cursor-pointer ${isSelected ? "bg-primary text-on-primary shadow-sm scale-105" : "bg-surface-container hover:bg-surface-container-high text-on-surface"}`} onClick={() => setModalKeyRoot(letter)}>{letter}</button>;
               })}
             </div>
+            
             <div className="grid grid-cols-2 divide-x divide-outline-variant/30 bg-surface-container-lowest rounded-xl border border-outline-variant/30 overflow-hidden shadow-inner h-10">
               <button type="button" className={`text-center text-sm font-black flex items-center justify-center h-full cursor-pointer ${modalKeyAccidental === "b" ? "bg-primary-container/30 text-primary" : "text-on-surface-variant hover:bg-surface-container"}`} onClick={() => setModalKeyAccidental(modalKeyAccidental === "b" ? "" : "b")}>♭</button>
               <button type="button" className={`text-center text-xs font-black flex items-center justify-center h-full cursor-pointer ${modalKeyAccidental === "#" ? "bg-primary-container/30 text-primary" : "text-on-surface-variant hover:bg-surface-container"}`} onClick={() => setModalKeyAccidental(modalKeyAccidental === "#" ? "" : "#")}>#</button>
             </div>
+
+            {/* ✅ SURGICAL FIX: The Checkbox Toggle */}
+            <div className="flex items-center gap-3 bg-surface-container-low border border-outline-variant/30 rounded-xl p-3 shadow-sm cursor-pointer" onClick={() => setTransposeChordsInText(!transposeChordsInText)}>
+              <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${transposeChordsInText ? 'bg-primary border-primary text-on-primary' : 'bg-surface-container-highest border-outline-variant/50'}`}>
+                {transposeChordsInText && <span className="material-symbols-outlined text-[14px]">check</span>}
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[12px] font-black text-on-surface leading-none">Transpose text chords</span>
+                <span className="text-[10px] font-bold text-on-surface-variant mt-0.5">Applies math to content layers</span>
+              </div>
+            </div>
+
             <div className="pt-1">
-              <button type="submit" className="w-full py-2.5 bg-primary hover:bg-primary/90 text-on-primary font-black text-xs uppercase tracking-widest rounded-xl shadow-md text-center cursor-pointer">Save Key Change</button>
+              <button type="submit" className="w-full py-3 bg-primary hover:bg-primary/90 text-on-primary font-black text-xs uppercase tracking-widest rounded-xl shadow-md text-center cursor-pointer">Save Key Change</button>
             </div>
           </form>
         </div>
@@ -2902,27 +2944,20 @@ export default function SongEditPage() {
           )}
 
           {/* ========================================= */}
-          {/* MOBILE EXPANDED OR DESKTOP FIXED          */}
+          {/* MOBILE EXPANDED                           */}
           {/* ========================================= */}
-          {(!isMobile || isPlayerExpanded) && (
-            <div className={`fixed z-[200000] overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] select-none flex flex-col ${
-              isMobile 
-                ? "inset-0 bg-surface animate-in slide-in-from-bottom-full" 
-                : "bottom-6 left-1/2 -translate-x-1/2 w-[400px] bg-[#18181b] rounded-3xl border border-outline-variant/20 shadow-2xl p-5"
-            }`}>
-               
-               {isMobile && (
-                 <div className="flex items-center justify-between w-full shrink-0 mb-6 pt-safe px-6 mt-4">
-                   <button type="button" onClick={() => setIsPlayerExpanded(false)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer border border-outline-variant/30 text-on-surface">
-                     <span className="material-symbols-outlined text-[20px]">keyboard_arrow_down</span>
-                   </button>
-                   <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Now Playing</span>
-                   <div className="w-10"></div> 
-                 </div>
-               )}
+          {isMobile && isPlayerExpanded && (
+            <div className="fixed inset-0 bg-surface z-[200000] overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] select-none flex flex-col animate-in slide-in-from-bottom-full">
+               <div className="flex items-center justify-between w-full shrink-0 mb-6 pt-safe px-6 mt-4">
+                 <button type="button" onClick={() => setIsPlayerExpanded(false)} className="w-10 h-10 flex items-center justify-center bg-surface-container-high rounded-full hover:bg-surface-bright transition-colors shadow-sm active:scale-95 cursor-pointer border border-outline-variant/30 text-on-surface">
+                   <span className="material-symbols-outlined text-[20px]">keyboard_arrow_down</span>
+                 </button>
+                 <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Now Playing</span>
+                 <div className="w-10"></div> 
+               </div>
 
-               <div className={`flex flex-col items-center justify-center flex-1 ${isMobile ? "px-8" : ""}`}>
-                  <div className={`w-full aspect-square rounded-2xl overflow-hidden shadow-2xl mb-8 border border-outline-variant/20 ${isMobile ? "max-w-[320px]" : "max-h-[240px] mb-4"}`}>
+               <div className="flex flex-col items-center justify-center flex-1 px-8">
+                  <div className="w-full aspect-square rounded-2xl overflow-hidden shadow-2xl mb-8 border border-outline-variant/20 max-w-[320px]">
                     <img src={`https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg`} alt="cover" className="w-full h-full object-cover opacity-90" />
                   </div>
                   
@@ -2949,24 +2984,100 @@ export default function SongEditPage() {
                     </div>
                   </div>
 
-                  <button 
-                    type="button"
-                    className="w-20 h-20 bg-white text-[#18181b] rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none mb-4"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      initAudioContext();
-                      if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-                      if (ytPlaying) ytPlayerRef.current.pauseVideo();
-                      else ytPlayerRef.current.playVideo();
-                    }}
-                  >
-                    {ytPlaying ? (
-                      <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
-                    ) : (
-                      <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor ml-2"><path d="M8 5v14l11-7z" /></svg>
-                    )}
-                  </button>
+                  <div className="flex items-center justify-center gap-4 sm:gap-6 mb-4 w-full px-4">
+                    <button type="button" className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }}>
+                      <span className="material-symbols-outlined text-[28px]">replay_10</span>
+                    </button>
+                    <button type="button" className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }}>
+                      <span className="material-symbols-outlined text-[28px]">replay_5</span>
+                    </button>
+                    <button type="button" className="w-20 h-20 bg-white text-[#18181b] rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none shrink-0" onClick={(e) => { e.stopPropagation(); initAudioContext(); if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return; if (ytPlaying) ytPlayerRef.current.pauseVideo(); else ytPlayerRef.current.playVideo(); }}>
+                      {ytPlaying ? <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg> : <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor ml-2"><path d="M8 5v14l11-7z" /></svg>}
+                    </button>
+                    <button type="button" className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }}>
+                      <span className="material-symbols-outlined text-[28px]">forward_5</span>
+                    </button>
+                    <button type="button" className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }}>
+                      <span className="material-symbols-outlined text-[28px]">forward_10</span>
+                    </button>
+                  </div>
                </div>
+            </div>
+          )}
+
+          {/* ========================================= */}
+          {/* DESKTOP FIXED BOTTOM BAR                  */}
+          {/* ========================================= */}
+          {!isMobile && (
+            <div className="fixed bottom-0 left-0 right-0 h-[80px] bg-[#18181A] border-t border-zinc-800/80 z-[200000] flex items-center justify-between px-6 gap-6 shadow-[0_-8px_30px_rgba(0,0,0,0.5)] animate-in slide-in-from-bottom-full duration-300 select-none">
+              
+              {/* LEFT: Thumbnail & Info */}
+              <div className="flex items-center gap-4 w-1/3 min-w-[200px]">
+                <div className="w-12 h-12 rounded-md bg-surface-container flex items-center justify-center shrink-0 overflow-hidden shadow-sm border border-outline-variant/20">
+                  <img src={`https://img.youtube.com/vi/${youtubeVideoId}/default.jpg`} alt="thumbnail" className="w-full h-full object-cover opacity-90" />
+                </div>
+                <div className="flex flex-col min-w-0 pr-2">
+                  <h2 className="font-extrabold text-[14px] text-white truncate tracking-tight leading-tight">
+                    {formTitle || "Unknown Track"}
+                  </h2>
+                  <span className="text-[11px] font-semibold text-zinc-400 truncate mt-0.5">
+                    {formArtist || "Unknown Artist"}
+                  </span>
+                </div>
+              </div>
+
+              {/* CENTER: Playback Controls */}
+              <div className="flex items-center justify-center gap-4 sm:gap-6 w-1/3 min-w-[300px]">
+                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
+                  <span className="material-symbols-outlined text-[24px]">replay_10</span>
+                </button>
+                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
+                  <span className="material-symbols-outlined text-[24px]">replay_5</span>
+                </button>
+
+                <button 
+                  type="button"
+                  className="w-12 h-12 bg-white text-[#ffffff] rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none shrink-0"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    initAudioContext();
+                    if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
+                    if (ytPlaying) ytPlayerRef.current.pauseVideo();
+                    else ytPlayerRef.current.playVideo();
+                  }}
+                >
+                  {ytPlaying ? (
+                    <svg viewBox="0 0 24 24" className="w-6 h-6 fill-currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" className="w-6 h-6 fill-currentColor ml-1"><path d="M8 5v14l11-7z" /></svg>
+                  )}
+                </button>
+
+                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
+                  <span className="material-symbols-outlined text-[24px]">forward_5</span>
+                </button>
+                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
+                  <span className="material-symbols-outlined text-[24px]">forward_10</span>
+                </button>
+              </div>
+
+              {/* RIGHT: Scrubber & Time */}
+              <div className="flex items-center gap-3 w-1/3 justify-end min-w-[200px]">
+                <span className="text-[10px] font-mono font-bold text-zinc-400 shrink-0 w-8 text-right">{formatTime(ytCurrentTime)}</span>
+                <input 
+                  type="range" 
+                  min={0} max={ytDuration || 100} step="0.1"
+                  value={ytCurrentTime} 
+                  onChange={(e) => {
+                    const t = parseFloat(e.target.value);
+                    setYtCurrentTime(t);
+                    if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') ytPlayerRef.current.seekTo(t, true);
+                  }}
+                  className="w-full max-w-[250px] h-1.5 bg-zinc-700 rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all"
+                  style={{ background: `linear-gradient(to right, #38BDF8 ${ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0}%, #333336 ${ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0}%)` }}
+                />
+                <span className="text-[10px] font-mono font-bold text-zinc-400 shrink-0 w-8">-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
+              </div>
             </div>
           )}
         </>

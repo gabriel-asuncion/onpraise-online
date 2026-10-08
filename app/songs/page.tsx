@@ -88,6 +88,7 @@ export default function SongsListPage() {
     youtube_url?: string;
     is_youtube_sync_validated?: boolean;
     themes?: string;
+    created_by?: string; // ✅ SURGICAL ADDITION: Needed to track ownership
   };
 
   const [loading, setLoading] = useState(true);
@@ -158,6 +159,8 @@ export default function SongsListPage() {
   const [isYtDropdownOpen, setIsYtDropdownOpen] = useState(false);
 
   const pendingSongsCount = allDatabaseSongs.filter(song => song.approval_status === 'pending').length;
+  // ✅ SURGICAL ADDITION: Calculate how many songs the current user owns
+  const userSubmittedSongsCount = allDatabaseSongs.filter(song => song.created_by === simulatedUserId).length;
 
   const loadSongsData = async () => {
     try {
@@ -432,8 +435,16 @@ export default function SongsListPage() {
 
     const type = getSongContentType(song.chordpro_content);
     if (activeFilterId === "chords-lyrics" && type !== "Chords + Lyrics") return false;
-    if (activeFilterId === "pending" && song.approval_status !== "pending") return false;
     if (activeFilterId === "bookmarked" && !bookmarkedSongIds.includes(song.id)) return false;
+    
+    // ✅ SURGICAL FIX: Strict logic for the Pending state
+    // If the active filter is EXACTLY "pending", ONLY show pending songs.
+    if (activeFilterId === "pending") {
+      if (song.approval_status !== "pending") return false;
+    } else {
+      // Otherwise, ALWAYS hide pending songs.
+      if (song.approval_status === "pending") return false;
+    }
     
     // Fast / Slow Presets
     if (activeFilterId === "fast-praise") {
@@ -449,15 +460,14 @@ export default function SongsListPage() {
     if (activeFilterId === "youtube-included" && !song.youtube_url) return false;
     if (activeFilterId === "youtube-sync" && !song.is_youtube_sync_validated) return false;
 
-    // ✅ SURGICAL ADDITION: Relational User/Role Matrix Scan
+    // Relational User/Role Matrix Scan
     if (activeFilters.user || activeFilters.role) {
-      const usage = songUsageData[song.id] as any; // By-pass type checking for the new property
+      const usage = songUsageData[song.id] as any;
       if (!usage || !usage.participants || usage.participants.length === 0) return false;
 
       const targetUser = activeFilters.user.toLowerCase();
       const targetRole = activeFilters.role.toLowerCase();
 
-      // Ensure the target user and target role co-occurred in the SAME event
       const hasMatch = usage.participants.some((p: any) => {
          const matchUser = targetUser ? p.userName.toLowerCase().includes(targetUser) : true;
          const matchRole = targetRole ? p.role.toLowerCase().includes(targetRole) : true;
@@ -499,16 +509,31 @@ export default function SongsListPage() {
           </div>
         </div>
         
-        {canApproveSongs && pendingSongsCount > 0 && (
-          <button 
-            onClick={() => router.push("/songs/approvals")}
-            className="flex items-center gap-2.5 px-2 py-2 "
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-secondary"></span>
-            <span className="font-bold text-[8px] uppercase tracking-widest text-secondary">{pendingSongsCount} Review</span>
-            <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
-          </button>
-        )}
+        {/* ✅ SURGICAL FIX: Stacked Action Buttons */}
+        <div className="flex flex-col items-end shrink-0">
+          {canApproveSongs && pendingSongsCount > 0 && (
+            <button 
+              onClick={() => router.push("/songs/approvals")}
+              className="flex items-center gap-2 hover:bg-secondary/10 rounded-lg transition-colors cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-secondary animate-pulse shadow-[0_0_8px_rgba(204,251,241,0.6)]"></span>
+              <span className="font-bold text-[8px] uppercase tracking-widest text-secondary">{pendingSongsCount} Review</span>
+              <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
+            </button>
+          )}
+
+          {/* ✅ The new Personal Dashboard button only appears if they've submitted something! */}
+          {userSubmittedSongsCount > 0 && (
+            <button 
+              onClick={() => router.push("/songs/pending")}
+              className="flex items-center gap-2 bg-primary-container/10 hover:bg-primary-container/20 transition-colors cursor-pointer shadow-sm"
+            >
+              {/* <span className="material-symbols-outlined text-[12px] text-primary">dashboard</span> */}
+              <span className="font-bold text-[9px] uppercase tracking-widest text-primary">Song Dashboard</span>
+              <span className="material-symbols-outlined text-[14px] text-primary">chevron_right</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Search Input Well & Command Interceptor */}

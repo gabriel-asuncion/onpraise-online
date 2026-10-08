@@ -54,6 +54,9 @@ export default function ApprovalsDashboardPage() {
   const [pendingSongs, setPendingSongs] = useState<PendingSong[]>([]);
   const [processingId, setProcessingId] = useState<string | null>(null);
 
+  // ✅ SURGICAL ADDITION: Feedback Modal State
+  const [feedbackModal, setFeedbackModal] = useState<{ isOpen: boolean; songId: string; songTitle: string; feedback: string }>({ isOpen: false, songId: "", songTitle: "", feedback: "" });
+
   // Security Gate: Bounce unauthorized users back to the songs list
   useEffect(() => {
     if (activeRole !== "admin" && activeRole !== "moderator") {
@@ -98,27 +101,36 @@ export default function ApprovalsDashboardPage() {
 
     if (error) {
       alert("Failed to approve song. Reverting UI.");
-      fetchPendingSongs(); // Re-fetch on failure to restore state
+      fetchPendingSongs(); 
     }
     setProcessingId(null);
   };
 
-  // ✅ The Rejection Engine
-  const handleReject = async (id: string, title: string) => {
-    const confirmDelete = window.confirm(`Are you sure you want to permanently delete "${title}"?`);
-    if (!confirmDelete) return;
+  // ✅ SURGICAL FIX: The Rejection & Feedback Engine (Replaces the old Delete engine)
+  const handleRejectSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const { songId, feedback } = feedbackModal;
+    
+    if (!feedback.trim()) {
+      alert("Please provide feedback so the contributor knows what to fix.");
+      return;
+    }
 
-    setProcessingId(id);
-    setPendingSongs(prev => prev.filter(song => song.id !== id));
+    setProcessingId(songId);
+    setPendingSongs(prev => prev.filter(song => song.id !== songId));
+    setFeedbackModal({ isOpen: false, songId: "", songTitle: "", feedback: "" });
 
-    // Delete the garbage data completely to keep the DB clean
+    // Update status to rejected and inject the feedback
     const { error } = await supabase
       .from("songs")
-      .delete()
-      .eq("id", id);
+      .update({ 
+        approval_status: "rejected", 
+        reviewer_feedback: feedback.trim() 
+      })
+      .eq("id", songId);
 
     if (error) {
-      alert("Failed to delete song. Reverting UI.");
+      alert("Failed to reject song. Reverting UI.");
       fetchPendingSongs();
     }
     setProcessingId(null);
@@ -234,15 +246,14 @@ export default function ApprovalsDashboardPage() {
                   {/* Action Buttons Row */}
                   <div className="mt-auto shrink-0 flex items-center justify-between bg-surface-container/75 backdrop-blur-md -mx-5 -mb-5 px-5 py-2.5 rounded-b-2xl border-t border-zinc-800/80 relative z-10 gap-2">
                     
-                    {/* Left: Reject Action */}
+                    {/* ✅ SURGICAL FIX: Left: Reject & Feedback Action */}
                     <button 
-                      onClick={() => handleReject(song.id, song.title)} 
+                      onClick={() => setFeedbackModal({ isOpen: true, songId: song.id, songTitle: song.title, feedback: "" })} 
                       className="h-7 px-2.5 rounded-md bg-rose-500/10 text-rose-500 text-[10px] font-bold hover:bg-rose-500/20 flex items-center justify-center gap-1 cursor-pointer border border-rose-500/30 shadow-sm shrink-0 transition-colors active:scale-95"
-                      title="Reject & Delete"
+                      title="Return with Feedback"
                     >
-                      {/* ✅ SURGICAL FIX: Force font-size to 12px inline to override Material defaults */}
-                      <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>delete</span>
-                      <span className="hidden sm:inline">Reject</span>
+                      <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>rate_review</span>
+                      <span className="hidden sm:inline">Reject & Feedback</span>
                     </button>
                     
                     {/* Right: Operational Actions */}
@@ -279,6 +290,60 @@ export default function ApprovalsDashboardPage() {
           </div>
         )}
       </main>
+
+      {/* ✅ SURGICAL ADDITION: FEEDBACK MODAL */}
+      {feedbackModal.isOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200000] flex items-center justify-center p-4 animate-in fade-in duration-150 select-none">
+          <form onSubmit={handleRejectSubmit} className="bg-surface-container border border-outline-variant/30 rounded-3xl shadow-2xl p-6 max-w-md w-full relative animate-in zoom-in-95 duration-200">
+            <button 
+              type="button"
+              onClick={() => setFeedbackModal({ isOpen: false, songId: "", songTitle: "", feedback: "" })}
+              className="absolute top-4 right-4 w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant flex items-center justify-center transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[18px]">close</span>
+            </button>
+            
+            <div className="flex items-center gap-3 mb-4 border-b border-outline-variant/20 pb-4 pr-6">
+              <div className="w-10 h-10 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center shadow-inner border border-rose-500/30 shrink-0">
+                <span className="material-symbols-outlined text-[20px]">rate_review</span>
+              </div>
+              <div className="flex flex-col">
+                <h3 className="text-[16px] font-black text-on-surface tracking-tight leading-tight">Reject Submission</h3>
+                <span className="text-[11px] font-bold text-on-surface-variant mt-0.5 truncate max-w-[200px]">For: {feedbackModal.songTitle}</span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Reviewer Feedback</label>
+              <textarea 
+                rows={4}
+                required
+                placeholder="Explain what needs to be fixed before this can be approved..."
+                value={feedbackModal.feedback}
+                onChange={(e) => setFeedbackModal(prev => ({ ...prev, feedback: e.target.value }))}
+                className="w-full bg-surface-container-lowest border border-outline-variant/40 rounded-xl p-3 text-[13px] text-on-surface font-medium resize-none outline-none focus:border-rose-500/50 shadow-inner custom-scrollbar transition-colors"
+              />
+            </div>
+
+            <div className="flex gap-2 mt-5 pt-2">
+              <button 
+                type="button"
+                onClick={() => setFeedbackModal({ isOpen: false, songId: "", songTitle: "", feedback: "" })}
+                className="flex-1 py-3 bg-surface-container-high hover:bg-surface-bright text-on-surface rounded-xl font-black text-[11px] uppercase tracking-widest shadow-sm border border-outline-variant/30 cursor-pointer transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                type="submit"
+                className="flex-1 py-3 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 rounded-xl font-black text-[11px] uppercase tracking-widest shadow-sm border border-rose-500/30 cursor-pointer transition-colors"
+              >
+                Send Feedback
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      
     </div>
   );
 }

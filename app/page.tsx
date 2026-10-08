@@ -51,26 +51,65 @@ export default function Home() {
   const [hasInstalledApp, setHasInstalledApp] = useState(false);
   const [isInBrowserTab, setIsInBrowserTab] = useState(true);
   const [showInstallSuccessModal, setShowInstallSuccessModal] = useState(false);
+  
+  // ✅ SURGICAL ADDITION: iOS Custom Prompt States
+  const [isIOS, setIsIOS] = useState(false);
+  const [showIOSTutorial, setShowIOSTutorial] = useState(false);
+
+  // ✅ SURGICAL ADDITION: Device Detection & PWA Event Listeners
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    // 1. Detect if we are already running inside the installed PWA
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone === true;
+    setIsInBrowserTab(!isStandalone);
+    if (isStandalone) setHasInstalledApp(true);
+
+    // 2. Detect iOS (iPad, iPhone, iPod)
+    const userAgent = window.navigator.userAgent.toLowerCase();
+    const isAppleDevice = /iphone|ipad|ipod/.test(userAgent);
+    setIsIOS(isAppleDevice);
+
+    // 3. Listen for Android/Chrome Install Prompt
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault(); // Stop Chrome from showing the mini-infobar automatically
+      setDeferredPrompt(e);
+      setIsInstallable(true);
+    };
+
+    // 4. Listen for Successful Installation
+    const handleAppInstalled = () => {
+      setIsInstallable(false);
+      setHasInstalledApp(true);
+      setShowInstallSuccessModal(true);
+      setShowIOSTutorial(false);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
 
   // ✅ SURGICAL FIX: Consolidated Session, Invite, & Profile Completion Routing
   useEffect(() => {
-    // 1. Safely extract invite code and save to local storage immediately
+    // 1. Safely extract invite code from URL on mount
     let currentInvite = inviteCode;
     if (!currentInvite && typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       currentInvite = params.get("invite");
     }
-    
-    if (currentInvite) {
-      localStorage.setItem("onpraise_pending_invite", currentInvite);
-    }
 
     // ✅ HELPER: Checks profile completion before letting them into the app
     const checkAndRouteUser = async (session: any) => {
-      const storedInvite = currentInvite || localStorage.getItem("onpraise_pending_invite");
-      
-      if (storedInvite) {
-        router.push(`/onboarding?invite=${storedInvite}`);
+      // ✅ SURGICAL FIX: Pull from localStorage in case the OAuth callback stripped the URL params!
+      const activeInvite = currentInvite || localStorage.getItem("onpraise_pending_invite");
+
+      if (activeInvite) {
+        router.push(`/onboarding?invite=${activeInvite}`);
         return;
       }
 
@@ -112,34 +151,40 @@ export default function Home() {
   }, [supabase, router, inviteCode]);
 
   const handleInstallClick = async () => {
-    // ✅ SURGICAL FIX: Fallback alert for iOS or strict browsers
-    if (!deferredPrompt) {
-      alert("To install this app on your device:\n\n📱 iOS / Safari: Tap the 'Share' icon at the bottom of your screen, then select 'Add to Home Screen'.\n\n🤖 Android: Tap the 3 dots in the top right of your browser and select 'Install App'.");
+    // ✅ SURGICAL FIX: If iOS, show our custom tutorial overlay
+    if (isIOS) {
+      setShowIOSTutorial(true);
       return;
     }
-    
-    // Show the native browser install prompt
-    deferredPrompt.prompt();
-    
-    // Wait for the user to respond
-    const { outcome } = await deferredPrompt.userChoice;
-    
-    if (outcome === 'accepted') {
-      setIsInstallable(false); // Hide button once installed
+
+    // Android / Desktop Chrome Native Prompt
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') {
+        setIsInstallable(false);
+      }
+      setDeferredPrompt(null);
+    } else {
+      alert("Installation is not fully supported on this browser. Try using Chrome or Safari.");
     }
-    setDeferredPrompt(null);
   };
 
   const handleGoogleLogin = async () => {
     const supabase = createClient();
     
-    // ✅ SURGICAL FIX: Retrieve the saved invite code
-    const pendingInvite = inviteCode || localStorage.getItem("onpraise_pending_invite");
+    // ✅ SURGICAL FIX: Retrieve the active invite code from the URL params directly
+    let currentInvite = inviteCode;
+    if (!currentInvite && typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      currentInvite = params.get("invite");
+    }
     
-    // ✅ SURGICAL FIX: Append the invite parameter to the Google redirect URL
+    // ✅ SURGICAL FIX: Use the 'next' parameter so the callback knows exactly where to route them!
     let callbackUrl = `${window.location.origin}/auth/callback`;
-    if (pendingInvite) {
-      callbackUrl += `?invite=${pendingInvite}`;
+    if (currentInvite) {
+      const nextDestination = encodeURIComponent(`/onboarding?invite=${currentInvite}`);
+      callbackUrl += `?next=${nextDestination}&invite=${encodeURIComponent(currentInvite)}`;
     }
     
     await supabase.auth.signInWithOAuth({
@@ -397,9 +442,8 @@ export default function Home() {
       {/* BUTTONS */}
       <div className="absolute bottom-0 left-0 w-full z-50 p-6 pb-10 pointer-events-auto flex flex-col items-center justify-center">
         
-        {/* ✅ SURGICAL ADDITION: Native PWA Install Button */}
-        {/* ✅ SHOW THIS IF THEY HAVE NOT INSTALLED IT YET */}
-        {isInstallable && !hasInstalledApp && isInBrowserTab && (
+        {/* ✅ SURGICAL FIX: Show button if native installable OR if it's an iOS device in the browser */}
+        {((isInstallable || isIOS) && !hasInstalledApp && isInBrowserTab) && (
           <button
             onClick={handleInstallClick}
             className="w-full max-w-sm mb-3 bg-zinc-900 hover:bg-zinc-800 text-white font-black text-sm uppercase tracking-wider py-4 px-4 rounded-2xl shadow-xl transition-all active:scale-95 flex items-center justify-center gap-3 cursor-pointer"
@@ -476,6 +520,55 @@ export default function Home() {
           </div>
         </div>
       )}
+      {/* ======================================================= */}
+      {/* ✅ SURGICAL ADDITION: IOS INSTALL TUTORIAL MODAL          */}
+      {/* ======================================================= */}
+      {showIOSTutorial && (
+        <div className="fixed inset-0 z-[250000] flex flex-col justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-200 pointer-events-auto pb-4 px-4">
+          <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-sm mx-auto p-6 flex flex-col items-center text-center relative animate-in slide-in-from-bottom-full duration-300">
+            
+            <button 
+              onClick={() => setShowIOSTutorial(false)}
+              className="absolute top-4 right-4 w-8 h-8 rounded-full bg-zinc-100 text-zinc-500 font-bold flex items-center justify-center"
+            >
+              ✕
+            </button>
+
+            <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mb-4 shadow-sm border border-blue-100">
+              <svg className="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+            </div>
+            
+            <h3 className="text-xl font-black text-zinc-900 tracking-tight mb-2">
+              Install OnPraise
+            </h3>
+            <p className="text-[13px] font-bold text-zinc-500 leading-relaxed mb-6">
+              Safari requires you to install apps manually. Follow these two quick steps to get the app on your home screen.
+            </p>
+
+            <div className="flex flex-col gap-3 w-full bg-zinc-50 p-4 rounded-2xl border border-zinc-100 text-left mb-6">
+              <div className="flex items-center gap-3">
+                <span className="w-6 h-6 rounded-full bg-blue-500 text-white font-black text-[10px] flex items-center justify-center shrink-0">1</span>
+                <span className="text-[12px] font-bold text-zinc-700">Tap the <strong>Share</strong> button below.</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="w-6 h-6 rounded-full bg-blue-500 text-white font-black text-[10px] flex items-center justify-center shrink-0">2</span>
+                <span className="text-[12px] font-bold text-zinc-700">Scroll down and tap <strong>Add to Home Screen</strong>.</span>
+              </div>
+            </div>
+
+            {/* Bouncing Arrow Pointing Down to the Safari Share Button */}
+            <div className="animate-bounce text-blue-500 mt-2 mb-2">
+              <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+              </svg>
+            </div>
+
+          </div>
+        </div>
+      )}
+
     </main>
   );
 }

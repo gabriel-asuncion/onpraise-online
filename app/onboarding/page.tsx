@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import React, { useEffect, useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
 
 const MINISTRY_OPTIONS = [
@@ -14,9 +14,13 @@ const MINISTRY_OPTIONS = [
   "General Member"
 ];
 
-export default function OnboardingPage() {
+function OnboardingContent() {
   const supabase = createClient();
   const router = useRouter();
+  
+  // Extract query parameters correctly on mount
+  const searchParams = useSearchParams();
+  const urlInvite = searchParams.get("invite");
   
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -34,6 +38,25 @@ export default function OnboardingPage() {
   
   const [isVerifyingLink, setIsVerifyingLink] = useState(false);
   const [stagedMagicTeam, setStagedMagicTeam] = useState<{name: string, code: string} | null>(null);
+
+  // ✅ SURGICAL FIX: Safely extract code from URL OR LocalStorage and auto-format it
+  useEffect(() => {
+    const stashedCode = localStorage.getItem("onpraise_pending_invite");
+    const activeInvite = urlInvite || stashedCode;
+    
+    if (activeInvite && !joinCode) {
+      const raw = activeInvite.toUpperCase();
+      const clean = raw.replace(/-/g, '');
+      const letters = clean.substring(0, 4).replace(/[^A-Z]/g, '');
+      const numbers = clean.substring(4, 9).replace(/[^0-9]/g, '');
+      
+      if (clean.length >= 4) {
+        setJoinCode(`${letters}${letters.length === 4 ? '-' : ''}${numbers}`);
+      } else {
+        setJoinCode(letters);
+      }
+    }
+  }, [urlInvite]);
 
   useEffect(() => {
     async function verifyStashedLink() {
@@ -87,17 +110,9 @@ export default function OnboardingPage() {
       return;
     }
 
-    const { error: profileError } = await supabase
-      .from("profiles")
-      .update({ team_id: teamData.id })
-      .eq("id", user.id); 
-
-    if (profileError) {
-      setJoinError("Failed to join the team. Please try again.");
-      return;
-    }
-
-    setStep(3); 
+    // ✅ SURGICAL FIX: Do not prematurely update the DB. Store it in state for the final upsert!
+    setSelectedTeamId(teamData.id);
+    setStep(3);
   }
 
   async function handleSkipTeamSelection() {
@@ -154,15 +169,21 @@ export default function OnboardingPage() {
       const googleAvatarUrl = user?.user_metadata?.avatar_url || user?.user_metadata?.picture || null;
       const gmailAddress = user?.email || user?.user_metadata?.email || null;
 
-      const { error } = await supabase
-        .from("profiles")
-        .upsert({ 
-          id: userId,
-          full_name: fullName.trim(), 
-          ministries: selectedMinistries,
-          avatar_url: googleAvatarUrl,
-          email: gmailAddress 
-        });
+      // ✅ SURGICAL FIX: Combine everything into one robust profile creation payload!
+      const payload: any = { 
+        id: userId,
+        full_name: fullName.trim(), 
+        ministries: selectedMinistries,
+        avatar_url: googleAvatarUrl,
+        email: gmailAddress,
+        role: "member" // Standardize new users securely
+      };
+
+      if (selectedTeamId) {
+        payload.team_id = selectedTeamId;
+      }
+
+      const { error } = await supabase.from("profiles").upsert(payload);
 
       if (error) throw error;
 
@@ -218,7 +239,6 @@ export default function OnboardingPage() {
         {/* 2. TOP STATUS BAR & STEPPER                               */}
         {/* ======================================================= */}
         <header className="relative z-20 pt-12 sm:pt-6 px-6 pb-2">
-          {/* App Header */}
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
@@ -231,7 +251,6 @@ export default function OnboardingPage() {
             </button>
           </div>
 
-          {/* Stepper */}
           <nav className="space-y-2">
             <div className="flex items-center justify-between text-[11px] font-medium tracking-wide">
               <span className={`font-semibold ${step === 3 ? 'text-purple-400' : 'text-blue-400'}`}>STEP {step} OF 3</span>
@@ -358,12 +377,27 @@ export default function OnboardingPage() {
                     <p className="text-sm text-gray-400 px-2 leading-relaxed">Ask your Music Director for your 10-character join code.</p>
                   </div>
 
+                  {/* ✅ SURGICAL FIX: Restored perfectly formatted input container */}
                   <div className="space-y-3 mb-6">
                     <div className="relative">
                       <input 
                         type="text" 
                         value={joinCode}
-                        onChange={(e) => setJoinCode(e.target.value)}
+                        onChange={(e) => {
+                          const raw = e.target.value.toUpperCase();
+                          const clean = raw.replace(/[^A-Z0-9]/g, '');
+                          const letters = clean.substring(0, 4).replace(/[^A-Z]/g, '');
+                          const numbers = clean.substring(4, 9).replace(/[^0-9]/g, '');
+                          
+                          // ✅ SURGICAL FIX: Only auto-append hyphen on the 5th character so backspacing works!
+                          if (clean.length > 4) {
+                            setJoinCode(`${letters}-${numbers}`);
+                          } else if (clean.length === 4 && raw.endsWith('-')) {
+                            setJoinCode(`${letters}-`); // Allow manual hyphen typing
+                          } else {
+                            setJoinCode(letters);
+                          }
+                        }}
                         placeholder="XXXX-00000" 
                         maxLength={10}
                         spellCheck="false"
@@ -473,5 +507,23 @@ export default function OnboardingPage() {
         </footer>
       </div>
     </main>
+  );
+}
+// Add this at the very bottom of app/onboarding/page.tsx
+
+export default function OnboardingPage() {
+  return (
+    <Suspense 
+      fallback={
+        <div className="min-h-screen bg-[#0d0e12] flex flex-col items-center justify-center">
+          <div className="w-10 h-10 border-4 border-blue-600/30 border-t-blue-600 rounded-full animate-spin mb-4" />
+          <div className="animate-pulse text-xs font-black uppercase tracking-widest text-blue-500">
+            Loading workspace...
+          </div>
+        </div>
+      }
+    >
+      <OnboardingContent />
+    </Suspense>
   );
 }

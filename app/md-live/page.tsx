@@ -29,6 +29,10 @@ export default function MDLiveDashboard() {
   const [newProjectTitle, setNewProjectTitle] = useState("");
   const [isCreating, setIsCreating] = useState(false);
 
+  // ✅ SURGICAL FIX: New state for Setlist Import
+  const [upcomingSetlists, setUpcomingSetlists] = useState<{id: string, name: string, event_title: string}[]>([]);
+  const [importSetlistId, setImportSetlistId] = useState<string>("none");
+
   useEffect(() => {
     if (!userTeamId) return;
     fetchProjects();
@@ -46,8 +50,37 @@ export default function MDLiveDashboard() {
     setLoading(false);
   };
 
+  // ✅ SURGICAL FIX: Fetch upcoming setlists when modal opens
+  const fetchUpcomingSetlists = async () => {
+    const today = new Date().toISOString().split("T")[0];
+    const { data: events } = await supabase
+      .from('events')
+      .select('id, title, event_date')
+      .eq('team_id', userTeamId)
+      .gte('event_date', today)
+      .order('event_date', { ascending: true });
+
+    if (events && events.length > 0) {
+      const eventIds = events.map(e => e.id);
+      const { data: setlists } = await supabase
+        .from('setlists')
+        .select('id, name, event_id')
+        .in('event_id', eventIds);
+
+      if (setlists) {
+        const mapped = setlists.map(sl => {
+          const ev = events.find(e => e.id === sl.event_id);
+          return { id: sl.id, name: sl.name, event_title: ev?.title || "Event" };
+        });
+        setUpcomingSetlists(mapped);
+      }
+    }
+  };
+
   const handleOpenCreateModal = () => {
     setNewProjectTitle(`Track Session ${new Date().toLocaleDateString()}`);
+    setImportSetlistId("none");
+    fetchUpcomingSetlists(); // Load the available setlists
     setIsCreateModalOpen(true);
   };
 
@@ -55,9 +88,82 @@ export default function MDLiveDashboard() {
     if (!userTeamId || !newProjectTitle.trim()) return;
     setIsCreating(true);
     
+    let initialTracks: any[] = [];
+
+    // If the user selected a setlist to import, fetch its tracks AND its sections!
+    if (importSetlistId !== "none") {
+      const { data: slSongs } = await supabase
+        .from('setlist_songs')
+        // ✅ SURGICAL FIX: Fetch section_timings and song_sections to map the sequence
+        .select('sequence_order, songs(title, tempo, section_timings, song_sections(section_name, sequence_order))')
+        .eq('setlist_id', importSetlistId)
+        .order('sequence_order', { ascending: true });
+
+      if (slSongs) {
+        initialTracks = slSongs.map((row, idx) => {
+          const songObj = Array.isArray(row.songs) ? row.songs[0] : row.songs;
+          let newSeq: any[] = [];
+          
+          if (songObj) {
+            const rawTimings = typeof songObj.section_timings === 'string' ? JSON.parse(songObj.section_timings) : (songObj.section_timings || {});
+            let sectionsArray = songObj.song_sections || [];
+            if (!Array.isArray(sectionsArray)) sectionsArray = [];
+            
+            sectionsArray.sort((a:any, b:any) => a.sequence_order - b.sequence_order);
+
+            newSeq = sectionsArray.map((sec: any, i: number) => {
+              const secName = sec.section_name || "Intro";
+              const timings = rawTimings[secName] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
+              
+              const secLower = secName.toLowerCase();
+              let cueId = "Intro";
+              if (secLower.includes("verse 1")) cueId = "Verse 1";
+              else if (secLower.includes("verse 2")) cueId = "Verse 2";
+              else if (secLower.includes("verse 3")) cueId = "Verse 3";
+              else if (secLower.includes("verse 4")) cueId = "Verse 4";
+              else if (secLower.includes("verse")) cueId = "Verse 1";
+              else if (secLower.includes("pre chorus")) cueId = "Pre Chorus";
+              else if (secLower.includes("post chorus")) cueId = "Post Chorus";
+              else if (secLower.includes("chorus")) cueId = "Chorus";
+              else if (secLower.includes("refrain")) cueId = "Refrain";
+              else if (secLower.includes("bridge")) cueId = "Bridge";
+              else if (secLower.includes("instrumental") || secLower.includes("inst")) cueId = "Instrumental";
+              else if (secLower.includes("interlude")) cueId = "Interlude";
+              else if (secLower.includes("turnaround")) cueId = "Turnaround";
+              else if (secLower.includes("tag")) cueId = "Tag";
+              else if (secLower.includes("outro") || secLower.includes("ending")) cueId = "Outro";
+              else if (secLower.includes("ad lib")) cueId = "Ad Lib";
+              else if (secLower.includes("vamp")) cueId = "Vamp";
+              else if (secLower.includes("breakdown")) cueId = "Breakdown";
+              else if (secLower.includes("build")) cueId = "Build";
+              else if (secLower.includes("solo")) cueId = "Solo";
+              else if (secLower.includes("acapella")) cueId = "Acapella";
+
+              return {
+                id: `seq-${Date.now()}-${idx}-${i}`,
+                cueId,
+                measures: Number(timings.measures) || 4,
+                beats: Number(timings.beats) || 0,
+                repeats: Number(timings.repeats) || 0,
+                head_m: Number(timings.head_m) || 0,
+                tail_m: Number(timings.tail_m) || 0
+              };
+            });
+          }
+
+          return {
+            id: `trk-${Date.now()}-${idx}`,
+            title: songObj?.title || `Track ${idx + 1}`,
+            bpm: songObj?.tempo || 120,
+            sequence: newSeq
+          };
+        });
+      }
+    }
+
     const { data, error } = await supabase
       .from('md_live_projects')
-      .insert([{ team_id: userTeamId, title: newProjectTitle.trim(), tracks_data: [] }])
+      .insert([{ team_id: userTeamId, title: newProjectTitle.trim(), tracks_data: initialTracks }])
       .select()
       .single();
 
@@ -241,6 +347,24 @@ export default function MDLiveDashboard() {
                   className="w-full bg-[#141414] border border-white/10 rounded-xl p-3 text-sm font-bold outline-none focus:border-[#3b82f6] text-white transition-colors" 
                   autoFocus
                 />
+              </div>
+
+              {/* ✅ SURGICAL FIX: Setlist Import Dropdown */}
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-zinc-400 mb-1.5 block flex items-center gap-1.5">
+                  <span className="material-symbols-outlined text-[14px]">queue_music</span>
+                  Import Tracks (Optional)
+                </label>
+                <select 
+                  value={importSetlistId} 
+                  onChange={(e) => setImportSetlistId(e.target.value)}
+                  className="w-full bg-[#141414] border border-white/10 rounded-xl p-3 text-xs font-bold outline-none focus:border-[#3b82f6] text-white transition-colors cursor-pointer appearance-none truncate"
+                >
+                  <option value="none">-- Start Blank Session --</option>
+                  {upcomingSetlists.map(sl => (
+                    <option key={sl.id} value={sl.id}>{sl.event_title}: {sl.name}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="pt-2">

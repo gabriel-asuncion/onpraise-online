@@ -7,13 +7,14 @@ import { createClient } from "../utils/supabase/client";
 interface DBProfileRow {
   id: string;
   team_id?: string; 
-  role: string; // ✅ ADDED: Role property
+  role: string; 
   full_name: string;
   email: string;
   avatar_url?: string;
   ministries: string[];
   unavailable_dates: string[];
   secondary_team_ids: string[]; 
+  created_at: string; // ✅ ADDED: Required for 24hr logic
 }
 
 const AVAILABLE_MINISTRY_POSITIONS = ["VAST", "Pastor", "Dancer", "Musician", "Backup", "Music Leader"];
@@ -42,25 +43,36 @@ export default function DevFab() {
   const [formName, setFormName] = useState("");
   const [formMinistries, setFormMinistries] = useState<string[]>([]);
   const [formDates, setFormDates] = useState<string[]>([]);
+  const [formTeamId, setFormTeamId] = useState<string | null>(null); // ✅ Added Primary Team State
   const [formSecondaryTeams, setFormSecondaryTeams] = useState<string[]>([]); 
   const [stagedNewBlockoutDate, setStagedNewBlockoutDate] = useState("2026-06-14");
   const [isSavingData, setIsSavingData] = useState(false);
+
+  // ✅ SURGICAL FIX: Calculate users created in the last 24 hours
+  const recentNewUsersCount = globalProfiles.filter(p => {
+    if (!p.created_at) return false;
+    const createdTime = new Date(p.created_at).getTime();
+    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+    return createdTime > twentyFourHoursAgo;
+  }).length;
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       setDimensions({ width: window.innerWidth, height: window.innerHeight });
       setPosition({ x: window.innerWidth - 80, y: window.innerHeight - 80 });
+      // ✅ SURGICAL FIX: Fetch the profiles in the background immediately so the badge works!
+      syncGlobalDatabaseProfiles(); 
     }
   }, []);
 
   async function syncGlobalDatabaseProfiles() {
     setLoadingProfiles(true);
     
-    // ✅ Fetch Profiles WITH secondary teams AND role
+    // ✅ SURGICAL FIX: Fetch created_at and sort by newest first (descending)
     const { data: profilesData } = await supabase
       .from("profiles")
-      .select("id, team_id, role, full_name, email, avatar_url, ministries, unavailable_dates, secondary_team_ids")
-      .order("full_name", { ascending: true });
+      .select("id, team_id, role, full_name, email, avatar_url, ministries, unavailable_dates, secondary_team_ids, created_at")
+      .order("created_at", { ascending: false }); 
     
     // ✅ Fetch all teams to populate the multi-select dropdown
     const { data: teamsData } = await supabase
@@ -140,6 +152,7 @@ export default function DevFab() {
     setFormName(profile.full_name || "");
     setFormMinistries(profile.ministries || []);
     setFormDates(profile.unavailable_dates || []);
+    setFormTeamId(profile.team_id || null); // ✅ Hydrate Primary Team
     setFormSecondaryTeams(profile.secondary_team_ids || []); 
   }
 
@@ -171,6 +184,7 @@ export default function DevFab() {
         full_name: formName.trim(),
         ministries: formMinistries,
         unavailable_dates: formDates,
+        team_id: formTeamId, // ✅ Save Primary Team
         secondary_team_ids: formSecondaryTeams 
       })
       .eq("id", editingProfileId);
@@ -178,7 +192,7 @@ export default function DevFab() {
     if (!error) {
       setGlobalProfiles(prev => 
         prev.map(p => p.id === editingProfileId 
-          ? { ...p, full_name: formName.trim(), ministries: formMinistries, unavailable_dates: formDates, secondary_team_ids: formSecondaryTeams } 
+          ? { ...p, full_name: formName.trim(), ministries: formMinistries, unavailable_dates: formDates, team_id: formTeamId || undefined, secondary_team_ids: formSecondaryTeams } 
           : p
         )
       );
@@ -369,6 +383,20 @@ export default function DevFab() {
                             </div>
 
                             <div className="space-y-1.5 pt-1 border-t border-zinc-100 mt-2">
+                              <label className="text-[10px] font-black text-blue-600 uppercase tracking-wider block">Primary Workspace / Mother Church</label>
+                              <select 
+                                value={formTeamId || ""} 
+                                onChange={e => setFormTeamId(e.target.value)} 
+                                className="w-full bg-blue-50 border border-blue-200 rounded-xl px-3 py-2 text-[11px] font-bold text-blue-800 outline-none cursor-pointer focus:border-blue-500"
+                              >
+                                <option value="">None Assigned</option>
+                                {availableTeams.map(team => (
+                                  <option key={team.id} value={team.id}>{team.name}</option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div className="space-y-1.5 pt-1 border-t border-zinc-100 mt-2">
                               <label className="text-[10px] font-black text-purple-600 uppercase tracking-wider block">Multi-Campus Access Permissions</label>
                               <div className="flex flex-col gap-1 max-h-32 overflow-y-auto custom-scrollbar border rounded-xl p-2 bg-zinc-50">
                                 {availableTeams.map(team => {
@@ -505,6 +533,13 @@ export default function DevFab() {
           } ${isOpen || isGlobalModalOpen ? "ring-4 ring-blue-500/30 border-blue-500 bg-zinc-950" : ""}`}
           title="Drag anywhere to reposition workspace tools. Click once to pull up global configuration panel overrides."
         >
+          {/* ✅ SURGICAL FIX: Action Required Badge now uses 24hr logic */}
+          {recentNewUsersCount > 0 && (
+            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center shadow-md border-2 border-[#0c1527]">
+              {recentNewUsersCount}
+            </span>
+          )}
+          
           <span className="text-lg pointer-events-none select-none flex items-center justify-center">
              <img 
               src="/assets/account.svg" 

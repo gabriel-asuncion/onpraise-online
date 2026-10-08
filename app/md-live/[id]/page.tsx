@@ -35,6 +35,7 @@ const MASTER_NORMAL_CUES = [
 ];
 
 const MASTER_DYNAMIC_CUES = [
+  { id: "D_Next Song", label: "Next Song", file: "count_4.wav", color: "text-purple-400" }, // ✅ SURGICAL FIX: Added Next Song Cue
   { id: "D_All In", label: "All In", file: "D_All In.wav", color: "text-red-500" },
   { id: "D_Bass", label: "Bass", file: "D_Bass.wav", color: "text-red-500" },
   { id: "D_Big Ending", label: "Big Ending", file: "D_Big Ending.wav", color: "text-red-500" },
@@ -58,6 +59,7 @@ const ALL_CUES = [...MASTER_NORMAL_CUES, ...MASTER_DYNAMIC_CUES];
 const COUNT_CUES = ["count_1", "count_2", "count_3", "count_4"];
 
 const DEFAULT_PAGE_1 = ["Intro", "Verse 1", "Verse 2", "Pre Chorus", "Chorus", "Bridge", "Instrumental", "Tag", "Outro"];
+// ✅ SURGICAL FIX: Removed "D_Next Song" from the grid array since we are making it a global standalone button.
 const DEFAULT_PAGE_2 = ["D_All In", "D_Bass", "D_Big Ending", "D_Break", "D_Build", "D_Drums In", "D_Drums", "D_Hits", "D_Hold"];
 
 interface MDTrackSequenceItem {
@@ -93,6 +95,7 @@ export default function MDLiveStudioPage() {
   const [projectTitle, setProjectTitle] = useState("Loading...");
   const [tracks, setTracks] = useState<MDTrack[]>([]);
   const [activeTrackId, setActiveTrackId] = useState<string>("");
+  const [expandedTrackId, setExpandedTrackId] = useState<string | null>(null); // ✅ SURGICAL FIX: Accordion State
   const [isExpanded, setIsExpanded] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -203,6 +206,10 @@ export default function MDLiveStudioPage() {
   const queuedGuideIdRef = useRef<string | null>(null);
   const shortCountInActiveRef = useRef(false);
   
+  // ✅ SURGICAL FIX: Next Song Transition Refs
+  const queuedNextSongRef = useRef<boolean>(false);
+  const transitionCountdownRef = useRef<number>(0); // 4, 3, 2, 1
+  
   const clickVolumeRef = useRef(1.0);
   const guideVolumeRef = useRef(1.0);
   const clickSoundRef = useRef<"blip" | "bell" | "block" | "glass">("blip");
@@ -217,6 +224,17 @@ export default function MDLiveStudioPage() {
   const sequenceBoundsRef = useRef<{startIndex: number, endIndex: number, seqIdx: number, cueId: string}[]>([]);
 
   const activeTrack = tracks.find(t => t.id === activeTrackId) || tracks[0];
+
+  // ✅ SURGICAL FIX: Create Real-time Refs to prevent Stale Closures in the Audio Engine
+  const tracksRef = useRef<MDTrack[]>(tracks);
+  const activeTrackIdRef = useRef<string>(activeTrackId);
+  const activeTrackRef = useRef<MDTrack>(activeTrack);
+
+  useEffect(() => {
+    tracksRef.current = tracks;
+    activeTrackIdRef.current = activeTrackId;
+    activeTrackRef.current = activeTrack;
+  }, [tracks, activeTrackId, activeTrack]);
 
   // Track Wizard States
   const [trackWizardStep, setTrackWizardStep] = useState<"none" | "choice" | "custom" | "database" | "import_prompt">("none");
@@ -247,6 +265,7 @@ export default function MDLiveStudioPage() {
         setTracks(data.tracks_data || []);
         if (data.tracks_data && data.tracks_data.length > 0) {
           setActiveTrackId(data.tracks_data[0].id);
+          setExpandedTrackId(data.tracks_data[0].id); // ✅ SURGICAL FIX: Auto-expand the first track
         } else {
           setActiveTrackId("");
         }
@@ -384,10 +403,11 @@ export default function MDLiveStudioPage() {
   // AUDIO SCHEDULING ENGINE
   // ============================================================================
   const scheduleNote = (beatNumber: number, time: number) => {
+    const currentActiveTrack = activeTrackRef.current; // ✅ Pull fresh track from Ref
     let effectiveBeat = beatNumber;
     let relativeBeat = ((effectiveBeat - 1) % 4 + 4) % 4 + 1; 
     
-    if (activeTrack?.sequence.length > 0) {
+    if (currentActiveTrack?.sequence && currentActiveTrack.sequence.length > 0) {
         const bound = sequenceBoundsRef.current.find(b => effectiveBeat >= b.startIndex && effectiveBeat <= b.endIndex);
         if (bound) {
             relativeBeat = ((effectiveBeat - bound.startIndex) % 4) + 1;
@@ -396,10 +416,76 @@ export default function MDLiveStudioPage() {
     
     const isDownbeat = relativeBeat === 1;
 
+    // ✅ SURGICAL FIX: Dynamic Next Song Transition Engine
+    if (queuedNextSongRef.current && isDownbeat) {
+       queuedNextSongRef.current = false;
+       transitionCountdownRef.current = 4; // Start the 4-beat countdown
+    }
+
+    if (transitionCountdownRef.current > 0) {
+       playZeroLatencyAudio(`count_${transitionCountdownRef.current}`, guideVolumeRef.current, time);
+       transitionCountdownRef.current--;
+
+       if (transitionCountdownRef.current === 0) {
+          setTimeout(() => {
+             const currentTracks = tracksRef.current;
+             const currentId = activeTrackIdRef.current;
+             const currentIndex = currentTracks.findIndex(t => t.id === currentId);
+             
+             if (currentIndex !== -1 && currentIndex < currentTracks.length - 1) {
+                const nextTrack = currentTracks[currentIndex + 1];
+                
+                // 1. Instantly swap UI state AND internal Refs
+                setActiveTrackId(nextTrack.id);
+                setExpandedTrackId(nextTrack.id);
+                activeTrackIdRef.current = nextTrack.id;
+                activeTrackRef.current = nextTrack;
+                
+                // 2. Synchronously rebuild sequence bounds for the new track
+                const triggers: Record<number, {cueId: string, seqIdx: number}> = {};
+                const bounds: {startIndex: number, endIndex: number, seqIdx: number, cueId: string}[] = [];
+                let absoluteBeat = 1; 
+                nextTrack.sequence.forEach((seq, idx) => {
+                   const m = Number(seq.measures) || 0;
+                   const b = Number(seq.beats) || 0;
+                   const r = Number(seq.repeats) || 0;
+                   const h = Number(seq.head_m) || 0;
+                   const t = Number(seq.tail_m) || 0;
+                   if (idx > 0) {
+                       const triggerBeat = absoluteBeat - 4; 
+                       if (triggerBeat > 0) triggers[triggerBeat] = { cueId: seq.cueId, seqIdx: idx };
+                   }
+                   const itemLengthBeats = ((m * 4) + b) * (r + 1) + (h * 4) + (t * 4);
+                   bounds.push({ startIndex: absoluteBeat, endIndex: absoluteBeat + itemLengthBeats - 1, seqIdx: idx, cueId: seq.cueId });
+                   absoluteBeat += itemLengthBeats;
+                });
+                sequenceTriggersRef.current = triggers;
+                sequenceBoundsRef.current = bounds;
+
+                // 3. Shift the mathematical BPM timeline
+                if (audioContextRef.current) {
+                  const oldSecs = 60.0 / currentTracks[currentIndex].bpm;
+                  const newSecs = 60.0 / nextTrack.bpm;
+                  const timeSinceLast = audioContextRef.current.currentTime - (nextNoteTimeRef.current - oldSecs);
+                  nextNoteTimeRef.current = audioContextRef.current.currentTime + (newSecs * (1 - (timeSinceLast / oldSecs)));
+                }
+
+                // 4. Reset sequences for Track 2
+                currentBeatInSequenceRef.current = 1;
+                targetStartBeatRef.current = 1;
+                activeSequenceIndexRef.current = 0;
+                setActiveSequenceIndex(0);
+             } else {
+                stopEngine();
+             }
+          }, Math.max(0, (time - (audioContextRef.current?.currentTime || 0)) * 1000));
+       }
+    }
+
     setTimeout(() => {
       if (isPlayingRef.current) {
         setVisualBeat(relativeBeat);
-        if (activeTrack?.sequence.length > 0) {
+        if (currentActiveTrack?.sequence && currentActiveTrack.sequence.length > 0) {
           const bound = sequenceBoundsRef.current.find(b => effectiveBeat >= b.startIndex && effectiveBeat <= b.endIndex);
           if (bound) {
             setSectionBeats({ current: effectiveBeat - bound.startIndex + 1, total: bound.endIndex - bound.startIndex + 1 });
@@ -434,7 +520,7 @@ export default function MDLiveStudioPage() {
     } 
 
     // 3. TRACK ACTIVE SEQUENCE BLOCK
-    if (effectiveBeat > 0 && isDownbeat && activeTrack?.sequence.length > 0) {
+    if (effectiveBeat > 0 && isDownbeat && currentActiveTrack?.sequence && currentActiveTrack.sequence.length > 0) {
         const matchingBound = sequenceBoundsRef.current.find(b => effectiveBeat >= b.startIndex && effectiveBeat <= b.endIndex);
         if (matchingBound && matchingBound.seqIdx !== activeSequenceIndexRef.current) {
             activeSequenceIndexRef.current = matchingBound.seqIdx;
@@ -442,7 +528,7 @@ export default function MDLiveStudioPage() {
         }
     }
 
-    // 4. AUTO SEQUENCE TRIGGER (With Hold/Count-in suppression)
+    // 4. AUTO SEQUENCE TRIGGER
     if (effectiveBeat > 0 && sequenceTriggersRef.current[effectiveBeat]) {
       const isBeforeTargetDuringCountIn = isCountingInRef.current && effectiveBeat < targetStartBeatRef.current;
       if (!isBeforeTargetDuringCountIn && !isHoldingRef.current) {
@@ -480,13 +566,14 @@ export default function MDLiveStudioPage() {
 
   const scheduler = useCallback(() => {
     const ctx = audioContextRef.current;
-    if (!ctx || !activeTrack) return;
+    const currentActiveTrack = activeTrackRef.current; // ✅ Pull fresh track
+    if (!ctx || !currentActiveTrack) return;
 
     const scheduleAheadTime = 0.1; 
-    const secondsPerBeat = 60.0 / activeTrack.bpm;
+    const secondsPerBeat = 60.0 / currentActiveTrack.bpm; // ✅ Uses fresh BPM automatically!
 
     while (nextNoteTimeRef.current < ctx.currentTime + scheduleAheadTime) {
-      if (activeTrack.sequence.length > 0 && isHoldingRef.current) {
+      if (currentActiveTrack.sequence && currentActiveTrack.sequence.length > 0 && isHoldingRef.current) {
           const currentBound = sequenceBoundsRef.current[activeSequenceIndexRef.current];
           if (currentBound && currentBeatInSequenceRef.current > currentBound.endIndex) {
               currentBeatInSequenceRef.current = currentBound.startIndex; 
@@ -502,7 +589,7 @@ export default function MDLiveStudioPage() {
       }
     }
     schedulerTimerRef.current = window.setTimeout(scheduler, 25.0);
-  }, [activeTrack?.bpm]);
+  }, []); // ✅ Empty dependency array enforces the use of Refs
 
   // ============================================================================
   // PLAYBACK & INTERACTION CONTROLS
@@ -554,12 +641,19 @@ export default function MDLiveStudioPage() {
     initAudioContext();
     if (!isPlaying) { setIdleArmedGuideId(guideId); } 
     else {
+      // ✅ SURGICAL FIX: Intercept the Next Song command
+      if (guideId === "D_Next Song") {
+        queuedNextSongRef.current = true;
+        setDynamicFlashId(guideId); setTimeout(() => setDynamicFlashId(null), 150);
+        return;
+      }
+
       if (page === 2) {
         playZeroLatencyAudio(guideId, guideVolumeRef.current);
         setDynamicFlashId(guideId); setTimeout(() => setDynamicFlashId(null), 150);
       } else {
         playZeroLatencyAudio(guideId, guideVolumeRef.current);
-        setQueuedGuideId(guideId); setIsHolding(false); 
+        setQueuedGuideId(guideId); 
       }
     }
   };
@@ -567,7 +661,10 @@ export default function MDLiveStudioPage() {
   const handleSequencePadClick = (seqIdx: number) => {
     initAudioContext();
     if (!isPlaying) { setIdleArmedSequenceIndex(seqIdx); } 
-    else { setQueuedSequenceIndex(seqIdx); setIsHolding(false); }
+    else { 
+      setQueuedSequenceIndex(seqIdx); 
+      // ✅ SURGICAL FIX: Removed setIsHolding(false) to make the lock persistent
+    }
   };
 
   const togglePlayback = () => {
@@ -788,99 +885,127 @@ export default function MDLiveStudioPage() {
       <main className="flex flex-col gap-4 w-full max-w-md flex-1 overflow-y-auto custom-scrollbar pb-24">
         {tracks.map((track, idx) => {
           const isSelected = activeTrackId === track.id;
-          
-          if (!isSelected) {
-             return (
-               <section key={track.id} onClick={() => { if (!isPlaying) setActiveTrackId(track.id); }} className="w-full rounded-2xl bg-[#16161a] border border-white/5 px-5 py-4 flex flex-col gap-1.5 transition active:opacity-90 cursor-pointer shadow-lg shadow-black/40">
-                  <div className="flex items-center justify-between">
-                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold tracking-wider uppercase bg-zinc-800/90 text-zinc-400 border border-white/5">Track {String(idx + 1).padStart(2, '0')}</span>
-                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-zinc-800/80 text-zinc-400 border border-white/5 font-mono">{track.bpm} BPM</span>
-                  </div>
-                  <h2 className="text-xl font-bold text-white tracking-tight mt-0.5">{track.title}</h2>
-               </section>
-             );
-          }
+          const isAccordionOpen = expandedTrackId === track.id;
 
           return (
-            <section key={track.id} className="w-full rounded-2xl bg-[#16161a] border-2 border-[rgba(37,99,235,0.35)] p-4 sm:p-5 flex flex-col gap-5 shadow-2xl shadow-blue-950/20 relative">
-              <div className="flex items-start justify-between w-full">
-                <div className="flex flex-col gap-1">
-                  <span className="inline-flex self-start items-center px-2 py-0.5 rounded-full text-[9px] font-bold tracking-wider uppercase bg-[#1c1c22] text-blue-400 border border-blue-500/30">Track {String(idx + 1).padStart(2, '0')}</span>
-                  <input 
-                    type="text" 
-                    value={track.title}
-                    onChange={(e) => updateActiveTrack('title', e.target.value)}
-                    className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight leading-none mt-1 bg-transparent border-b border-dashed border-white/20 focus:border-blue-500 outline-none w-full"
-                  />
-                </div>
-
-                <div className="bg-[#0d0d10] rounded-xl border border-white/10 p-1 flex items-center justify-between shadow-inner h-12 w-32 shrink-0">
-                  <button onClick={() => updateActiveTrack('bpm', Math.max(40, track.bpm - 1))} className="w-8 h-full rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-95 flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2.5" viewBox="0 0 24 24"><line x1="5" x2="19" y1="12" y2="12"></line></svg>
-                  </button>
-                  <div className="flex flex-col items-center justify-center w-10">
-                    <span className="text-lg font-black tracking-tight text-white font-mono leading-none">{track.bpm}</span>
-                    <span className="text-[8px] font-bold tracking-widest text-zinc-400 uppercase mt-0.5">BPM</span>
-                  </div>
-                  <button onClick={() => updateActiveTrack('bpm', Math.min(300, track.bpm + 1))} className="w-8 h-full rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-95 flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2.5" viewBox="0 0 24 24"><line x1="12" x2="12" y1="5" y2="19"></line><line x1="5" x2="19" y1="12" y2="12"></line></svg>
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 pt-2">
-                <div className="flex items-center justify-between px-0.5">
+            <section 
+              key={track.id} 
+              // ✅ SURGICAL FIX: Added shrink-0 to prevent the card from collapsing when cues overflow
+              className={`w-full shrink-0 rounded-2xl bg-[#16161a] transition-all flex flex-col shadow-lg overflow-hidden ${isSelected ? 'border-2 border-[rgba(37,99,235,0.35)] shadow-[0_0_20px_rgba(37,99,235,0.15)]' : 'border border-white/5 shadow-black/40'}`}
+            >
+              {/* ✅ Accordion Header */}
+              <div 
+                onClick={() => {
+                  if (!isPlaying) setActiveTrackId(track.id);
+                  setExpandedTrackId(isAccordionOpen ? null : track.id);
+                }}
+                // ✅ SURGICAL FIX: Dynamic items-center so it perfectly aligns when collapsed
+                className={`flex justify-between p-4 sm:p-5 cursor-pointer hover:bg-white/5 transition-colors select-none ${isAccordionOpen ? 'border-b border-white/5 bg-white/5 items-start' : 'items-center'}`}
+              >
+                <div className="flex flex-col gap-1.5 min-w-0 pr-4 flex-1">
                   <div className="flex items-center gap-2">
-                    <svg className="w-4 h-4 text-zinc-400 stroke-current" fill="none" strokeWidth="2" viewBox="0 0 24 24"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="12" r="3"></circle><line x1="9" x2="15" y1="12" y2="12"></line></svg>
-                    <span className="text-xs font-bold tracking-wider text-zinc-300 uppercase">Automated Sequence</span>
+                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[9px] font-bold tracking-wider uppercase border shrink-0 ${isSelected ? 'bg-[#1c1c22] text-blue-400 border-blue-500/30' : 'bg-zinc-800/90 text-zinc-400 border-white/5'}`}>
+                      Track {String(idx + 1).padStart(2, '0')}
+                    </span>
+                    {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_#3b82f6] animate-pulse"></span>}
                   </div>
-                  <button onClick={() => addSequenceItem(track.id)} className="px-3 py-1.5 rounded-lg bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/30 text-[11px] font-bold uppercase tracking-wider transition active:scale-95 cursor-pointer">
-                    + Add Cue
-                  </button>
+                  {isAccordionOpen ? (
+                    <input 
+                      type="text" 
+                      value={track.title}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => updateActiveTrack('title', e.target.value)}
+                      className="text-xl sm:text-2xl font-extrabold text-white tracking-tight leading-none mt-1 bg-transparent border-b border-dashed border-white/20 focus:border-blue-500 outline-none w-full pb-1"
+                    />
+                  ) : (
+                    <h2 className={`text-base sm:text-lg font-bold tracking-tight truncate mt-0.5 ${isSelected ? 'text-white' : 'text-zinc-300'}`}>{track.title}</h2>
+                  )}
                 </div>
                 
-                <div className="flex flex-col gap-2.5 mt-1">
-                  {track.sequence.map((seq, sIdx) => {
-                    const isCurrentlyPlaying = isPlaying && activeSequenceIndex === sIdx;
-                    return (
-                      <div key={seq.id} className={`group relative flex items-center bg-[#0d0d10]/90 rounded-xl border ${isCurrentlyPlaying ? 'border-blue-500 ring-1 ring-blue-500 shadow-md' : 'border-white/5 hover:border-white/10'} transition overflow-hidden p-1.5`}>
-                        {isCurrentlyPlaying && <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 z-10"></div>}
-                        <div className={`flex items-center gap-2 w-full overflow-x-auto custom-scrollbar pb-1 ${isCurrentlyPlaying ? 'pl-2' : ''}`}>
-                          <select value={seq.cueId} onChange={(e) => updateSequenceItem(track.id, sIdx, 'cueId', e.target.value)} className="px-2 py-1.5 rounded-lg bg-zinc-800/80 border border-white/5 text-[11px] font-semibold text-zinc-200 outline-none appearance-none min-w-[85px] cursor-pointer shrink-0">
-                            {ALL_CUES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-                          </select>
-                          <div className="flex items-center gap-1.5 font-mono text-xs shrink-0 px-1">
-                            <span className="text-[10px] font-bold text-zinc-400">M</span><input type="number" value={seq.measures} onChange={e=>updateSequenceItem(track.id, sIdx, 'measures', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
-                            <span className="text-[10px] font-bold text-zinc-400">B</span><input type="number" value={seq.beats} onChange={e=>updateSequenceItem(track.id, sIdx, 'beats', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
-                            <span className="text-[10px] font-bold text-zinc-400">R</span><input type="number" value={seq.repeats} onChange={e=>updateSequenceItem(track.id, sIdx, 'repeats', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
-                            <span className="text-[10px] font-bold text-zinc-400">H</span><input type="number" value={seq.head_m} onChange={e=>updateSequenceItem(track.id, sIdx, 'head_m', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
-                            <span className="text-[10px] font-bold text-zinc-400">T</span><input type="number" value={seq.tail_m} onChange={e=>updateSequenceItem(track.id, sIdx, 'tail_m', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0 border-l border-white/10 pl-2 ml-1">
-                            <button onClick={() => moveSequenceItem(track.id, sIdx, -1)} disabled={sIdx === 0} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">arrow_upward</span></button>
-                            <button onClick={() => moveSequenceItem(track.id, sIdx, 1)} disabled={sIdx === track.sequence.length - 1} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">arrow_downward</span></button>
-                            <div className="w-px h-4 bg-white/10 mx-0.5"></div>
-                            <button onClick={() => duplicateSequenceItem(track.id, sIdx, -1)} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">library_add_check</span></button>
-                            <button onClick={() => duplicateSequenceItem(track.id, sIdx, 1)} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">content_copy</span></button>
-                            <div className="w-px h-4 bg-white/10 mx-0.5"></div>
-                            <button onClick={() => removeSequenceItem(track.id, sIdx)} className="w-7 h-7 rounded bg-red-500/10 text-red-400 flex items-center justify-center cursor-pointer hover:bg-red-500 hover:text-white transition-colors">
-                              <span className="material-symbols-outlined text-[16px]">close</span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {track.sequence.length === 0 && <span className="text-[11px] text-zinc-500 font-semibold italic bg-[#0d0d10] p-3 rounded-xl border border-dashed border-white/10 text-center">No automated cues. Play manually via drum pads.</span>}
+                <div className={`flex items-center gap-3 shrink-0 ${isAccordionOpen ? 'mt-1' : ''}`}>
+                  {!isAccordionOpen && (
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-zinc-800/80 text-zinc-400 border border-white/5 font-mono">{track.bpm} BPM</span>
+                  )}
+                  <span className={`material-symbols-outlined text-zinc-400 transition-transform ${isAccordionOpen ? 'rotate-180' : ''}`}>expand_more</span>
                 </div>
               </div>
 
-              <div className="w-full pt-3 pb-1 flex justify-center">
-                <button onClick={() => deleteTrack(track.id)} disabled={tracks.length === 1} className="flex items-center gap-2 text-[#ef4444] hover:text-red-400 active:scale-95 transition font-bold text-xs tracking-wider uppercase py-2 px-4 rounded-lg hover:bg-red-500/10 disabled:opacity-30 cursor-pointer">
-                  <svg className="w-4 h-4 stroke-current" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" x2="10" y1="11" y2="17"></line><line x1="14" x2="14" y1="11" y2="17"></line></svg>
-                  <span>Delete Track</span>
-                </button>
-              </div>
+              {/* ✅ Accordion Body (Sequence Editor) */}
+              {isAccordionOpen && (
+                <div className="p-4 sm:p-5 flex flex-col gap-5 bg-[#0d0d10]/40">
+                  <div className="flex items-center justify-between w-full">
+                    <span className="text-xs font-bold text-zinc-400 uppercase tracking-widest">Master Tempo</span>
+                    <div className="bg-[#16161a] rounded-xl border border-white/10 p-1 flex items-center justify-between shadow-inner h-12 w-32 shrink-0">
+                      <button onClick={() => updateActiveTrack('bpm', Math.max(40, track.bpm - 1))} className="w-8 h-full rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-95 flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2.5" viewBox="0 0 24 24"><line x1="5" x2="19" y1="12" y2="12"></line></svg>
+                      </button>
+                      <div className="flex flex-col items-center justify-center w-10">
+                        <span className="text-lg font-black tracking-tight text-white font-mono leading-none">{track.bpm}</span>
+                        <span className="text-[8px] font-bold tracking-widest text-zinc-400 uppercase mt-0.5">BPM</span>
+                      </div>
+                      <button onClick={() => updateActiveTrack('bpm', Math.min(300, track.bpm + 1))} className="w-8 h-full rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-95 flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2.5" viewBox="0 0 24 24"><line x1="12" x2="12" y1="5" y2="19"></line><line x1="5" x2="19" y1="12" y2="12"></line></svg>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Sequence Manager */}
+                  <div className="flex flex-col gap-3 pt-2 border-t border-white/5">
+                    <div className="flex items-center justify-between px-0.5 mt-2">
+                      <div className="flex items-center gap-2">
+                        <svg className="w-4 h-4 text-zinc-400 stroke-current" fill="none" strokeWidth="2" viewBox="0 0 24 24"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="12" r="3"></circle><line x1="9" x2="15" y1="12" y2="12"></line></svg>
+                        <span className="text-xs font-bold tracking-wider text-zinc-300 uppercase">Automated Sequence</span>
+                      </div>
+                      <button onClick={() => addSequenceItem(track.id)} className="px-3 py-1.5 rounded-lg bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/30 text-[11px] font-bold uppercase tracking-wider transition active:scale-95 cursor-pointer">
+                        + Add Cue
+                      </button>
+                    </div>
+                    
+                    <div className="flex flex-col gap-2.5 mt-1">
+                      {track.sequence.map((seq, sIdx) => {
+                        const isCurrentlyPlaying = isPlaying && activeSequenceIndex === sIdx;
+                        return (
+                          <div key={seq.id} className={`group relative flex items-center bg-[#0d0d10]/90 rounded-xl border ${isCurrentlyPlaying ? 'border-blue-500 ring-1 ring-blue-500 shadow-md' : 'border-white/5 hover:border-white/10'} transition overflow-hidden p-1.5`}>
+                            {isCurrentlyPlaying && <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 z-10"></div>}
+                            <div className={`flex items-center gap-2 w-full overflow-x-auto custom-scrollbar pb-1 ${isCurrentlyPlaying ? 'pl-2' : ''}`}>
+                              <select value={seq.cueId} onChange={(e) => updateSequenceItem(track.id, sIdx, 'cueId', e.target.value)} className="px-2 py-1.5 rounded-lg bg-zinc-800/80 border border-white/5 text-[11px] font-semibold text-zinc-200 outline-none appearance-none min-w-[85px] cursor-pointer shrink-0">
+                                {ALL_CUES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+                              </select>
+                              <div className="flex items-center gap-1.5 font-mono text-xs shrink-0 px-1">
+                                <span className="text-[10px] font-bold text-zinc-400">M</span><input type="number" value={seq.measures} onChange={e=>updateSequenceItem(track.id, sIdx, 'measures', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
+                                <span className="text-[10px] font-bold text-zinc-400">B</span><input type="number" value={seq.beats} onChange={e=>updateSequenceItem(track.id, sIdx, 'beats', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
+                                <span className="text-[10px] font-bold text-zinc-400">R</span><input type="number" value={seq.repeats} onChange={e=>updateSequenceItem(track.id, sIdx, 'repeats', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
+                                <span className="text-[10px] font-bold text-zinc-400">H</span><input type="number" value={seq.head_m} onChange={e=>updateSequenceItem(track.id, sIdx, 'head_m', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
+                                <span className="text-[10px] font-bold text-zinc-400">T</span><input type="number" value={seq.tail_m} onChange={e=>updateSequenceItem(track.id, sIdx, 'tail_m', +e.target.value)} className="w-7 py-1 bg-black/60 rounded border border-white/5 text-white font-bold text-center outline-none"/>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0 border-l border-white/10 pl-2 ml-1">
+                                <button onClick={() => moveSequenceItem(track.id, sIdx, -1)} disabled={sIdx === 0} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">arrow_upward</span></button>
+                                <button onClick={() => moveSequenceItem(track.id, sIdx, 1)} disabled={sIdx === track.sequence.length - 1} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">arrow_downward</span></button>
+                                <div className="w-px h-4 bg-white/10 mx-0.5"></div>
+                                <button onClick={() => duplicateSequenceItem(track.id, sIdx, -1)} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">library_add_check</span></button>
+                                <button onClick={() => duplicateSequenceItem(track.id, sIdx, 1)} className="w-7 h-7 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 flex items-center justify-center cursor-pointer"><span className="material-symbols-outlined text-[16px]">content_copy</span></button>
+                                <div className="w-px h-4 bg-white/10 mx-0.5"></div>
+                                <button onClick={() => removeSequenceItem(track.id, sIdx)} className="w-7 h-7 rounded bg-red-500/10 text-red-400 flex items-center justify-center cursor-pointer hover:bg-red-500 hover:text-white transition-colors">
+                                  <span className="material-symbols-outlined text-[16px]">close</span>
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {track.sequence.length === 0 && <span className="text-[11px] text-zinc-500 font-semibold italic bg-[#0d0d10] p-3 rounded-xl border border-dashed border-white/10 text-center">No automated cues. Play manually via drum pads.</span>}
+                    </div>
+                  </div>
+
+                  {/* Delete Track Button */}
+                  <div className="w-full pt-3 pb-1 flex justify-center border-t border-white/5 mt-2">
+                    <button onClick={() => deleteTrack(track.id)} disabled={tracks.length === 1} className="flex items-center gap-2 text-[#ef4444] hover:text-red-400 active:scale-95 transition font-bold text-xs tracking-wider uppercase py-2 px-4 rounded-lg hover:bg-red-500/10 disabled:opacity-30 cursor-pointer">
+                      <svg className="w-4 h-4 stroke-current" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" x2="10" y1="11" y2="17"></line><line x1="14" x2="14" y1="11" y2="17"></line></svg>
+                      <span>Delete Track</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </section>
           );
         })}
@@ -1023,6 +1148,34 @@ export default function MDLiveStudioPage() {
                     </button>
                   );
                 })}
+
+                {/* ✅ SURGICAL FIX: "Next Song" Pad Dynamically Appended to the end of Page 1! */}
+                {tracks.findIndex(t => t.id === activeTrackId) < tracks.length - 1 && (
+                  <button 
+                    onClick={() => {
+                      if (!isSwipingRef.current) {
+                        const nextCueId = "D_Next Song";
+                        initAudioContext();
+                        if (!isPlaying) { 
+                          setIdleArmedGuideId(nextCueId); 
+                        } else {
+                          queuedNextSongRef.current = true;
+                          setDynamicFlashId(nextCueId); 
+                          setTimeout(() => setDynamicFlashId(null), 150);
+                        }
+                      }
+                    }} 
+                    className={`group col-span-1 relative aspect-square rounded-2xl p-2.5 flex flex-col items-center justify-center text-center transition-all shadow-[inset_0_1px_1px_0_rgba(255,255,255,0.07),_0_4px_12px_rgba(0,0,0,0.5)] cursor-pointer outline-none select-none ${
+                      dynamicFlashId === "D_Next Song" 
+                        ? 'bg-[#4c1d95] border-2 border-[#a78bfa] text-white scale-[1.02]' 
+                        : 'bg-[#1e152a] border border-[#8b5cf6]/40 text-[#a78bfa] hover:border-[#a78bfa] hover:bg-[#281b3d]'
+                    }`}
+                  >
+                    {dynamicFlashId === "D_Next Song" && <span className="absolute -top-1 px-1.5 py-[1px] bg-[#8b5cf6] text-[9px] font-black uppercase tracking-tighter text-white rounded-sm shadow-sm">Queued</span>}
+                    <span className="material-symbols-outlined text-[26px] mb-1">skip_next</span>
+                    <span className="text-[11px] font-black uppercase tracking-widest leading-tight">Next<br/>Song</span>
+                  </button>
+                )}
               </div>
             </div>
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
@@ -95,6 +95,10 @@ export default function EventCockpitPage() {
   const [eventSetlists, setEventSetlists] = useState<SetlistMetaItem[]>([]);
   const [allSetlistSongsMap, setAllSetlistSongsMap] = useState<Record<string, SetlistSongItem[]>>({});
   const [selectedSetlistId, setSelectedSetlistId] = useState<string>("");
+  
+  // ✅ SURGICAL FIX: Add a Ref to prevent the active tab from resetting on auto-save
+  const selectedIdRef = useRef<string>("");
+  useEffect(() => { selectedIdRef.current = selectedSetlistId; }, [selectedSetlistId]);
 
   const [setlistSongs, setSetlistSongs] = useState<SetlistSongItem[]>([]); 
   const [stagedSetlistSongs, setStagedSetlistSongs] = useState<SetlistSongItem[]>([]); 
@@ -109,6 +113,7 @@ export default function EventCockpitPage() {
   const [songSearchQuery, setSongSearchQuery] = useState("");
 
   const [draggedSongIndex, setDraggedSongIndex] = useState<number | null>(null);
+  const [dragOverSongIndex, setDragOverSongIndex] = useState<number | null>(null); // ✅ SURGICAL FIX: Tracks hover target
   const [customGroupName, setCustomGroupName] = useState("");
   const [selectedGroupColor, setSelectedGroupColor] = useState("blue");
 
@@ -116,6 +121,14 @@ export default function EventCockpitPage() {
   const [matrixFilter, setMatrixFilter] = useState<string>("All");
   const [isDeploying, setIsDeploying] = useState(false);
   const [isDockOpen, setIsDockOpen] = useState(false); 
+
+  // ✅ SURGICAL FIX: Track Saving States & Ref
+  const [isSavingTracks, setIsSavingTracks] = useState(false);
+  const stagedSetlistSongsRef = useRef<SetlistSongItem[]>([]);
+
+  useEffect(() => {
+    stagedSetlistSongsRef.current = stagedSetlistSongs;
+  }, [stagedSetlistSongs]);
 
   const [isCreateSetlistOpen, setIsCreateSetlistOpen] = useState(false);
   const [newSetlistName, setNewSetlistName] = useState("");
@@ -162,14 +175,16 @@ export default function EventCockpitPage() {
       
       const { data: slSongs } = await supabase
         .from("setlist_songs")
-        .select(`id, setlist_id, sequence_order, start_time, group_name, assigned_user_ids, group_color, parent_color, songs (*)`)
+        // ✅ SURGICAL FIX: Added custom_key to the fetch query
+        .select(`id, setlist_id, sequence_order, start_time, group_name, assigned_user_ids, group_color, parent_color, custom_key, songs (*)`)
         .in("setlist_id", slIds)
         .order("sequence_order", { ascending: true });
         
       const grouped: Record<string, SetlistSongItem[]> = {};
       slIds.forEach(id => grouped[id] = []);
       
-      (slSongs || []).forEach(row => {
+      // Replace the entire (slSongs || []).forEach block with this:
+      (slSongs || []).forEach((row: any) => {
         let rawGroup = row.group_name || null;
         let pName = null;
         let cName = rawGroup;
@@ -177,11 +192,19 @@ export default function EventCockpitPage() {
           const parts = row.group_name.split(" >> ");
           pName = parts[0]; cName = parts[1];
         }
+
+        // ✅ SURGICAL FIX: Safely extract the song object to satisfy TypeScript
+        const songObj = Array.isArray(row.songs) ? row.songs[0] : row.songs;
+
         const item = {
-          ...row, parent_group: pName, group_name: cName,
-          parent_color: (row as any).parent_color || "zinc",
-          group_color: (row as any).group_color || "zinc",
-          assigned_user_ids: row.assigned_user_ids || []
+          ...row, 
+          parent_group: pName, 
+          group_name: cName,
+          target_key: row.custom_key || songObj?.original_key || "G",
+          parent_color: row.parent_color || "zinc",
+          group_color: row.group_color || "zinc",
+          assigned_user_ids: row.assigned_user_ids || [],
+          songs: songObj // ✅ Ensure the normalized object is passed down
         } as unknown as SetlistSongItem;
         
         if (grouped[row.setlist_id]) {
@@ -190,14 +213,21 @@ export default function EventCockpitPage() {
       });
       
       setAllSetlistSongsMap(grouped);
-      setSelectedSetlistId(setlists[0].id);
-      setSetlistSongs(grouped[setlists[0].id] || []);
-      setStagedSetlistSongs(grouped[setlists[0].id] || []);
+      
+      // ✅ SURGICAL FIX: Safely maintain the current setlist view instead of resetting to index [0]
+      const currentActiveId = selectedIdRef.current;
+      const targetId = currentActiveId && setlists.find(s => s.id === currentActiveId) ? currentActiveId : setlists[0].id;
+      
+      setSelectedSetlistId(targetId);
+      setSetlistSongs(grouped[targetId] || []);
+      setStagedSetlistSongs(grouped[targetId] || []);
+      stagedSetlistSongsRef.current = grouped[targetId] || []; // Force sync ref instantly
     } else {
       setEventSetlists([]);
       setAllSetlistSongsMap({});
       setSelectedSetlistId("");
       setStagedSetlistSongs([]);
+      stagedSetlistSongsRef.current = [];
     }
   }
 
@@ -307,6 +337,23 @@ export default function EventCockpitPage() {
     }
   }
 
+  async function handleDeleteSetlistBlock(e: React.MouseEvent, slId: string) {
+    e.stopPropagation();
+    if (activeRole !== "admin") return;
+    if (!confirm("Are you sure you want to delete this Setlist Block? All tracks inside will be permanently unlinked.")) return;
+    
+    setIsDeploying(true); // Re-use loading state briefly
+    const { error } = await supabase.from("setlists").delete().eq("id", slId);
+    setIsDeploying(false);
+    
+    if (!error) {
+      await fetchEventSetlists(eventId);
+      if (selectedSetlistId === slId) setViewSubScreen("setlists_list");
+    } else {
+      alert(`Failed to delete block: ${error.message}`);
+    }
+  }
+  
   async function handleDeleteEvent() {
     if (activeRole !== "admin") return;
     setIsDeleting(true);
@@ -402,27 +449,82 @@ export default function EventCockpitPage() {
     await fetchEventSetlists(eventId);
   }
 
-  function handleDragStart(index: number) { if (activeRole === "admin") setDraggedSongIndex(index); }
+  function handleDragStart(index: number) { 
+    if (activeRole === "admin") setDraggedSongIndex(index); 
+  }
   
   function handleDragOver(e: React.DragEvent, targetIndex: number) {
-    e.preventDefault();
-    if (draggedSongIndex === null || draggedSongIndex === targetIndex || activeRole !== "admin") return;
-    const reorderedSongs = [...stagedSetlistSongs];
-    const [removed] = reorderedSongs.splice(draggedSongIndex, 1);
-    reorderedSongs.splice(targetIndex, 0, removed);
-    setStagedSetlistSongs(reorderedSongs.map((song, i) => ({ ...song, sequence_order: i + 1 })));
-    setDraggedSongIndex(targetIndex);
+    e.preventDefault(); // ✅ Required to allow dropping
+    if (draggedSongIndex === null || activeRole !== "admin") return;
+    if (dragOverSongIndex !== targetIndex) setDragOverSongIndex(targetIndex);
   }
 
-  async function handleDragEnd() {
+  // ✅ SURGICAL FIX: Perform the array swap and DB save ONLY when dropped!
+  async function handleDrop(e: React.DragEvent, targetIndex: number) {
+    e.preventDefault();
+    if (draggedSongIndex === null || activeRole !== "admin") return;
+
+    const startIndex = draggedSongIndex;
     setDraggedSongIndex(null);
-    if (activeRole !== "admin") return;
-    
-    const promises = stagedSetlistSongs
+    setDragOverSongIndex(null);
+
+    if (startIndex === targetIndex) return;
+
+    setIsSavingTracks(true); // Trigger Saving Indicator
+
+    const reorderedSongs = [...stagedSetlistSongsRef.current];
+    const [removed] = reorderedSongs.splice(startIndex, 1);
+    reorderedSongs.splice(targetIndex, 0, removed);
+
+    // Adopt the group name/color of the destination so it doesn't break visual bundles
+    const targetGroup = reorderedSongs[targetIndex]?.group_name;
+    const targetGroupColor = reorderedSongs[targetIndex]?.group_color;
+    removed.group_name = targetGroup || null;
+    removed.group_color = targetGroupColor || null;
+
+    const finalArray = reorderedSongs.map((song, i) => ({ ...song, sequence_order: i + 1 }));
+
+    // Instantly lock UI
+    setStagedSetlistSongs(finalArray);
+    setSetlistSongs(finalArray);
+    stagedSetlistSongsRef.current = finalArray;
+
+    // Save to Supabase
+    const promises = finalArray
       .filter(s => !s.id.startsWith('temp-'))
-      .map(song => supabase.from('setlist_songs').update({ sequence_order: song.sequence_order }).eq('id', song.id));
+      .map(song => supabase.from('setlist_songs').update({ 
+          sequence_order: song.sequence_order,
+          group_name: song.group_name,
+          group_color: song.group_color
+      }).eq('id', song.id));
       
     await Promise.all(promises);
+    await fetchEventSetlists(eventId);
+    setIsSavingTracks(false);
+  }
+
+  function handleDragEnd() {
+    setDraggedSongIndex(null);
+    setDragOverSongIndex(null);
+  }
+
+  // ✅ SURGICAL FIX: New function to break/ungroup a bundle
+  async function handleUngroup(e: React.MouseEvent, groupName: string) {
+    e.stopPropagation();
+    if (activeRole !== "admin") return;
+    if (!confirm(`Remove the "${groupName}" grouping?`)) return;
+    
+    setIsSavingTracks(true);
+    const idsToUpdate = stagedSetlistSongsRef.current.filter(s => s.group_name === groupName).map(s => s.id);
+    
+    setStagedSetlistSongs(prev => prev.map(s => s.group_name === groupName ? { ...s, group_name: null, group_color: null } : s));
+    
+    await supabase.from('setlist_songs')
+      .update({ group_name: null, group_color: null })
+      .in('id', idsToUpdate.filter(id => !id.startsWith('temp-')));
+      
+    await fetchEventSetlists(eventId);
+    setIsSavingTracks(false);
   }
 
   function handleToggleCheckboxSelect(id: string) { setSelectedForGroup(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); }
@@ -432,13 +534,28 @@ export default function EventCockpitPage() {
     const finalGroupName = customGroupName.trim() || null;
     const selectedIds = [...selectedForGroup];
     
-    const updatedSongs = stagedSetlistSongs.map(song => selectedIds.includes(song.id) ? { ...song, group_name: finalGroupName, group_color: selectedGroupColor } : song);
+    setIsSavingTracks(true); // ✅ Trigger the SAVING... indicator
+    
+    // Use the Ref to safely calculate the new array
+    const updatedSongs = stagedSetlistSongsRef.current.map(song => 
+      selectedIds.includes(song.id) ? { ...song, group_name: finalGroupName, group_color: selectedGroupColor } : song
+    );
+    
+    // Instantly lock UI
     setStagedSetlistSongs(updatedSongs); 
-    setSelectedForGroup([]); setCustomGroupName("");
+    setSetlistSongs(updatedSongs);
+    stagedSetlistSongsRef.current = updatedSongs;
+    
+    setSelectedForGroup([]); 
+    setCustomGroupName("");
 
+    // Save to Database
     await supabase.from('setlist_songs')
       .update({ group_name: finalGroupName, group_color: selectedGroupColor })
       .in('id', selectedIds.filter(id => !id.startsWith('temp-')));
+
+    await fetchEventSetlists(eventId);
+    setIsSavingTracks(false); // ✅ Hide the SAVING... indicator
   }
 
   // ✅ ENHANCED SETLIST CLIPBOARD ENGINE (Extracts titles + Artist + YouTube Playlist URL only)
@@ -529,9 +646,22 @@ export default function EventCockpitPage() {
               <div className="flex items-center gap-2">
                 <span className={`font-black text-[12px] uppercase tracking-widest ${groupPalette.text}`}>{group.groupName || "SECTION BLOCK"}</span>
               </div>
-              <span className={`px-2 py-0.5 rounded-md font-mono text-[9px] border shadow-sm bg-surface-container-highest border-outline-variant/30 ${groupPalette.text}`}>
-                {group.items.length} {group.items.length === 1 ? 'Song' : 'Songs'}
-              </span>
+              
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded-md font-mono text-[9px] border shadow-sm bg-surface-container-highest border-outline-variant/30 ${groupPalette.text}`}>
+                  {group.items.length} {group.items.length === 1 ? 'Song' : 'Songs'}
+                </span>
+                {/* ✅ SURGICAL FIX: Ungroup 'X' Button */}
+                {activeRole === "admin" && group.groupName && (
+                  <button 
+                    onClick={(e) => handleUngroup(e, group.groupName)}
+                    className="w-6 h-6 rounded-md flex items-center justify-center bg-error/10 text-error hover:bg-error hover:text-white transition-colors border border-error/20 cursor-pointer shadow-sm"
+                    title="Remove Grouping"
+                  >
+                    <span className="material-symbols-outlined text-[14px]">close</span>
+                  </button>
+                )}
+              </div>
             </div>
             <div className="space-y-3">{group.items.map(({item, globalIndex}: any) => renderTrackRow(item, globalIndex))}</div>
           </div>
@@ -544,10 +674,15 @@ export default function EventCockpitPage() {
           draggable={activeRole === "admin"}
           onDragStart={() => handleDragStart(globalIndex)}
           onDragOver={(e) => handleDragOver(e, globalIndex)}
-          onDragEnd={() => setDraggedSongIndex(null)}
+          onDrop={(e) => handleDrop(e, globalIndex)} // ✅ Added onDrop
+          onDragEnd={handleDragEnd} // ✅ Updated cleanup
           onClick={() => { if (item.songs?.id) router.push(`/songs/${item.songs.id}`); }}
           className={`flex items-center justify-between rounded-xl p-3 md:p-4 bg-surface-container hover:bg-surface-container-high border shadow-sm transition-all duration-150 cursor-pointer ${
-            draggedSongIndex === globalIndex ? "opacity-40 scale-95 border-primary border-dashed" : "border-outline-variant/30"
+            draggedSongIndex === globalIndex 
+              ? "opacity-40 scale-95 border-primary border-dashed" 
+              : dragOverSongIndex === globalIndex 
+                ? "border-primary border-t-4 shadow-lg scale-[1.01]" // ✅ Highlights the drop target
+                : "border-outline-variant/30"
           }`}
         >
           <div className="flex items-center gap-3 md:gap-4 flex-1 min-w-0">
@@ -570,15 +705,20 @@ export default function EventCockpitPage() {
           <div className="ml-3 flex items-center shrink-0" onClick={e => e.stopPropagation()}>
             {activeRole === "admin" && ( 
               <button 
-                onClick={async () => {
+                onClick={async (e) => {
+                  e.stopPropagation(); 
                   setStagedSetlistSongs(prev => prev.filter(s => s.id !== item.id));
                   setSetlistSongs(prev => prev.filter(s => s.id !== item.id)); 
                   
                   if (!item.id.startsWith('temp-')) {
+                    setIsSavingTracks(true); // ✅ Trigger indicator
                     const { error } = await supabase.from('setlist_songs').delete().eq('id', item.id);
                     if (error) console.error("Auto-save delete failed:", error.message);
+                    
+                    await fetchEventSetlists(eventId);
+                    setIsSavingTracks(false); // ✅ Hide indicator
                   }
-                }} 
+                }}
                 className="w-8 h-8 rounded-full bg-error/10 text-error hover:bg-error/20 flex items-center justify-center transition-colors border border-error/20 cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px]">close</span>
@@ -668,22 +808,25 @@ export default function EventCockpitPage() {
               <p className="text-[13px] text-white/80 mt-1 max-w-lg">
                 {activeEvent?.description || "Worship gathering event plan block."}
               </p>
-              
-              {/* <div className="flex flex-wrap items-center gap-4 text-[#7bd0ff] font-bold text-[12px] mt-4 pt-4 border-t border-white/10">
-                <span className="flex items-center gap-1.5"><span className="material-symbols-outlined text-[16px]">location_on</span>Main Sanctuary</span>
-                <span className="text-white/30">•</span>
-                <span className="flex items-center gap-1.5"><span className="material-symbols-outlined text-[16px]">schedule</span>{formatTo12Hour(activeEvent?.event_date?.split('T')[1])} Call Time</span>
-              </div> */}
 
               {/* Inside Hero Action */}
-              <div className="mt-4 pt-4 border-t border-white/10 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-[12px] text-white/80">
-                  <strong className="text-white text-[14px]">{stagedSetlistSongs.length}</strong> songs registered
+              <div className="mt-4 pt-4 border-t border-white/10 flex flex-col gap-4 sm:flex-row sm:items-end justify-between">
+                <div className="flex flex-col gap-2 text-[12px] text-white/80">
+                  <div><strong className="text-white text-[14px]">{stagedSetlistSongs.length}</strong> songs registered</div>
+                  
+                  {/* ✅ SURGICAL FIX: Shows "Currently Viewing" exclusively when user is on Tracks Tab */}
+                  {viewSubScreen === "songs_view" && selectedSetlistId && (
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <span className="px-2 py-0.5 rounded bg-white/20 text-pink-300 text-[10px] font-bold">Currently Viewing:</span>
+                      <span className="px-2 py-0.5 rounded bg-pink-500/30 text-pink-300 text-[10px] font-bold truncate max-w-[150px]">{eventSetlists.find(sl => sl.id === selectedSetlistId)?.name}</span>
+                    </div>
+                  )}
                 </div>
+                
                 <button 
                   onClick={handleStartRehearsal} 
                   disabled={stagedSetlistSongs.length === 0} 
-                  className="bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-[13px] font-bold shadow-lg flex items-center gap-1.5 transition-colors cursor-pointer border border-[#10b981]/50"
+                  className="bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg text-[13px] font-bold shadow-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-[#10b981]/50 shrink-0 w-full sm:w-auto mt-2 sm:mt-0"
                 >
                   Start Rehearsal <span className="material-symbols-outlined text-[18px]">chevron_right</span>
                 </button>
@@ -750,16 +893,27 @@ export default function EventCockpitPage() {
                           <h4 className="font-extrabold text-[18px] text-on-surface tracking-tight">{sl.name}</h4>
                         </div>
 
-                        {/* ✅ CLIPBOARD COPY BUTTON: Icon only, confirms with checkmark */}
-                        <button 
-                          onClick={(e) => handleCopySetlist(e, sl, songs)}
-                          className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 border ${isCopied ? 'bg-[#10b981]/20 text-[#10b981] border-[#10b981]/50' : 'bg-surface-container-highest text-on-surface-variant hover:text-on-surface hover:bg-surface-bright border-outline-variant/30'}`}
-                          title="Copy Setlist & Playlist Link to Clipboard"
-                        >
-                          <span className="material-symbols-outlined text-[16px]">
-                            {isCopied ? 'check' : 'content_copy'}
-                          </span>
-                        </button>
+                        {/* ✅ CLIPBOARD COPY BUTTON */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button 
+                            onClick={(e) => handleCopySetlist(e, sl, songs)}
+                            className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer border ${isCopied ? 'bg-[#10b981]/20 text-[#10b981] border-[#10b981]/50' : 'bg-surface-container-highest text-on-surface-variant hover:text-on-surface hover:bg-surface-bright border-outline-variant/30'}`}
+                            title="Copy Setlist"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">{isCopied ? 'check' : 'content_copy'}</span>
+                          </button>
+                          
+                          {/* ✅ SURGICAL FIX: Delete Setlist Block Button */}
+                          {activeRole === "admin" && (
+                            <button 
+                              onClick={(e) => handleDeleteSetlistBlock(e, sl.id)}
+                              className="w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer border bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error/10 hover:border-error/30 border-outline-variant/30"
+                              title="Delete Block"
+                            >
+                              <span className="material-symbols-outlined text-[16px]">delete</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-surface-container-lowest border border-outline-variant/20 pl-4">
@@ -818,6 +972,25 @@ export default function EventCockpitPage() {
           {/* ========================================= */}
           {viewSubScreen === "songs_view" && (
             <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+              
+              {/* ✅ SURGICAL FIX: Explicit Setlist Block Selector so Tracks don't bleed */}
+              {eventSetlists.length > 1 && (
+                <div className="bg-surface-container-low p-3 rounded-xl border border-outline-variant/30 flex items-center justify-between shadow-sm mb-2">
+                  <span className="text-[11px] font-black uppercase tracking-widest text-on-surface-variant">Editing Block:</span>
+                  <select 
+                    value={selectedSetlistId}
+                    onChange={(e) => {
+                      const newId = e.target.value;
+                      setSelectedSetlistId(newId);
+                      setSetlistSongs(allSetlistSongsMap[newId] || []);
+                      setStagedSetlistSongs(allSetlistSongsMap[newId] || []);
+                    }}
+                    className="bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-[12px] font-bold text-on-surface outline-none focus:border-primary transition-colors cursor-pointer max-w-[200px] truncate"
+                  >
+                    {eventSetlists.map(sl => <option key={sl.id} value={sl.id}>{sl.name}</option>)}
+                  </select>
+                </div>
+              )}
               
               {/* Add Song Input Field */}
               {activeRole === "admin" && (
@@ -890,9 +1063,24 @@ export default function EventCockpitPage() {
                 </div>
               )}
 
+              {/* ✅ SURGICAL FIX: "Currently Viewing" explicit warning text */}
+              {eventSetlists.length > 1 && (
+                <div className="px-2 pt-2">
+                   <p className="text-[11px] font-bold text-secondary italic">
+                      Currently Viewing: {eventSetlists.find(sl => sl.id === selectedSetlistId)?.name || "Selected Setlist"}
+                   </p>
+                </div>
+              )}
+
+            
+
               {/* Flow Repertoire Header */}
               <div className="flex items-center justify-between px-2 pt-2 border-b border-outline-variant/20 pb-4">
-                <span className="font-badge-caps text-[10px] uppercase tracking-widest text-outline">Flow Repertoire ({stagedSetlistSongs.length} Tracks)</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-badge-caps text-[10px] uppercase tracking-widest text-outline">Flow Repertoire ({stagedSetlistSongs.length} Tracks)</span>
+                  {/* ✅ SURGICAL FIX: Dynamic Auto-Save Indicator */}
+                  {isSavingTracks && <span className="text-[9px] font-black text-primary animate-pulse bg-primary/10 px-2 py-0.5 rounded border border-primary/20">SAVING...</span>}
+                </div>
                 <div className="flex items-center gap-1.5 text-secondary font-bold text-[11px] bg-secondary/10 px-2.5 py-1 rounded-md border border-secondary/20 shadow-sm">
                   <span className="material-symbols-outlined text-[14px]">timer</span>
                   <span>Est. ~{stagedSetlistSongs.length * 5} mins</span>

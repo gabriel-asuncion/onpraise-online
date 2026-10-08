@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { createPortal } from "react-dom"; // ✅ Added for Sidebar portaling
 import { useRouter } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
@@ -21,6 +21,26 @@ function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// ✅ Timeline Segment Models & Color Engine
+interface SongSegment {
+  label: string;
+  start: number;
+  end: number;
+  duration: number;
+  color: string;
+}
+
+function getSectionColor(label: string) {
+  const l = label.toLowerCase();
+  if (l.includes('chorus')) return 'bg-orange-500';
+  if (l.includes('verse')) return 'bg-sky-500';
+  if (l.includes('bridge')) return 'bg-primary';
+  if (l.includes('intro') || l.includes('inst') || l.includes('inter')) return 'bg-emerald-500';
+  if (l.includes('outro')) return 'bg-purple-500';
+  if (l.includes('tag') || l.includes('pre')) return 'bg-secondary';
+  return 'bg-zinc-500';
 }
 
 interface EventItem {
@@ -96,6 +116,24 @@ export default function DashboardPage() {
   const [isMobile, setIsMobile] = useState(false);
   const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
 
+  // ✅ SURGICAL ADDITION: Chapters & Looping Engine State
+  const [isChaptersModalOpen, setIsChaptersModalOpen] = useState(false);
+  const [loopMode, setLoopMode] = useState<"off" | "once" | "forever">("off");
+  const [loopTargetSegment, setLoopTargetSegment] = useState<SongSegment | null>(null);
+  const [hasLoopedOnce, setHasLoopedOnce] = useState(false);
+
+  // 🟢 SURGICAL FIX: Ref-backed loop state so the 60fps scrubber never reads stale data!
+  const loopEngineRef = useRef<{ mode: "off" | "once" | "forever", target: SongSegment | null, hasLoopedOnce: boolean }>({
+    mode: "off", target: null, hasLoopedOnce: false
+  });
+
+  const updateLoopState = (mode: "off" | "once" | "forever", target: SongSegment | null, loopedOnce: boolean) => {
+    setLoopMode(mode);
+    setLoopTargetSegment(target);
+    setHasLoopedOnce(loopedOnce);
+    loopEngineRef.current = { mode, target, hasLoopedOnce: loopedOnce };
+  };
+
   useEffect(() => {
     setMounted(true);
     const checkMobile = () => setIsMobile(window.innerWidth < 768);
@@ -103,6 +141,8 @@ export default function DashboardPage() {
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
+
+  
 
   // Headless YouTube Engine State
   const ytPlayerRef = useRef<any>(null);
@@ -114,6 +154,8 @@ export default function DashboardPage() {
   const ytTimeTrackerRef = useRef<number | null>(null);
   const dashboardProgressRef = useRef<HTMLDivElement | null>(null);
 
+  
+
   // ✅ SURGICAL ADDITION: Tell the Sidebar to slide down to 68px when playing!
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -121,17 +163,109 @@ export default function DashboardPage() {
     }
   }, [ytPlaying]);
 
+  // ✅ Math Engine for Anime-style Segmented Scrubber
+  const songSegments = useMemo(() => {
+    const segments: SongSegment[] = [];
+    if (!activePracticeSong || ytDuration <= 0) {
+      return [{ label: "Track", start: 0, end: ytDuration || 100, duration: ytDuration || 100, color: "bg-primary" }];
+    }
+    
+    const offsetSec = (activePracticeSong.youtube_sync_offset_ms || 0) / 1000;
+    const tempo = activePracticeSong.tempo || 120;
+    const secPerBeat = 60 / tempo;
+    
+    const chordpro = activePracticeSong.chordpro_content || "";
+    const sectionRegex = /^\[(.*?)\]/gm;
+    let match;
+    const sectionSequence = [];
+    while ((match = sectionRegex.exec(chordpro)) !== null) {
+      sectionSequence.push(match[1]);
+    }
+    
+    let currentStartTime = offsetSec;
+    const timings = activePracticeSong.section_timings;
+    
+    // Add Pre-roll Pad
+    if (currentStartTime > 0) {
+      segments.push({ label: "Pre-Roll", start: 0, end: currentStartTime, duration: currentStartTime, color: "bg-zinc-700" });
+    }
+    
+    // Map Sections proportionally
+    if (timings && sectionSequence.length > 0) {
+      sectionSequence.forEach(secLabel => {
+         const t = timings[secLabel];
+         if (t) {
+           const beatsPerMeasure = parseInt((activePracticeSong.time_signature || '4/4').split('/')[0]) || 4;
+           const totalBeats = ((t.measures || 0) * beatsPerMeasure + (t.beats || 0)) * ((t.repeats || 0) + 1) + ((t.head_m || 0) * beatsPerMeasure) + ((t.tail_m || 0) * beatsPerMeasure);
+           const durationSec = totalBeats * secPerBeat;
+           
+           if (durationSec > 0) {
+               segments.push({ label: secLabel, start: currentStartTime, end: currentStartTime + durationSec, duration: durationSec, color: getSectionColor(secLabel) });
+               currentStartTime += durationSec;
+           }
+         }
+      });
+    }
+    
+    // Fill remaining video timeline
+    if (segments.length === 0 || currentStartTime < ytDuration) {
+       const remain = Math.max(0, ytDuration - currentStartTime);
+       if (remain > 1) segments.push({ label: "Post-Roll", start: currentStartTime, end: ytDuration, duration: remain, color: "bg-zinc-700" });
+    }
+    
+    return segments;
+  }, [activePracticeSong, ytDuration]);
+
+  const activeSegment = songSegments.find(s => ytCurrentTime >= s.start && ytCurrentTime < s.end) || songSegments[0];
+
+  const handleSkipNextSection = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!ytPlayerRef.current || typeof ytPlayerRef.current.seekTo !== 'function') return;
+      const nextSeg = songSegments.find(s => s.start > ytCurrentTime + 1); // +1s buffer
+      if (nextSeg) { ytPlayerRef.current.seekTo(nextSeg.start, true); setYtCurrentTime(nextSeg.start); }
+  };
+
+  const handleSkipPrevSection = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!ytPlayerRef.current || typeof ytPlayerRef.current.seekTo !== 'function') return;
+      const currentSegIndex = songSegments.findIndex(s => ytCurrentTime >= s.start && ytCurrentTime < s.end);
+      if (currentSegIndex >= 0) {
+          const currentSeg = songSegments[currentSegIndex];
+          if (ytCurrentTime > currentSeg.start + 3) {
+              ytPlayerRef.current.seekTo(currentSeg.start, true); setYtCurrentTime(currentSeg.start);
+          } else if (currentSegIndex > 0) {
+              ytPlayerRef.current.seekTo(songSegments[currentSegIndex - 1].start, true); setYtCurrentTime(songSegments[currentSegIndex - 1].start);
+          } else {
+              ytPlayerRef.current.seekTo(0, true); setYtCurrentTime(0);
+          }
+      }
+  };
+
   async function loadDashboardMetrics() {
     try {
-      const { data: authData } = await supabase.auth.getUser();
+      // ✅ SURGICAL FIX: Strict Auth & Onboarding Bounce
+      const { data: authData, error: authError } = await supabase.auth.getUser();
 
-      let activeProfileData: any = null;
-
-      if (authData?.user) {
-        const { data: profile } = await supabase.from("profiles").select("full_name, team_id, avatar_url").eq("id", authData.user.id).maybeSingle();
-        if (!profile || !profile.full_name) { router.push("/onboarding"); return; }
-        activeProfileData = profile;
+      // 1. If no valid user session exists, bounce to login
+      if (authError || !authData?.user) {
+        router.push("/login"); // (or your sign-in route)
+        return;
       }
+
+      // 2. Fetch the user's core profile data
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("full_name, team_id, avatar_url")
+        .eq("id", authData.user.id)
+        .maybeSingle();
+
+      // 3. If the profile row is missing, or the name is empty, aggressively route to onboarding
+      if (!profile || !profile.full_name || profile.full_name.trim() === "") { 
+        router.push("/onboarding"); 
+        return; 
+      }
+
+      const activeProfileData = profile;
 
       const targetTeamIdToFetch = userTeamId || activeProfileData?.team_id;
       if (targetTeamIdToFetch) {
@@ -204,8 +338,8 @@ export default function DashboardPage() {
           const setlistIds = setlists.map(s => s.id);
           const { data: setlistSongs, error } = await supabase
             .from("setlist_songs")
-            // ✅ SURGICAL FIX: Removed "link" to prevent the Supabase column error!
-            .select("id, setlist_id, sequence_order, song:songs(id, title, artist, original_key, tempo, youtube_url)")
+            // ✅ Fetching extra columns for Timeline Math
+            .select("id, setlist_id, sequence_order, custom_key, song:songs(id, title, artist, original_key, tempo, youtube_url, section_timings, chordpro_content, youtube_sync_offset_ms)")
             .in("setlist_id", setlistIds)
             .order("sequence_order", { ascending: true });
             
@@ -359,14 +493,38 @@ export default function DashboardPage() {
       if (ytPlaying && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
         const currentTime = ytPlayerRef.current.getCurrentTime();
         
-        // 1. Direct DOM update for buttery smooth 60fps progress bar
+        // ✅ SURGICAL FIX: 60fps Scrubber, Segment Masking, & Intelligent Looping Engine
+        const duration = ytPlayerRef.current.getDuration() || 1;
+        const progressPercent = (currentTime / duration) * 100;
+
         if (dashboardProgressRef.current) {
-           const duration = ytPlayerRef.current.getDuration() || 1;
-           const progress = currentTime / duration;
-           dashboardProgressRef.current.style.transform = `scaleX(${progress})`;
+           dashboardProgressRef.current.style.transform = `scaleX(${currentTime / duration})`;
         }
 
-        // 2. Only trigger massive React re-renders if the slider UI is visible
+        // Sync anime scrubber clip-paths globally
+        document.querySelectorAll('.segmented-scrubber-mask').forEach(el => {
+          (el as HTMLElement).style.clipPath = `inset(0 ${100 - progressPercent}% 0 0)`;
+        });
+
+        // 🟢 THE LOOPING ENGINE INTERCEPTOR (Using Ref to prevent Stale State Bugs)
+        const engine = loopEngineRef.current;
+        if (engine.mode !== "off" && engine.target) {
+          // Safety: If user skips way outside the loop segment, kill the loop automatically.
+          if (currentTime < engine.target.start - 2 || currentTime > engine.target.end + 2) {
+             updateLoopState("off", null, false);
+          } else if (currentTime >= engine.target.end - 0.2) { 
+             // We hit the end boundary
+            if (engine.mode === "forever") {
+              ytPlayerRef.current.seekTo(engine.target.start, true);
+            } else if (engine.mode === "once" && !engine.hasLoopedOnce) {
+              updateLoopState("once", engine.target, true);
+              ytPlayerRef.current.seekTo(engine.target.start, true);
+            } else if (engine.mode === "once" && engine.hasLoopedOnce) {
+              updateLoopState("off", null, false);
+            }
+          }
+        }
+
         if (!isMobile || isPlayerExpanded) {
            setYtCurrentTime(currentTime);
         }
@@ -498,7 +656,7 @@ export default function DashboardPage() {
 
           {/* ========================================= */}
           {/* SECTION 2: SEARCH & MEDIA PLAYER          */}
-          <div className="rounded-2xl bg-surface-container-lowest md:p-5 border border-outline-variant/40 shadow-sm flex flex-col gap-3">
+          
              {/* ... [Keep existing Section 3 Search & Media Player content] ... */}
              
 
@@ -517,7 +675,8 @@ export default function DashboardPage() {
                   </div>
 
                   <div className="flex flex-col items-center justify-center flex-1">
-                    <div className="w-full aspect-square max-w-[320px] rounded-2xl overflow-hidden shadow-2xl mb-8 border border-outline-variant/20 bg-surface-container-high">
+                    {/* ✅ SURGICAL FIX: Relative container with floating Prev/Next buttons */}
+                    <div className="relative w-full aspect-square max-w-[320px] rounded-2xl overflow-hidden shadow-2xl mb-8 border border-outline-variant/20 bg-surface-container-high">
                       {activeYoutubeId ? (
                         <img src={`https://img.youtube.com/vi/${activeYoutubeId}/hqdefault.jpg`} alt="cover" className="w-full h-full object-cover opacity-90" />
                       ) : (
@@ -525,48 +684,71 @@ export default function DashboardPage() {
                           <span className="material-symbols-outlined text-[64px] text-outline-variant">music_note</span>
                         </div>
                       )}
+                      
+                      <button type="button" onClick={handleSkipPrevSection} className="absolute bottom-2 left-2 px-3 py-1.5 bg-black/50 hover:bg-black/70 backdrop-blur-md rounded-lg text-white font-black text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-md active:scale-95 border border-white/10 transition-all">
+                        <span className="material-symbols-outlined text-[16px]">skip_previous</span>Prev Section
+                      </button>
+                      <button type="button" onClick={handleSkipNextSection} className="absolute bottom-2 right-2 px-3 py-1.5 bg-black/50 hover:bg-black/70 backdrop-blur-md rounded-lg text-white font-black text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-md active:scale-95 border border-white/10 transition-all">
+                        Next Section<span className="material-symbols-outlined text-[16px]">skip_next</span>
+                      </button>
                     </div>
                     
-                    <div className="w-full text-center mb-8">
-                      <h2 className="font-black text-2xl text-on-surface tracking-tight mb-1 truncate">{activePracticeSong?.title || "Unknown Track"}</h2>
-                      <p className="font-bold text-sm text-on-surface-variant truncate">{activePracticeSong?.artist || "Unknown Artist"}</p>
+                    <div className="w-full flex items-center justify-between mb-8">
+                      <div className="flex flex-col flex-1 min-w-0 pr-4">
+                        <h2 className="font-black text-2xl text-on-surface tracking-tight mb-1 truncate">{activePracticeSong?.title || "Unknown Track"}</h2>
+                        <p className="font-bold text-sm text-on-surface-variant truncate">{activePracticeSong?.artist || "Unknown Artist"}</p>
+                      </div>
+                      
+                      <button 
+                        onClick={() => setIsChaptersModalOpen(true)}
+                        className="w-10 h-10 shrink-0 rounded-full bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-on-surface-variant hover:text-white hover:bg-surface-bright transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-[20px]">format_list_bulleted</span>
+                      </button>
                     </div>
 
+                    {/* ✅ SURGICAL FIX: Uncolored Anime Scrubber */}
                     <div className="w-full max-w-sm mb-8">
-                      <input 
-                        type="range" 
-                        min="0" max={ytDuration || 100} step="0.1"
-                        value={ytCurrentTime} 
-                        onChange={(e) => {
-                          const t = parseFloat(e.target.value);
-                          setYtCurrentTime(t);
-                          if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') ytPlayerRef.current.seekTo(t, true);
-                        }}
-                        className="w-full h-[6px] rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-primary [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all mb-2"
-                        style={{ background: `linear-gradient(to right, #38BDF8 ${seekPercentage}%, #333336 ${seekPercentage}%)`, WebkitAppearance: 'none' }}
-                      />
-                      <div className="flex justify-between text-[11px] font-mono font-bold text-on-surface-variant pointer-events-none">
-                        <span>{formatTime(ytCurrentTime)}</span>
-                        <span>-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
+                      <div className="relative w-full h-[8px] group flex items-center cursor-pointer mb-3">
+                        <div className="absolute w-full h-full flex gap-[2px] rounded-full overflow-hidden">
+                          {songSegments.map((seg, i) => (
+                            <div key={`bg-${i}`} className="h-full bg-white/20 transition-opacity" style={{ width: `${(seg.duration / ytDuration) * 100}%` }} title={seg.label} />
+                          ))}
+                        </div>
+                        <div className="segmented-scrubber-mask absolute w-full h-full flex gap-[2px] rounded-full overflow-hidden pointer-events-none" style={{ clipPath: `inset(0 ${100 - seekPercentage}% 0 0)` }}>
+                          {songSegments.map((seg, i) => (
+                            <div key={`fg-${i}`} className="h-full bg-[#38BDF8]" style={{ width: `${(seg.duration / ytDuration) * 100}%` }} />
+                          ))}
+                        </div>
+                        <input 
+                          type="range" min="0" max={ytDuration || 100} step="0.1" value={ytCurrentTime}
+                          onChange={(e) => { const t = parseFloat(e.target.value); setYtCurrentTime(t); if (ytPlayerRef.current) ytPlayerRef.current.seekTo(t, true); }}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                        />
+                      </div>
+                      <div className="flex justify-between items-center text-[11px] font-mono font-bold pointer-events-none">
+                        <span className="text-on-surface-variant">{formatTime(ytCurrentTime)}</span>
+                        <span className="px-3 py-1 rounded bg-[#38BDF8] text-zinc-950 uppercase tracking-widest text-[9px] shadow-sm font-black leading-none">{activeSegment?.label || "Track"}</span>
+                        <span className="text-on-surface-variant">-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
                       </div>
                     </div>
 
-                    <button 
-                      type="button"
-                      className="w-20 h-20 bg-primary text-on-primary rounded-full flex items-center justify-center shadow-[0_8px_24px_rgba(38,185,255,0.4)] active:scale-95 transition-transform cursor-pointer outline-none mb-4"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-                        if (ytPlaying) ytPlayerRef.current.pauseVideo();
-                        else ytPlayerRef.current.playVideo();
-                      }}
-                    >
-                      {ytPlaying ? (
-                        <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
-                      ) : (
-                        <svg viewBox="0 0 24 24" className="w-10 h-10 fill-currentColor ml-2"><path d="M8 5v14l11-7z" /></svg>
-                      )}
-                    </button>
+                    {/* ✅ SURGICAL FIX: 5-Button Track Skip Array (Mobile) */}
+                    <div className="flex items-center justify-center gap-4 sm:gap-6 mb-4 w-full px-4">
+                      <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90"><span className="material-symbols-outlined text-[28px]">replay_10</span></button>
+                      <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90"><span className="material-symbols-outlined text-[28px]">replay_5</span></button>
+
+                      <button 
+                        type="button"
+                        className="w-20 h-20 bg-primary text-on-primary rounded-full flex items-center justify-center shadow-[0_8px_24px_rgba(38,185,255,0.4)] active:scale-95 transition-transform cursor-pointer outline-none shrink-0"
+                        onClick={(e) => { e.stopPropagation(); if (!ytPlayerRef.current) return; if (ytPlaying) ytPlayerRef.current.pauseVideo(); else ytPlayerRef.current.playVideo(); }}
+                      >
+                        <span className="material-symbols-outlined text-[40px]" style={{ fontVariationSettings: "'FILL' 1" }}>{ytPlaying ? 'stop' : 'play_arrow'}</span>
+                      </button>
+
+                      <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90"><span className="material-symbols-outlined text-[28px]">forward_5</span></button>
+                      <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90"><span className="material-symbols-outlined text-[24px]">forward_10</span></button>
+                    </div>
                   </div>
                 </div>,
                 document.body
@@ -600,6 +782,18 @@ export default function DashboardPage() {
                         </div>
                       </div>
                       <div className="flex items-center gap-2.5 shrink-0 z-10">
+                        {/* ✅ SURGICAL FIX: Added Chapters button directly beside it */}
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation(); 
+                              setIsChaptersModalOpen(true);
+                            }}
+                            disabled={!activeYoutubeId}
+                            className="w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 disabled:opacity-50 text-on-surface-variant hover:text-white"
+                          >
+                            <span className="material-symbols-outlined text-[20px]">format_list_bulleted</span>
+                          </button>
+                          {/* ✅ SURGICAL FIX: Restored Play/Pause Button */}
                           <button 
                             onClick={(e) => {
                               e.stopPropagation(); 
@@ -616,6 +810,8 @@ export default function DashboardPage() {
                               <svg viewBox="0 0 24 24" className="w-8 h-8 fill-white ml-1"><path d="M8 5v14l11-7z" /></svg>
                             )}
                           </button>
+
+                          
                         </div>
                         
                         {/* ✅ SURGICAL FIX: Swapped to hardware-accelerated CSS Transforms via Callback Ref */}
@@ -674,51 +870,92 @@ export default function DashboardPage() {
                         </div>
                       </div>
 
+
+                       {/* ✅ SURGICAL FIX: Uncolored Desktop Scrubber & Chapters Button */}
                       <div className="w-full mt-4 mb-3 relative z-10">
-                        <div className="text-[10px] font-mono font-bold text-on-surface-variant mb-1.5 ml-1 select-none tracking-widest">
-                          {formatTime(ytCurrentTime)} / {formatTime(ytDuration)}
+                        <div className="flex justify-between items-end mb-2 ml-1 mr-1 select-none">
+                          <div className="text-[10px] font-mono font-bold text-on-surface-variant tracking-widest flex items-center gap-4">
+                            <span>{formatTime(ytCurrentTime)} / {formatTime(ytDuration)}</span>
+                            
+                          </div>
+                          <span className="px-2 py-0.5 rounded uppercase tracking-widest text-[9px] bg-[#38BDF8] text-zinc-950 shadow-sm font-black leading-none">
+                            {activeSegment?.label || "Track"}
+                          </span>
                         </div>
-                        <input 
-                          type="range"
-                          min="0"
-                          max={ytDuration || 100}
-                          step="0.1"
-                          value={ytCurrentTime}
-                          onChange={(e) => {
-                            const targetTime = Number(e.target.value);
-                            setYtCurrentTime(targetTime);
-                            if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-                              ytPlayerRef.current.seekTo(targetTime, true);
-                            }
-                          }}
-                          className="w-full h-[6px] rounded-full appearance-none outline-none cursor-pointer"
-                          style={{
-                            background: `linear-gradient(to right, #38BDF8 ${seekPercentage}%, #333336 ${seekPercentage}%)`,
-                            WebkitAppearance: 'none'
-                          }}
-                        />
+                        
+                        <div className="relative w-full h-[8px] group flex items-center cursor-pointer">
+                          <div className="absolute w-full h-full flex gap-[2px] rounded-full overflow-hidden">
+                            {songSegments.map((seg, i) => (
+                              <div key={`dt-bg-${i}`} className="h-full bg-white/20 transition-opacity" style={{ width: `${(seg.duration / ytDuration) * 100}%` }} title={seg.label} />
+                            ))}
+                          </div>
+                          <div className="segmented-scrubber-mask absolute w-full h-full flex gap-[2px] rounded-full overflow-hidden pointer-events-none" style={{ clipPath: `inset(0 ${100 - seekPercentage}% 0 0)` }}>
+                            {songSegments.map((seg, i) => (
+                              <div key={`dt-fg-${i}`} className="h-full bg-[#38BDF8]" style={{ width: `${(seg.duration / ytDuration) * 100}%` }} />
+                            ))}
+                          </div>
+                          <input 
+                            type="range" min="0" max={ytDuration || 100} step="0.1" value={ytCurrentTime}
+                            onChange={(e) => { const t = parseFloat(e.target.value); setYtCurrentTime(t); if (ytPlayerRef.current) ytPlayerRef.current.seekTo(t, true); }}
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                          />
+                        </div>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-3 relative z-10">
-                        <button 
-                          onClick={handleTogglePlay}
-                          disabled={!activeYoutubeId}
-                          className={`flex items-center justify-center gap-2 py-2 rounded-xl font-headline-title-mobile text-[13px] shadow-[0_4px_20px_rgba(37,99,235,0.4)] active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed ${ytPlaying ? 'bg-secondary-container text-on-secondary-container border border-secondary/20' : 'bg-primary border border-primary/20 text-on-primary'}`}
-                        >
-                          <span className="material-symbols-outlined text-[18px]" style={{ fontVariationSettings: "'FILL' 1" }}>
-                            {ytPlaying ? 'stop' : 'play_arrow'}
-                          </span>
-                          <span>{ytPlaying ? 'STOP' : 'PLAY'}</span>
-                        </button>
 
-                        <button 
-                          onClick={() => activePracticeSong && router.push(`/songs/${activePracticeSong.id}`)}
-                          disabled={!activePracticeSong}
-                          className="flex items-center justify-center gap-2 py-2 rounded-xl bg-surface-container-high hover:bg-surface-bright text-on-surface font-headline-title-mobile text-[13px] active:scale-95 transition-all border border-outline-variant/30 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                        >
-                          <span className="material-symbols-outlined text-[16px] text-secondary">lyrics</span>
-                          <span>Check Lyrics</span>
-                        </button>
+                      {/* ✅ 7-Button Seek Row for Desktop Inline Player */}
+                      <div className="flex items-center justify-between relative z-10 pt-1">
+                        <div className="flex items-center gap-1.5">
+                          <button type="button" disabled={!activeYoutubeId} onClick={handleSkipPrevSection} className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-500 hover:text-white bg-surface-container hover:bg-surface-container-high transition-colors cursor-pointer active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="material-symbols-outlined text-[18px]">skip_previous</span>
+                          </button>
+                          <button type="button" disabled={!activeYoutubeId} onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white bg-surface-container hover:bg-surface-container-high transition-colors cursor-pointer active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="material-symbols-outlined text-[18px]">replay_10</span>
+                          </button>
+                          <button type="button" disabled={!activeYoutubeId} onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white bg-surface-container hover:bg-surface-container-high transition-colors cursor-pointer active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="material-symbols-outlined text-[18px]">replay_5</span>
+                          </button>
+
+                          <button 
+                            type="button"
+                            disabled={!activeYoutubeId}
+                            className={`w-12 h-12 rounded-full flex items-center justify-center active:scale-95 transition-transform cursor-pointer outline-none shrink-0 shadow-md disabled:opacity-50 disabled:cursor-not-allowed ${ytPlaying ? 'bg-secondary-container text-on-secondary-container border border-secondary/20' : 'bg-primary border border-primary/20 text-on-primary'}`}
+                            onClick={handleTogglePlay}
+                          >
+                            <span className="material-symbols-outlined text-[24px]" style={{ fontVariationSettings: "'FILL' 1" }}>
+                              {ytPlaying ? 'stop' : 'play_arrow'}
+                            </span>
+                          </button>
+
+                          <button type="button" disabled={!activeYoutubeId} onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white bg-surface-container hover:bg-surface-container-high transition-colors cursor-pointer active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="material-symbols-outlined text-[18px]">forward_5</span>
+                          </button>
+                          <button type="button" disabled={!activeYoutubeId} onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white bg-surface-container hover:bg-surface-container-high transition-colors cursor-pointer active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="material-symbols-outlined text-[18px]">forward_10</span>
+                          </button>
+                          <button type="button" disabled={!activeYoutubeId} onClick={handleSkipNextSection} className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-500 hover:text-white bg-surface-container hover:bg-surface-container-high transition-colors cursor-pointer active:scale-90 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span className="material-symbols-outlined text-[18px]">skip_next</span>
+                          </button>
+                        </div>
+                        
+                        <div className="flex items-center gap-1.5">
+                          <button 
+                                onClick={() => setIsChaptersModalOpen(true)}
+                                className="px-2 py-2 rounded-xl bg-surface-container-high hover:bg-surface-bright text-on-surface font-headline-title-mobile text-[12px] active:scale-95 transition-all border border-outline-variant/30 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center gap-1.5 shadow-sm"
+                          >
+                                <span className="material-symbols-outlined text-[16px]">format_list_bulleted</span>
+                                {/* CHAPTERS */}
+                          </button>
+
+                          <button 
+                            onClick={() => activePracticeSong && router.push(`/songs/${activePracticeSong.id}`)}
+                            disabled={!activePracticeSong}
+                            className="px-2 py-2 rounded-xl bg-surface-container-high hover:bg-surface-bright text-on-surface font-headline-title-mobile text-[12px] active:scale-95 transition-all border border-outline-variant/30 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center gap-1.5 shadow-sm"
+                          >
+                            <span className="material-symbols-outlined text-[16px] text-secondary">lyrics</span>
+                            {/* <span className="hidden sm:inline">Check Lyrics</span> */}
+                          </button>
+                        </div>
                       </div>
                     </>
                   )}
@@ -738,21 +975,21 @@ export default function DashboardPage() {
               
               return CollapsedPlayer;
             })()}
-          </div>
+          
 
           {/* SECTION 4: MY ACTIVE PLANS */}
-          <div className="rounded-2xl bg-surface-container-lowest p-4 md:p-5 border border-outline-variant/40 shadow-sm flex flex-col gap-4">
+          <div className="rounded-3xl bg-surface-container-lowest p-5 md:p-6 border border-outline-variant/40 shadow-sm flex flex-col gap-4">
              {/* ... [Keep existing Section 4 My Active Plans content] ... */}
-             <div className="flex items-center justify-between">
+             <div className="flex items-center justify-between mb-1">
               <div className="flex items-center gap-2">
                 <span className="font-section-heading text-[16px] text-on-surface font-extrabold">My Active Plans</span>
                 <span className="px-2.5 py-0.5 rounded-full bg-surface-container-high border border-outline-variant/30 text-secondary font-label-sm text-[10px] font-bold shadow-inner">{userAssignedActivePlans.length} Assigned</span>
               </div>
-              
             </div>
 
-            {/* Search Input */}
-            <div className="relative z-20">
+            {/* ✅ SURGICAL FIX: Wrapped the Search Input and the Accordion List in a single flex-col with gap-2 to eliminate the awkward spacing */}
+            <div className="flex flex-col gap-2 relative z-20">
+              {/* Search Input */}
               <div className="relative flex items-center">
                 <span className="material-symbols-outlined absolute left-3 text-outline text-[20px]">search</span>
                 <input 
@@ -800,15 +1037,16 @@ export default function DashboardPage() {
               const totalSongsCount = evtSetlists.reduce((sum, sl) => sum + (sl.songs?.length || 0), 0);
 
               return (
-                <div key={evt.id} className="flex flex-col bg-surface-container-low border border-outline-variant/30 rounded-xl overflow-hidden shadow-sm">
+                <div key={evt.id} className="flex flex-col bg-surface-container border border-outline-variant/30 rounded-xl overflow-hidden shadow-sm">
                   
                   <div 
                     onClick={() => setIsSetlistAccordionOpen(prev => ({...prev, [evt.id]: !prev[evt.id]}))}
-                    className={`flex items-center justify-between p-3.5 hover:bg-surface-container transition-colors cursor-pointer select-none ${isAccordionOpen ? 'border-b border-outline-variant/20 bg-surface-container' : 'bg-surface-container-low'}`}
+                    className={`flex items-center justify-between p-3.5 hover:bg-surface-container-high transition-colors cursor-pointer select-none ${isAccordionOpen ? 'border-b border-outline-variant/20 bg-surface-container-high' : 'bg-surface-container'}`}
                   >
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-full bg-surface-container-highest border border-outline-variant/30 flex items-center justify-center">
-                        <span className="material-symbols-outlined text-on-surface-variant text-[16px]">calendar_month</span>
+                        {/* ✅ SURGICAL FIX: Reduced calendar icon to 14px to match sidebar specs */}
+                        <span className="material-symbols-outlined text-on-surface-variant text-[14px]">calendar_month</span>
                       </div>
                       <div className="flex flex-col">
                         <span className="font-section-heading text-[14px] text-on-surface font-extrabold truncate">{evt.title}</span>
@@ -835,9 +1073,10 @@ export default function DashboardPage() {
                               </div>
                               <button 
                                 onClick={() => router.push(`/setlists/${sl.id}/live`)}
-                                className="px-2.5 py-1.5 rounded-lg bg-primary-container/20 text-primary hover:bg-primary-container hover:text-on-primary-container text-[10px] font-bold flex items-center gap-1.5 transition-colors border border-primary/20 cursor-pointer"
+                                className="px-2.5 py-1.5 rounded-lg bg-primary-container/20 text-primary hover:bg-primary-container hover:text-on-primary-container text-[10px] font-bold flex items-center gap-1.5 transition-colors border border-primary/20 cursor-pointer shadow-sm"
                               >
-                                <span className="material-symbols-outlined text-[14px]">auto_awesome</span>
+                                {/* ✅ SURGICAL FIX: Reduced star icon from 14px to 12px */}
+                                <span className="material-symbols-outlined text-[12px]">auto_awesome</span>
                                 Launch Setlist
                               </button>
                             </div>
@@ -849,7 +1088,8 @@ export default function DashboardPage() {
 
                                 if (isExpanded) {
                                   return (
-                                    <div key={ss.id} className="rounded-xl bg-surface-container-high p-3.5 relative overflow-hidden border border-secondary/30 transition-all shrink-0 shadow-sm">
+                                    // ✅ SURGICAL FIX: Changed from bg-surface-container-high to bg-[#18181A] (matching the precision dark aesthetic)
+                                    <div key={ss.id} className="rounded-xl bg-[#18181A] p-3.5 relative overflow-hidden border border-secondary/30 transition-all shrink-0 shadow-sm">
                                       <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-secondary"></div>
                                       <div className="flex items-start justify-between gap-3 h-full">
                                         <div className="flex flex-col min-w-0">
@@ -859,7 +1099,8 @@ export default function DashboardPage() {
                                           </div>
                                           <span className="font-headline-title-mobile text-[15px] text-on-surface truncate font-bold leading-tight">{song.title}</span>
                                           <div className="flex items-center gap-2 mt-1 text-on-surface-variant">
-                                            <span className="font-body-compact text-[10px] text-on-surface font-bold">Key of {song.original_key || 'G'}</span><span>•</span>
+                                            {/* ✅ SURGICAL FIX: Display custom_key if it exists */}
+                                            <span className="font-body-compact text-[10px] text-on-surface font-bold">Key of {ss.custom_key || song.original_key || 'G'}</span><span>•</span>
                                             <span className="font-body-compact text-[10px] tnum">{song.tempo ? `${song.tempo} BPM` : '-- BPM'}</span>
                                           </div>
                                         </div>
@@ -888,7 +1129,8 @@ export default function DashboardPage() {
                                   );
                                 } else {
                                   return (
-                                    <div key={ss.id} onClick={() => setExpandedSetlistSong(prev => ({...prev, [sl.id]: ss.id}))} className="rounded-xl bg-surface-container p-2.5 flex items-center justify-between gap-3 border border-outline-variant/15 cursor-pointer hover:bg-surface-container-high hover:border-outline-variant/40 transition-colors shrink-0">
+                                    // ✅ SURGICAL FIX: Changed from bg-surface-container to bg-[#18181A] and border-zinc-800/80
+                                    <div key={ss.id} onClick={() => setExpandedSetlistSong(prev => ({...prev, [sl.id]: ss.id}))} className="rounded-xl bg-[#18181A] p-2.5 flex items-center justify-between gap-3 border border-zinc-800/80 cursor-pointer hover:border-zinc-700 transition-colors shrink-0 shadow-sm">
                                       <div className="flex items-center gap-3 min-w-0">
                                         <div className="w-7 h-7 rounded-lg bg-surface-container-highest flex items-center justify-center text-on-surface-variant shrink-0 font-section-heading text-[12px] font-black">{sIdx + 1}</div>
                                         <div className="flex flex-col min-w-0">
@@ -897,7 +1139,8 @@ export default function DashboardPage() {
                                             <span className="px-1.5 py-0.5 rounded bg-surface-container-highest border border-outline-variant/30 text-on-surface-variant font-badge-caps text-[7px] uppercase hidden sm:block">CHORDS</span>
                                           </div>
                                           <div className="flex items-center gap-2 mt-0.5 text-on-surface-variant">
-                                            <span className="font-body-compact text-[10px] text-on-surface">Key of {song.original_key || 'G'}</span><span>•</span>
+                                            {/* ✅ SURGICAL FIX: Display custom_key if it exists */}
+                                            <span className="font-body-compact text-[10px] text-on-surface">Key of {ss.custom_key || song.original_key || 'G'}</span><span>•</span>
                                             <span className="font-body-compact text-[10px] tnum">{song.tempo ? `${song.tempo} BPM` : '-- BPM'}</span>
                                           </div>
                                         </div>
@@ -926,8 +1169,8 @@ export default function DashboardPage() {
           {/* ========================================= */}
           {/* SECTION 5: UPCOMING EVENTS (REDESIGNED)   */}
           {/* ========================================= */}
-          <div className="rounded-2xl bg-surface-container-lowest md:p-5 border border-outline-variant/40 shadow-sm flex flex-col gap-3">
-            <div className="flex items-center justify-between px-4 pt-4 md:px-0 md:pt-0">
+          <div className="rounded-3xl bg-surface-container-lowest p-5 md:p-6 border border-outline-variant/40 shadow-sm flex flex-col gap-3">
+            <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <h2 className="font-extrabold text-[18px] text-on-surface tracking-tight">Upcoming Events Queue</h2>
                 <span className="w-2 h-2 rounded-full bg-cyan-400"></span>
@@ -937,7 +1180,7 @@ export default function DashboardPage() {
               </span>
             </div>
             
-            <div className="flex flex-col gap-2 px-4 pb-4 md:px-0 md:pb-0">
+            <div className="flex flex-col gap-2">
               {upcomingEventsSectionData.map((evt: any, idx: number) => {
                  const dateObj = new Date(evt.event_date || new Date());
                  const month = dateObj.toLocaleString('default', { month: 'short' }).toUpperCase();
@@ -978,10 +1221,10 @@ export default function DashboardPage() {
             </div>
           </div>
 
-        {/* ✅ SURGICAL FIX: MD Live Studio Launcher styled precisely to the new layout */}
+        {/* ✅ SURGICAL FIX: Fixed margin to mt-0 so it matches the gap-4 spacing of the flex parent */}
           <div 
             onClick={() => router.push('/md-live')}
-            className="flex items-center justify-between p-3 md:p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/40 hover:border-primary/50 transition-colors cursor-pointer group shadow-sm mt-1"
+            className="flex items-center justify-between p-5 md:p-6 rounded-3xl bg-surface-container-lowest border border-outline-variant/40 cursor-pointer group shadow-sm mt-0"
           >
             <div className="flex items-center gap-4 min-w-0">
               <div className="w-14 h-14 rounded-2xl bg-[#3B82F6] flex items-center justify-center shrink-0 shadow-[0_0_20px_-5px_rgba(59,130,246,0.6)] group-hover:shadow-[0_0_25px_-5px_rgba(59,130,246,0.8)] transition-shadow">
@@ -1074,6 +1317,77 @@ export default function DashboardPage() {
               )}
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* ✅ SURGICAL ADDITION: In-Video Chapters & Looping Modal */}
+      {isChaptersModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-150">
+          <div className="bg-surface-container rounded-t-3xl md:rounded-[2rem] shadow-2xl border-t border-x md:border border-outline-variant/30 w-full max-w-md flex flex-col max-h-[85vh] animate-in slide-in-from-bottom-full md:zoom-in-95 duration-300">
+            
+            <div className="flex items-center justify-between p-5 border-b border-outline-variant/20 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[20px] text-on-surface-variant">format_list_bulleted</span>
+                <h3 className="font-black text-[16px] text-on-surface">Song Sections</h3>
+              </div>
+              <button 
+                onClick={() => setIsChaptersModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant flex items-center justify-center transition-colors border border-outline-variant/30"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-1.5 pb-safe">
+              {songSegments.map((seg, idx) => {
+                const isActive = ytCurrentTime >= seg.start && ytCurrentTime < seg.end;
+                const isTargetedForLoop = loopTargetSegment?.label === seg.label && loopTargetSegment?.start === seg.start;
+                
+                return (
+                  <div 
+                    key={`chap-${idx}`}
+                    onClick={() => {
+                      if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+                        // ✅ SURGICAL FIX: Jumping sections kills active loops, leaves modal open
+                        updateLoopState("off", null, false);
+                        ytPlayerRef.current.seekTo(seg.start, true);
+                        setYtCurrentTime(seg.start);
+                      }
+                    }}
+                    className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors border ${isActive ? 'bg-primary/10 border-primary/30' : 'bg-surface-container hover:bg-surface-container-high border-transparent'}`}
+                  >
+                    <div className="flex flex-col min-w-0 flex-1">
+                      <span className={`font-bold text-[14px] truncate ${isActive ? 'text-primary' : 'text-on-surface'}`}>{seg.label}</span>
+                      <span className="font-mono text-[11px] text-on-surface-variant tracking-widest mt-0.5">{formatTime(seg.start)}</span>
+                    </div>
+
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation(); // Don't trigger the row jump
+                        if (isTargetedForLoop) {
+                           // Cycle logic: once -> forever -> off
+                           if (loopMode === "once") updateLoopState("forever", seg, false);
+                           else if (loopMode === "forever") updateLoopState("off", null, false);
+                        } else {
+                           updateLoopState("once", seg, false);
+                        }
+                      }}
+                      className={`w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-all ${isTargetedForLoop && loopMode !== "off" ? 'bg-primary text-on-primary shadow-md' : 'bg-surface-container-highest text-on-surface-variant hover:text-white hover:bg-surface-bright'}`}
+                      title="Toggle Loop Segment"
+                    >
+                       {isTargetedForLoop && loopMode === "once" ? (
+                         <span className="material-symbols-outlined text-[18px]">repeat_one</span>
+                       ) : isTargetedForLoop && loopMode === "forever" ? (
+                         <span className="material-symbols-outlined text-[18px]">repeat</span>
+                       ) : (
+                         <span className="material-symbols-outlined text-[18px] opacity-50 group-hover:opacity-100">repeat</span>
+                       )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
