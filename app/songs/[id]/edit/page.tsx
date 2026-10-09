@@ -1637,7 +1637,7 @@ export default function SongEditPage() {
         <div className="flex items-center justify-between px-4 md:px-8 py-3.5 w-full">
           <div className="flex items-center gap-3">
             <button type="button" onClick={handleAttemptDismissal} className="w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant font-bold flex items-center justify-center transition-colors">
-              <span className="material-symbols-outlined text-[18px]">arrow_back</span>
+              <span className="material-symbols-outlined !text-[18px]">arrow_back</span>
             </button>
             <h1 className="font-black text-base md:text-lg text-on-surface tracking-tight" style={{ fontFamily: "Georgia, serif" }}>
               Modify Worship Arrangement
@@ -1649,20 +1649,20 @@ export default function SongEditPage() {
             {editorActiveTab === "content" && (
               <>
                 <button type="button" onClick={handleOpenImportModal} className="px-3 py-1.5 text-[11px] font-black text-primary bg-primary-container/20 border border-primary/20 hover:bg-primary-container/40 rounded-lg shadow-sm flex items-center transition-colors">
-                  <span className="material-symbols-outlined text-[14px] mr-1">download</span> Import Raw
+                  <span className="material-symbols-outlined !text-[14px] mr-1">download</span> Import Raw
                 </button>
                 <button type="button" onClick={() => { const nextState = !isRealtimePreviewActive; setIsRealtimePreviewActive(nextState); if (!nextState) { setChordMode("Off"); setIsAddNotesModeActive(false); } }} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all flex items-center ${isRealtimePreviewActive ? 'bg-primary border-primary/50 text-on-primary shadow-md' : 'bg-surface-container border-outline-variant/30 text-on-surface-variant'}`}>
-                  <span className="material-symbols-outlined text-[14px] mr-1">{isRealtimePreviewActive ? 'visibility_off' : 'visibility'}</span> 
+                  <span className="material-symbols-outlined !text-[14px] mr-1">{isRealtimePreviewActive ? 'visibility_off' : 'visibility'}</span> 
                   {isRealtimePreviewActive ? "Hide Preview" : "Show Preview"}
                 </button>
           
                 <button type="button" disabled={!isRealtimePreviewActive} onClick={cycleChordMode} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all disabled:opacity-40 min-w-[110px] flex items-center ${chordMode !== "Off" ? 'bg-secondary border-secondary/50 text-on-secondary shadow-md' : 'bg-surface-container border-outline-variant/30 text-on-surface-variant'}`}> 
-                  <span className="material-symbols-outlined text-[14px] mr-1">music_note</span>
+                  <span className="material-symbols-outlined !text-[14px] mr-1">music_note</span>
                   Chords: {chordMode}
                 </button>
                 
                 <button type="button" disabled={!isRealtimePreviewActive} onClick={() => { setIsAddNotesModeActive(!isAddNotesModeActive); setChordMode("Off"); }} className={`px-3 py-1.5 text-[11px] font-black rounded-lg border transition-all disabled:opacity-40 flex items-center ${isAddNotesModeActive ? 'bg-purple-500 border-purple-400/50 text-white shadow-md' : 'bg-surface-container border-outline-variant/30 text-on-surface-variant'}`}>
-                  <span className="material-symbols-outlined text-[14px] mr-1">edit_note</span> Add Notes 
+                  <span className="material-symbols-outlined !text-[14px] mr-1">edit_note</span> Add Notes 
                 </button>
               </>
             )}
@@ -1675,7 +1675,7 @@ export default function SongEditPage() {
                 className={`px-4 py-1.5 rounded-lg font-black text-[11px] uppercase tracking-wider transition-all flex items-center ${isSaveDisabled ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed opacity-80" : "bg-primary hover:bg-primary/90 text-on-primary shadow-md cursor-pointer"}`} 
                 onClick={handleCommitSongChangesToDB}
               >
-                {isMismatched ? <><span className="material-symbols-outlined text-[14px] mr-1">lock</span> Mismatch</> : (!hasUnsavedChanges ? "No Changes" : "Save Arrangement")}
+                {isMismatched ? <><span className="material-symbols-outlined !text-[14px] mr-1">lock</span> Mismatch</> : (!hasUnsavedChanges ? "No Changes" : "Save Arrangement")}
               </button>
             )}
           </div>
@@ -1707,18 +1707,18 @@ export default function SongEditPage() {
           {editorActiveTab === "content" && (
             <div className="w-full bg-surface-container p-2 flex items-center gap-1.5 overflow-x-auto overflow-y-hidden flex-nowrap scrollbar-none border-t border-outline-variant/30 md:hidden">
               <button type="button" onClick={handleOpenImportModal} className="px-2.5 py-1.5 bg-surface-container-low border border-outline-variant/30 rounded-md text-[9px] font-black uppercase tracking-wider text-on-surface shrink-0 shadow-sm flex items-center">
-                <span className="material-symbols-outlined text-[14px] mr-1">download</span> Import
+                <span className="material-symbols-outlined !text-[14px] mr-1">download</span> Import
               </button>
               <button type="button" onClick={() => { const nextState = !isRealtimePreviewActive; setIsRealtimePreviewActive(nextState); if (!nextState) { setChordMode("Off"); setIsAddNotesModeActive(false); } }} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border shadow-sm transition-colors flex items-center ${isRealtimePreviewActive ? 'bg-primary border-primary/50 text-on-primary' : 'bg-surface-container-low border-outline-variant/30 text-on-surface'}`}>
-                <span className="material-symbols-outlined text-[14px] mr-1">{isRealtimePreviewActive ? 'visibility_off' : 'visibility'}</span> 
+                <span className="material-symbols-outlined !text-[14px] mr-1">{isRealtimePreviewActive ? 'visibility_off' : 'visibility'}</span> 
                 {isRealtimePreviewActive ? "Hide Live" : "Preview"}
               </button>
               <button type="button" disabled={!isRealtimePreviewActive} onClick={cycleChordMode} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border transition-all disabled:opacity-40 flex items-center ${chordMode !== "Off" ? 'bg-secondary border-secondary/50 text-on-secondary shadow-sm' : 'bg-surface-container-low border-outline-variant/30 text-on-surface'}`}>
-                <span className="material-symbols-outlined text-[14px] mr-1">music_note</span>
+                <span className="material-symbols-outlined !text-[14px] mr-1">music_note</span>
                 {chordMode === "Off" ? "Chords" : `Mode: ${chordMode}`}
               </button>
               <button type="button" disabled={!isRealtimePreviewActive} onClick={() => { setIsAddNotesModeActive(!isAddNotesModeActive); setChordMode("Off"); }} className={`px-2.5 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 border transition-all disabled:opacity-40 flex items-center ${isAddNotesModeActive ? 'bg-purple-500 border-purple-400/50 text-white shadow-sm' : 'bg-surface-container-low border-outline-variant/30 text-on-surface'}`}>
-                <span className="material-symbols-outlined text-[14px] mr-1">edit_note</span> Note Rows
+                <span className="material-symbols-outlined !text-[14px] mr-1">edit_note</span> Note Rows
               </button>
             </div>
           )}
@@ -1788,7 +1788,7 @@ export default function SongEditPage() {
               <div className="pt-4 mt-2 border-t border-outline-variant/30 space-y-4">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-full bg-error/10 text-error flex items-center justify-center font-black text-xs shrink-0 shadow-inner">
-                    <span className="material-symbols-outlined text-[18px]">play_arrow</span>
+                    <span className="material-symbols-outlined !text-[18px]">play_arrow</span>
                   </div>
                   <div>
                     <h4 className="text-[13px] font-black text-on-surface tracking-tight">YouTube Live Sync Engine</h4>
@@ -1854,7 +1854,7 @@ export default function SongEditPage() {
                                 className="h-[32px] px-2.5 bg-primary-container/30 hover:bg-primary text-primary hover:text-on-primary transition-colors flex items-center justify-center border-l border-outline-variant/30 cursor-pointer"
                                 title="Play from Offset"
                               >
-                                <span className="material-symbols-outlined text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>play_arrow</span>
+                                <span className="material-symbols-outlined !text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>play_arrow</span>
                               </button>
                             </div>
 
@@ -1865,7 +1865,7 @@ export default function SongEditPage() {
                               className="w-8 h-8 flex items-center justify-center bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg shrink-0 transition-colors border border-outline-variant/30 shadow-sm cursor-pointer"
                               title="Capture Current Time"
                             >
-                              <span className="material-symbols-outlined text-[16px]">pin_drop</span>
+                              <span className="material-symbols-outlined !text-[16px]">pin_drop</span>
                             </button>
 
                             {/* 3. Play from 0:00 */}
@@ -1881,7 +1881,7 @@ export default function SongEditPage() {
                               className="w-8 h-8 flex items-center justify-center bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg shrink-0 transition-colors border border-outline-variant/30 shadow-sm cursor-pointer"
                               title="Play from 0:00"
                             >
-                              <span className="material-symbols-outlined text-[16px]">skip_previous</span>
+                              <span className="material-symbols-outlined !text-[16px]">skip_previous</span>
                             </button>
 
                             {/* 4. Metronome Toggle */}
@@ -1895,7 +1895,7 @@ export default function SongEditPage() {
                               }`}
                               title={isMetronomeMuted ? "Unmute Clicks" : "Mute Clicks"}
                             >
-                              <span className="material-symbols-outlined text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>
+                              <span className="material-symbols-outlined !text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>
                                 {isMetronomeMuted ? 'volume_off' : 'volume_up'}
                               </span>
                             </button>
@@ -2001,7 +2001,7 @@ export default function SongEditPage() {
                               }}
                               className="px-2.5 py-1 border border-outline-variant/30 bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface font-black text-[10px] rounded-lg tracking-wider shadow-sm flex items-center lg:hidden transition-all"
                             >
-                              <span className="material-symbols-outlined text-[14px] mr-1">tune</span> Adjustments
+                              <span className="material-symbols-outlined !text-[14px] mr-1">tune</span> Adjustments
                             </button>
                           )}
 
@@ -2018,7 +2018,7 @@ export default function SongEditPage() {
                                     : 'border-outline-variant/30 bg-surface-container text-on-surface-variant opacity-60 cursor-not-allowed'
                                 }`}
                               >
-                                <span className="material-symbols-outlined text-[14px] mr-1">backspace</span>
+                                <span className="material-symbols-outlined !text-[14px] mr-1">backspace</span>
                                 Clear
                               </button>
                             );
@@ -2050,7 +2050,7 @@ export default function SongEditPage() {
 
                         {activeRole === "admin" && !isRealtimePreviewActive && (
                           <button type="button" className="w-6 h-6 rounded-lg bg-surface-container hover:bg-error/20 text-on-surface-variant hover:text-error text-xs border border-outline-variant/30 flex items-center justify-center ml-auto sm:ml-2 transition-colors cursor-pointer" onClick={() => { setHasUnsavedChanges(true); setFormSections(prev => prev.filter(x => x.id !== sec.id)); }}>
-                            <span className="material-symbols-outlined text-[16px]">close</span>
+                            <span className="material-symbols-outlined !text-[16px]">close</span>
                           </button>
                         )}
                       </div>
@@ -2060,7 +2060,7 @@ export default function SongEditPage() {
                       <div className="border border-dashed border-outline-variant/30 rounded-xl p-4 bg-surface-container/30 space-y-4">
                         {isSectionMismatched && (
                           <div className="text-[10px] font-black text-amber-400 bg-amber-500/10 border border-amber-500/30 p-2 rounded-lg leading-snug">
-                            <span className="material-symbols-outlined text-[14px] align-middle mr-1">warning</span> Alignment Warning: Line values sum up to <span className="font-mono">{Math.floor(totalManualAbsoluteBeats / 4)}m + {totalManualAbsoluteBeats % 4}b</span>. Please adjust properties to equal master total <span className="font-mono">{timingTuple.measures}m + {timingTuple.beats}b</span>.
+                            <span className="material-symbols-outlined !text-[14px] align-middle mr-1">warning</span> Alignment Warning: Line values sum up to <span className="font-mono">{Math.floor(totalManualAbsoluteBeats / 4)}m + {totalManualAbsoluteBeats % 4}b</span>. Please adjust properties to equal master total <span className="font-mono">{timingTuple.measures}m + {timingTuple.beats}b</span>.
                           </div>
                         )}
 
@@ -2205,7 +2205,7 @@ export default function SongEditPage() {
             </div>
             {activeRole === "admin" && (
               <button type="button" className="w-full border border-dashed border-outline-variant/50 py-3.5 text-center rounded-2xl text-primary hover:text-primary/80 font-black text-xs uppercase tracking-wider block hover:bg-surface-container-high transition-colors shadow-sm bg-surface-container-low flex items-center justify-center gap-1 cursor-pointer" onClick={() => { setSectionModalSearch(""); setSectionModalSelected(null); setSectionModalConfig({ isOpen: true, mode: "add" }); }}>
-                <span className="material-symbols-outlined text-[18px]">add_circle</span> Add New Section Enclosures
+                <span className="material-symbols-outlined !text-[18px]">add_circle</span> Add New Section Enclosures
               </button>
             )}
           </div>
@@ -2230,7 +2230,7 @@ export default function SongEditPage() {
                       <div className="flex items-center gap-2 shrink-0">
                         {activeRole === "admin" && (
                           <button type="button" onClick={(e) => { e.stopPropagation(); setHasUnsavedChanges(true); setFormSections(prev => prev.filter(x => x.id !== sec.id)); if (isSelectedNode) setSelectedSequenceId(null); }} className="text-[10px] font-bold text-on-surface-variant hover:text-error px-1 transition-colors cursor-pointer flex items-center">
-                            <span className="material-symbols-outlined text-[14px]">close</span> Remove
+                            <span className="material-symbols-outlined !text-[14px]">close</span> Remove
                           </button>
                         )}
                         <span className="material-symbols-outlined text-outline text-[16px] select-none">drag_handle</span>
@@ -2246,11 +2246,11 @@ export default function SongEditPage() {
                 {uniqueContentSectionsList.map(tmpl => (
                   <div key={tmpl.id} className="p-2.5 border border-outline-variant/30 bg-surface-container-lowest hover:bg-primary-container/10 hover:border-primary/50 rounded-xl flex items-center justify-between shadow-sm transition-all group select-none">
                     <span className="text-xs font-black text-on-surface uppercase tracking-wider flex items-center gap-1.5">
-                      <span className="material-symbols-outlined text-[14px] opacity-60 shrink-0 text-on-surface-variant">label</span> 
+                      <span className="material-symbols-outlined !text-[14px] opacity-60 shrink-0 text-on-surface-variant">label</span> 
                       {tmpl.type}
                     </span>
                     <button type="button" onClick={() => handleAddSectionBelow(tmpl)} className="w-6 h-6 rounded-lg bg-surface-container hover:bg-primary border border-outline-variant/30 hover:border-primary text-on-surface-variant group-hover:text-on-primary flex items-center justify-center font-black text-xs transition-colors cursor-pointer">
-                      <span className="material-symbols-outlined text-[16px]">add</span>
+                      <span className="material-symbols-outlined !text-[16px]">add</span>
                     </button>
                   </div>
                 ))}
@@ -2345,7 +2345,7 @@ export default function SongEditPage() {
           <div className="w-full bg-surface-container-low rounded-t-3xl md:rounded-3xl h-[85vh] md:h-[600px] max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
             <div className="relative flex items-center justify-center p-4 md:p-5 border-b border-outline-variant/30 bg-surface-container shrink-0">
               <button type="button" onClick={() => setSectionModalConfig({ isOpen: false, mode: "add" })} className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
-                <span className="material-symbols-outlined text-[16px]">close</span>
+                <span className="material-symbols-outlined !text-[16px]">close</span>
               </button>
               <h3 className="text-base font-black text-on-surface tracking-tight">{sectionModalConfig.mode === "add" ? "Add New Sections" : "Reassign Section"}</h3>
             </div>
@@ -2427,7 +2427,7 @@ export default function SongEditPage() {
                 <div className="relative flex flex-col items-center justify-center pt-4 border-b border-outline-variant/30 bg-surface-container shrink-0">
                   <div className="flex w-full px-4 items-center justify-center mb-4 relative">
                     <button type="button" onClick={() => setSectionAdjustmentsConfig({ isOpen: false, sectionType: null })} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright font-bold transition-colors cursor-pointer">
-                      <span className="material-symbols-outlined text-[16px]">close</span>
+                      <span className="material-symbols-outlined !text-[16px]">close</span>
                     </button>
                     <h3 className="text-[14px] font-black text-on-surface tracking-tight uppercase">{sType} Adjustments</h3>
                   </div>
@@ -2509,7 +2509,7 @@ export default function SongEditPage() {
             
             <div className="relative flex items-center justify-center p-4 border-b border-outline-variant/30 bg-surface-container shrink-0">
               <button type="button" onClick={() => { setMultiSelectedChords([]); setChordPickerConfig({ isOpen: false, sectionType: null, lineIdx: -1, wordIdx: -1, cleanWord: "" }); }} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
-                <span className="material-symbols-outlined text-[16px]">close</span>
+                <span className="material-symbols-outlined !text-[16px]">close</span>
               </button>
               <h3 className="text-[14px] font-black text-on-surface tracking-tight">Assign Notation</h3>
             </div>
@@ -2542,7 +2542,7 @@ export default function SongEditPage() {
               <div className="flex items-center justify-between mt-3 text-xs font-black text-on-surface-variant select-none">
                 <span>{pickerLayoutView === "family" ? `Key of ${formKey} Family` : "Manual Key Mode"}</span>
                 <button type="button" onClick={() => setPickerLayoutView(pickerLayoutView === "family" ? "manual" : "family")} className="text-primary flex items-center gap-1.5 hover:opacity-80 transition-opacity cursor-pointer">
-                  <span className="material-symbols-outlined text-[14px]">{pickerLayoutView === "family" ? "keyboard" : "auto_awesome"}</span>
+                  <span className="material-symbols-outlined !text-[14px]">{pickerLayoutView === "family" ? "keyboard" : "auto_awesome"}</span>
                   <span>{pickerLayoutView === "family" ? "Manual Input" : "Key Family"}</span>
                 </button>
               </div>
@@ -2601,7 +2601,7 @@ export default function SongEditPage() {
                         <option value="">Number</option>
                         {["2","4","5","6","7","9","11","13"].map(n => <option key={n} value={n} className="bg-surface-container text-on-surface">{n}</option>)}
                       </select>
-                      <span className="material-symbols-outlined text-[14px] text-on-surface-variant absolute right-3 pointer-events-none">arrow_drop_down</span>
+                      <span className="material-symbols-outlined !text-[14px] text-on-surface-variant absolute right-3 pointer-events-none">arrow_drop_down</span>
                     </div>
                   </div>
                 </div>
@@ -2651,7 +2651,7 @@ export default function SongEditPage() {
                   disabled={isFetchingLyrics} 
                   className="px-3 py-1.5 text-[10px] font-black text-purple-400 bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 rounded-lg shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
-                  <span className="material-symbols-outlined text-[14px]">
+                  <span className="material-symbols-outlined !text-[14px]">
                     {isFetchingLyrics ? "hourglass_empty" : "auto_awesome"}
                   </span>
                   {isFetchingLyrics ? "Searching..." : "Smart Fetch"}
@@ -2744,7 +2744,7 @@ export default function SongEditPage() {
           <form onSubmit={handleSaveModalKeySelection} className="bg-surface-container border border-outline-variant/30 rounded-xl shadow-2xl max-w-md w-full p-5 space-y-4 text-left relative">
             {/* ✅ SURGICAL FIX: Close Button */}
             <button type="button" onClick={() => setIsKeyPopupOpen(false)} className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant transition-colors cursor-pointer">
-              <span className="material-symbols-outlined text-[18px]">close</span>
+              <span className="material-symbols-outlined !text-[18px]">close</span>
             </button>
             
             <div className="space-y-0.5">
@@ -2767,7 +2767,7 @@ export default function SongEditPage() {
             {/* ✅ SURGICAL FIX: The Checkbox Toggle */}
             <div className="flex items-center gap-3 bg-surface-container-low border border-outline-variant/30 rounded-xl p-3 shadow-sm cursor-pointer" onClick={() => setTransposeChordsInText(!transposeChordsInText)}>
               <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${transposeChordsInText ? 'bg-primary border-primary text-on-primary' : 'bg-surface-container-highest border-outline-variant/50'}`}>
-                {transposeChordsInText && <span className="material-symbols-outlined text-[14px]">check</span>}
+                {transposeChordsInText && <span className="material-symbols-outlined !text-[14px]">check</span>}
               </div>
               <div className="flex flex-col">
                 <span className="text-[12px] font-black text-on-surface leading-none">Transpose text chords</span>

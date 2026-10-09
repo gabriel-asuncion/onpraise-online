@@ -518,7 +518,7 @@ export default function SongsListPage() {
             >
               <span className="w-1.5 h-1.5 rounded-full bg-secondary animate-pulse shadow-[0_0_8px_rgba(204,251,241,0.6)]"></span>
               <span className="font-bold text-[8px] uppercase tracking-widest text-secondary">{pendingSongsCount} Review</span>
-              <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
+              <span className="material-symbols-outlined !text-[18px] text-outline">chevron_right</span>
             </button>
           )}
 
@@ -548,7 +548,7 @@ export default function SongsListPage() {
         </datalist>
 
         <div className="flex flex-wrap items-center w-full bg-surface-container-low rounded-xl px-4 py-2.5 shadow-inner border border-outline-variant/30 gap-1.5 focus-within:bg-surface-container focus-within:border-secondary transition-all cursor-text" onClick={() => searchInputRef.current?.focus()}>
-          <span className="material-symbols-outlined text-outline text-[18px] mr-1">search</span>
+          <span className="material-symbols-outlined text-outline !text-[18px] mr-1">search</span>
           
           {/* Dynamic Typable Command Chips */}
           {renderInteractiveChip(":artist:", "artist")}
@@ -870,7 +870,7 @@ export default function SongsListPage() {
 
           <div className="mb-6">
             <h3 className="text-xl font-black text-on-surface tracking-tight flex items-center gap-2">
-              <span className="text-primary material-symbols-outlined">queue_music</span> Add New Song
+              <span className="text-primary material-symbols-outlined !text-[18px]">queue_music</span> Add New Song
             </h3>
             <p className="text-xs font-semibold text-on-surface-variant mt-1">
               Auto-transcribe YouTube link or start blank sheet
@@ -962,7 +962,7 @@ export default function SongsListPage() {
                   title="Paste from clipboard"
                   className="bg-surface-container-high border border-outline-variant/30 hover:bg-surface-bright text-on-surface px-4 py-3 rounded-xl flex items-center justify-center shadow-sm transition-colors disabled:opacity-50 shrink-0 cursor-pointer active:scale-95"
                 >
-                  <span className="material-symbols-outlined text-[18px]">content_paste</span>
+                  <span className="material-symbols-outlined !text-[18px]">content_paste</span>
                 </button>
               </div>
 
@@ -971,7 +971,7 @@ export default function SongsListPage() {
                 disabled={!ytUrlInput.trim() || ytLoading}
                 className="w-full mt-2 bg-primary hover:bg-primary/90 disabled:bg-surface-container-highest disabled:text-on-surface-variant text-on-primary px-4 py-3.5 rounded-xl text-[12px] font-black uppercase tracking-widest shadow-md transition-colors active:scale-[0.98] cursor-pointer border border-primary/20 flex items-center justify-center gap-2"
               >
-                <span className="material-symbols-outlined text-[18px]">{ytLoading ? "hourglass_empty" : "auto_awesome"}</span>
+                <span className="material-symbols-outlined !text-[18px]">{ytLoading ? "hourglass_empty" : "auto_awesome"}</span>
                 {ytLoading ? "SCANNING LINK..." : "CREATE FROM LINK"}
               </button>
 
