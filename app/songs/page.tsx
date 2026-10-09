@@ -518,7 +518,7 @@ export default function SongsListPage() {
             >
               <span className="w-1.5 h-1.5 rounded-full bg-secondary animate-pulse shadow-[0_0_8px_rgba(204,251,241,0.6)]"></span>
               <span className="font-bold text-[8px] uppercase tracking-widest text-secondary">{pendingSongsCount} Review</span>
-              <span className="material-symbols-outlined !text-[18px] text-outline">chevron_right</span>
+              <span className="material-symbols-outlined !text-[16px] text-outline">chevron_right</span>
             </button>
           )}
 
@@ -530,7 +530,7 @@ export default function SongsListPage() {
             >
               {/* <span className="material-symbols-outlined text-[12px] text-primary">dashboard</span> */}
               <span className="font-bold text-[9px] uppercase tracking-widest text-primary">Song Dashboard</span>
-              <span className="material-symbols-outlined text-[14px] text-primary">chevron_right</span>
+              <span className="material-symbols-outlined !text-[16px] text-primary">chevron_right</span>
             </button>
           )}
         </div>
