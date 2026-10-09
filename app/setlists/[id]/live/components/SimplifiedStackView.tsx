@@ -217,8 +217,8 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
 
                          <div className={`flex items-center gap-1 font-label-sm text-[11px] font-bold border rounded-md px-2 py-0.5 shadow-sm transition-colors ${isActive ? "text-primary bg-primary-container/10 border-primary/20" : "text-on-surface-variant bg-surface-container border-outline-variant/20"}`}>
                            {isActive && <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>}
-                           <span className={isActive ? "" : "material-symbols-outlined text-[12px] opacity-70"}>{isActive ? "" : "schedule"}</span>
-                           <span className="tnum">{getSectionDurationString(sec.section_name, isCurrentSong ? secIdx : undefined)} {isActive && "Rem."}</span>
+                           <span className={isActive ? "" : "material-symbols-outlined !text-[12px] opacity-70"}>{isActive ? "" : "schedule"}</span>
+                           <span className="tnum">{getSectionDurationString(sec.section_name, isCurrentSong ? secIdx : undefined)} {isActive}</span>
                          </div>
                        </div>
 

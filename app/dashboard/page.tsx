@@ -1046,7 +1046,7 @@ export default function DashboardPage() {
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-full bg-surface-container-highest border border-outline-variant/30 flex items-center justify-center">
                         {/* ✅ SURGICAL FIX: Reduced calendar icon to 14px to match sidebar specs */}
-                        <span className="material-symbols-outlined text-on-surface-variant text-[14px]">calendar_month</span>
+                        <span className="material-symbols-outlined text-on-surface-variant !text-[16px]">calendar_month</span>
                       </div>
                       <div className="flex flex-col">
                         <span className="font-section-heading text-[14px] text-on-surface font-extrabold truncate">{evt.title}</span>
@@ -1076,7 +1076,7 @@ export default function DashboardPage() {
                                 className="px-2.5 py-1.5 rounded-lg bg-primary-container/20 text-primary hover:bg-primary-container hover:text-on-primary-container text-[10px] font-bold flex items-center gap-1.5 transition-colors border border-primary/20 cursor-pointer shadow-sm"
                               >
                                 {/* ✅ SURGICAL FIX: Reduced star icon from 14px to 12px */}
-                                <span className="material-symbols-outlined text-[12px]">auto_awesome</span>
+                                <span className="material-symbols-outlined !text-[12px]">auto_awesome</span>
                                 Launch Setlist
                               </button>
                             </div>
@@ -1107,7 +1107,7 @@ export default function DashboardPage() {
                                         
                                         <div className="flex flex-col items-end justify-between h-full shrink-0 gap-3">
                                           <button onClick={(e) => { e.stopPropagation(); router.push(`/songs/${song.id}`); }} className="px-3 py-1.5 rounded-lg bg-primary-container hover:bg-primary border border-primary/20 text-on-primary font-label-sm text-[10px] font-bold flex items-center gap-1.5 shadow-sm active:scale-95 transition-all cursor-pointer">
-                                            <span className="material-symbols-outlined text-[14px]">music_note</span>View Chords
+                                            <span className="material-symbols-outlined !text-[16px]">music_note</span>View Chords
                                           </button>
                                           
                                           <div className="flex items-center gap-3 mt-auto">
@@ -1120,7 +1120,7 @@ export default function DashboardPage() {
                                               }}
                                               className="w-8 h-8 flex items-center justify-center rounded bg-white text-zinc-900 shadow-md hover:bg-zinc-200 active:scale-95 transition-all cursor-pointer"
                                             >
-                                              <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: "'FILL' 1" }}>play_arrow</span>
+                                              <span className="material-symbols-outlined !text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>play_arrow</span>
                                             </button>
                                           </div>
                                         </div>
@@ -1209,7 +1209,7 @@ export default function DashboardPage() {
                            <span className="bg-indigo-500/20 text-indigo-400 text-[9px] font-black px-1.5 py-0.5 rounded-md shrink-0">#{idx + 1}</span>
                          </div>
                          <div className="flex items-center gap-1 text-on-surface-variant">
-                           <span className="material-symbols-outlined text-[12px] shrink-0">schedule</span>
+                           <span className="material-symbols-outlined !text-[12px] shrink-0">schedule</span>
                            <span className="font-bold text-[11px] truncate max-w-[200px]">{slName}</span>
                          </div>
                        </div>
@@ -1227,9 +1227,9 @@ export default function DashboardPage() {
             className="flex items-center justify-between p-5 md:p-6 rounded-3xl bg-surface-container-lowest border border-outline-variant/40 cursor-pointer group shadow-sm mt-0"
           >
             <div className="flex items-center gap-4 min-w-0">
-              <div className="w-14 h-14 rounded-2xl bg-[#3B82F6] flex items-center justify-center shrink-0 shadow-[0_0_20px_-5px_rgba(59,130,246,0.6)] group-hover:shadow-[0_0_25px_-5px_rgba(59,130,246,0.8)] transition-shadow">
-                <span className="material-symbols-outlined text-[28px] text-white" style={{ fontVariationSettings: "'FILL' 1" }}>graphic_eq</span>
-              </div>
+              {/* <div className="w-10 h-10 rounded-full bg-[#3B82F6] flex items-center justify-center shrink-0 shadow-[0_0_20px_-5px_rgba(59,130,246,0.6)] group-hover:shadow-[0_0_25px_-5px_rgba(59,130,246,0.8)] transition-shadow">
+                <span className="material-symbols-outlined !text-[16px] text-white" style={{ fontVariationSettings: "'FILL' 1" }}>graphic_eq</span>
+              </div> */}
               <div className="flex flex-col min-w-0 pr-2">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="font-extrabold text-[18px] md:text-[20px] text-on-surface leading-none truncate tracking-tight">MD Live Studio</span>

@@ -4,9 +4,11 @@ interface MdLockModalProps {
   isMdLockModalOpen: boolean;
   setIsMdLockModalOpen: (val: boolean) => void;
   activeMDConnection: any;
+  handleToggleMusicDirectorMode?: () => void;
+  handleRequestMusicDirector?: () => void; // ✅ Added Request Prop
 }
 
-export function MdLockModal({ isMdLockModalOpen, setIsMdLockModalOpen, activeMDConnection }: MdLockModalProps) {
+export function MdLockModal({ isMdLockModalOpen, setIsMdLockModalOpen, activeMDConnection, handleToggleMusicDirectorMode, handleRequestMusicDirector }: MdLockModalProps) {
   if (!isMdLockModalOpen) return null;
 
   return (
@@ -45,18 +47,33 @@ export function MdLockModal({ isMdLockModalOpen, setIsMdLockModalOpen, activeMDC
         ) : (
           <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-4 shadow-inner">
             <p className="text-[11px] font-bold text-zinc-500 leading-relaxed">
-              No one is currently driving. Click the <strong className="text-zinc-800">settings gear (⚙️)</strong> in the top header and select <strong className="text-zinc-800">"Take Music Director Control"</strong> to unlock playback.
+              No one is currently driving. You can take over as the Music Director to unlock global playback controls.
             </p>
           </div>
         )}
 
-        <div className="pt-2">
+        <div className="pt-2 flex flex-col gap-2">
+          {/* ✅ SURGICAL FIX: Switches to "Request" if an MD exists, preventing hostile takeovers */}
           <button 
             type="button" 
-            onClick={() => { setIsMdLockModalOpen(false); }} // ✅ Unlocks hardware audio instantly
-            className="w-full py-3.5 bg-zinc-950 hover:bg-zinc-800 text-white font-black text-xs uppercase tracking-widest rounded-xl text-center shadow-md cursor-pointer transition-colors"
+            onClick={() => { 
+              if (activeMDConnection && handleRequestMusicDirector) handleRequestMusicDirector();
+              else if (handleToggleMusicDirectorMode) handleToggleMusicDirectorMode();
+              setIsMdLockModalOpen(false); 
+            }} 
+            className={`w-full flex flex-col items-center justify-center rounded-xl shadow-md cursor-pointer transition-colors py-3.5 ${activeMDConnection ? 'bg-amber-500 hover:bg-amber-600' : 'bg-blue-600 hover:bg-blue-700'}`}
           >
-            Understood
+            <span className="text-white font-black text-xs uppercase tracking-widest">
+              {activeMDConnection ? "Request MD Control" : "Takeover as MD"}
+            </span>
+          </button>
+
+          <button 
+            type="button" 
+            onClick={() => { setIsMdLockModalOpen(false); }} 
+            className="w-full py-3.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-500 font-black text-xs uppercase tracking-widest rounded-xl text-center cursor-pointer transition-colors"
+          >
+            Cancel
           </button>
         </div>
       </div>

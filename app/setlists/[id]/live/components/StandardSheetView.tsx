@@ -96,8 +96,8 @@ export function StandardSheetView(props: StandardSheetViewProps) {
 
                 <div className={`flex items-center gap-1 font-label-sm text-[11px] font-bold border rounded-md px-2 py-0.5 shadow-sm transition-colors ${isThisSectionActivePlayback ? "text-primary bg-primary-container/10 border-primary/20" : "text-on-surface-variant bg-surface-container border-outline-variant/20"}`}>
                   {isThisSectionActivePlayback && <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>}
-                  <span className={isThisSectionActivePlayback ? "" : "material-symbols-outlined text-[12px] opacity-70"}>{isThisSectionActivePlayback ? "" : "schedule"}</span>
-                  <span className="tnum">{formattedDuration} {isThisSectionActivePlayback && "Rem."}</span>
+                  <span className={isThisSectionActivePlayback ? "" : "material-symbols-outlined !text-[16px] opacity-70"}>{isThisSectionActivePlayback ? "" : "schedule"}</span>
+                  <span className="tnum">{formattedDuration} {isThisSectionActivePlayback}</span>
                 </div>
               </div>
 
@@ -123,7 +123,7 @@ export function StandardSheetView(props: StandardSheetViewProps) {
             <div onClick={() => { handleUserSelectTrackBadge(currentTrackIndex + 1); document.getElementById("fixed-live-header")?.scrollIntoView({ behavior: "smooth" }); }} className="w-full bg-surface-container-lowest border border-dashed border-outline-variant/30 hover:bg-surface-container-high rounded-2xl p-5 text-center cursor-pointer transition-all select-none group shadow-sm">
               <span className="text-[10px] font-black tracking-widest text-outline uppercase block mb-0.5">Up Next</span>
               <h4 className="font-extrabold text-[15px] text-on-surface group-hover:text-primary transition-colors flex justify-center items-center gap-1.5">
-                <span className="material-symbols-outlined text-[18px]">fast_forward</span>
+                <span className="material-symbols-outlined !text-[16px]">fast_forward</span>
                 {upcomingTrackItem.songs.title} 
                 <span className="font-bold opacity-70 text-[11px] px-1.5 py-0.5 rounded-md bg-surface-container-highest border border-outline-variant/30">
                   Key {upcomingTrackItem.custom_key || upcomingTrackItem.songs.original_key}

@@ -10,7 +10,7 @@ import {
 } from "../../../utils/supabase/actions";
 
 interface DBProfile { id: string; full_name: string; email: string; avatar_url?: string; ministries: string[]; unavailable_dates?: string[]; }
-interface MemberRow { id: string; role: string; user_id: string; profiles: DBProfile | null; isNew?: boolean; }
+interface MemberRow { id: string; role: string; user_id: string; profiles: DBProfile | null; isNew?: boolean; setlist_id?: string; } // ✅ Add setlist_id
 interface SetlistSongItem { 
   id: string; 
   sequence_order: number; 
@@ -150,7 +150,7 @@ export default function EventCockpitPage() {
   async function syncRosterUI(currentTeamId: string, allProfilesData: DBProfile[]) {
     const { data: rawRoster, error } = await supabase
       .from("event_rosters") 
-      .select("id, role, user_id")
+      .select("id, role, user_id, setlist_id") // ✅ Fetch setlist_id
       .eq("event_id", eventId);
 
     if (error) return;
@@ -368,43 +368,51 @@ export default function EventCockpitPage() {
     }
   }
 
-  function handleLocalAddOrMove(userId: string, targetRole: string, sourceRole: string | null = null) {
+  // ✅ SURGICAL FIX: Auto-Save logic for Lineups
+  async function handleLocalAddOrMove(userId: string, targetRole: string, sourceRole: string | null = null) {
     if (activeRole !== "admin") return;
-    if (stagedRoster.some(r => r.user_id === userId && r.role === targetRole)) return; 
+    
+    const isLegacyFallback = eventSetlists.length > 0 && eventSetlists[0].id === selectedSetlistId;
+    if (stagedRoster.some(r => r.user_id === userId && r.role === targetRole && (r.setlist_id === selectedSetlistId || (!r.setlist_id && isLegacyFallback)))) return; 
+    
+    // 1. Optimistic UI Update
     let newRoster = [...stagedRoster];
-    if (sourceRole && sourceRole !== targetRole) newRoster = newRoster.filter(r => !(r.user_id === userId && r.role === sourceRole));
+    let removedLegacyId: string | null = null;
+    
+    if (sourceRole && sourceRole !== targetRole) {
+      const itemToRemove = newRoster.find(r => r.user_id === userId && r.role === sourceRole && (r.setlist_id === selectedSetlistId || (!r.setlist_id && isLegacyFallback)));
+      if (itemToRemove && !itemToRemove.id.startsWith('temp-')) removedLegacyId = itemToRemove.id;
+      newRoster = newRoster.filter(r => r !== itemToRemove);
+    }
+    
     const p = profiles.find(x => x.id === userId);
-    setStagedRoster([...newRoster, { id: `temp-${Date.now()}`, role: targetRole, user_id: userId, profiles: p || null, isNew: true }]);
-    setHasChanges(true);
+    setStagedRoster([...newRoster, { id: `temp-${Date.now()}`, role: targetRole, user_id: userId, profiles: p || null, isNew: true, setlist_id: selectedSetlistId }]);
+    
+    // 2. Background Database Sync
+    try {
+      if (removedLegacyId) await supabase.from("event_rosters").delete().eq("id", removedLegacyId);
+      
+      const targetTeamId = activeEvent?.team_id || team?.id;
+      const payload: any = { event_id: eventId, user_id: userId, role: targetRole, setlist_id: selectedSetlistId };
+      if (targetTeamId && targetTeamId !== "00000000-0000-0000-0000-000000000000") { payload.team_id = targetTeamId; }
+      
+      await supabase.from("event_rosters").insert(payload);
+      
+      // Silently re-fetch to anchor the new database IDs to the UI
+      await syncRosterUI(targetTeamId, profiles);
+    } catch (err) { console.error(err); }
   }
   
-  function handleOriginalLocalRemove(rowId: string) { if (activeRole !== "admin") return; setStagedRoster(prev => prev.filter(r => r.id !== rowId)); setHasChanges(true); }
-  
-  async function saveLineupChanges() { 
-    if (activeRole !== "admin") return;
-    setIsDeploying(true); 
+  async function handleOriginalLocalRemove(rowId: string) { 
+    if (activeRole !== "admin") return; 
     
-    try {
-      const removedIds = roster.filter(r => !stagedRoster.some(sr => sr.id === r.id)).map(r => r.id); 
-      for (const id of removedIds) {
-        await supabase.from("event_rosters").delete().eq("id", id);
-      }
-
-      const addedRows = stagedRoster.filter(sr => sr.isNew); 
-      for (const row of addedRows) {
-        const targetTeamId = activeEvent?.team_id || team?.id;
-        const payload: any = { event_id: eventId, user_id: row.user_id, role: row.role };
-        if (targetTeamId && targetTeamId !== "00000000-0000-0000-0000-000000000000") { payload.team_id = targetTeamId; }
-        await supabase.from("event_rosters").insert(payload);
-      }
-
-      await syncRosterUI(eventId, profiles); 
-      setHasChanges(false);
-      setShowSuccessModal(true);
-    } catch (err: any) {
-      alert(`Runtime Exception: ${err.message || err}`);
-    } finally {
-      setIsDeploying(false); 
+    // 1. Optimistic UI Update
+    setStagedRoster(prev => prev.filter(r => r.id !== rowId)); 
+    
+    // 2. Background Database Sync
+    if (!rowId.startsWith('temp-')) {
+      await supabase.from("event_rosters").delete().eq("id", rowId);
+      await syncRosterUI(activeEvent?.team_id || team?.id, profiles);
     }
   }
 
@@ -612,8 +620,12 @@ export default function EventCockpitPage() {
   const songFilteredDatabaseSongs = allDatabaseSongs.filter(s => s.title.toLowerCase().includes(songSearchQuery.toLowerCase()));
   const targetFilterDate = activeEvent?.event_date ? activeEvent.event_date.split("T")[0] : ACTIVE_SERVICE_DATE;
   
-  const availablePool = profiles.filter(p => !stagedRoster.some(r => r.user_id === p.id) && !p.unavailable_dates?.includes(targetFilterDate));
-  const unavailablePool = profiles.filter(p => !stagedRoster.some(r => r.user_id === p.id) && p.unavailable_dates?.includes(targetFilterDate));
+  // ✅ SURGICAL FIX: Check if the user is in the *currently selected* setlist, allowing them to be assigned to others!
+  const isLegacyFallback = eventSetlists.length > 0 && eventSetlists[0].id === selectedSetlistId;
+  const isUserInCurrentSetlist = (userId: string) => stagedRoster.some(r => r.user_id === userId && (r.setlist_id === selectedSetlistId || (!r.setlist_id && isLegacyFallback)));
+
+  const availablePool = profiles.filter(p => !isUserInCurrentSetlist(p.id) && !p.unavailable_dates?.includes(targetFilterDate));
+  const unavailablePool = profiles.filter(p => !isUserInCurrentSetlist(p.id) && p.unavailable_dates?.includes(targetFilterDate));
 
   interface SetlistTreeBlock { parentGroup: string | null; parentColor: string; groups: { groupName: string | null; groupColor: string; items: { item: SetlistSongItem, globalIndex: number }[]; }[]; }
   const treeBlocks: SetlistTreeBlock[] = [];
@@ -721,7 +733,7 @@ export default function EventCockpitPage() {
                 }}
                 className="w-8 h-8 rounded-full bg-error/10 text-error hover:bg-error/20 flex items-center justify-center transition-colors border border-error/20 cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[16px]">close</span>
+                <span className="material-symbols-outlined !text-[16px]">close</span>
               </button> 
             )}
           </div>
@@ -776,7 +788,7 @@ export default function EventCockpitPage() {
                 onClick={handleOpenEditEventModal} 
                 className="w-8 h-8 rounded-full bg-surface-container-high flex items-center justify-center text-on-surface hover:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm"
               >
-                <span className="material-symbols-outlined text-[16px]">edit</span>
+                <span className="material-symbols-outlined !text-[16px]">edit</span>
               </button>
             )}
             <button 
@@ -900,7 +912,7 @@ export default function EventCockpitPage() {
                             className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer border ${isCopied ? 'bg-[#10b981]/20 text-[#10b981] border-[#10b981]/50' : 'bg-surface-container-highest text-on-surface-variant hover:text-on-surface hover:bg-surface-bright border-outline-variant/30'}`}
                             title="Copy Setlist"
                           >
-                            <span className="material-symbols-outlined text-[16px]">{isCopied ? 'check' : 'content_copy'}</span>
+                            <span className="material-symbols-outlined !text-[16px]">{isCopied ? 'check' : 'content_copy'}</span>
                           </button>
                           
                           {/* ✅ SURGICAL FIX: Delete Setlist Block Button */}
@@ -910,7 +922,7 @@ export default function EventCockpitPage() {
                               className="w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer border bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error/10 hover:border-error/30 border-outline-variant/30"
                               title="Delete Block"
                             >
-                              <span className="material-symbols-outlined text-[16px]">delete</span>
+                              <span className="material-symbols-outlined !text-[16px]">delete</span>
                             </button>
                           )}
                         </div>
@@ -948,7 +960,7 @@ export default function EventCockpitPage() {
                           className="inline-flex items-center gap-1 text-[11px] text-primary hover:text-primary-fixed font-bold group cursor-pointer transition-colors"
                         >
                           View Tracks Array
-                          <span className="material-symbols-outlined text-[14px] group-hover:translate-x-0.5 transition-transform">arrow_forward</span>
+                          <span className="material-symbols-outlined !text-[14px] group-hover:translate-x-0.5 transition-transform">arrow_forward</span>
                         </button>
                       </div>
                     </div>
@@ -1105,20 +1117,42 @@ export default function EventCockpitPage() {
           {/* BAND / MATRIX VIEW                        */}
           {/* ========================================= */}
           {viewSubScreen === "matrix" && (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+              
+              {/* ✅ SURGICAL ADDITION: Explicit Setlist Block Selector for Matrix Roster */}
+              {eventSetlists.length > 1 && (
+                <div className="bg-surface-container-low p-3 rounded-xl border border-outline-variant/30 flex items-center justify-between shadow-sm mb-2">
+                  <span className="text-[11px] font-black uppercase tracking-widest text-on-surface-variant">Editing Roster For:</span>
+                  <select 
+                    value={selectedSetlistId}
+                    onChange={(e) => {
+                      const newId = e.target.value;
+                      setSelectedSetlistId(newId);
+                      setSetlistSongs(allSetlistSongsMap[newId] || []);
+                      setStagedSetlistSongs(allSetlistSongsMap[newId] || []);
+                    }}
+                    className="bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-[12px] font-bold text-on-surface outline-none focus:border-primary transition-colors cursor-pointer max-w-[200px] truncate"
+                  >
+                    {eventSetlists.map(sl => <option key={sl.id} value={sl.id}>{sl.name}</option>)}
+                  </select>
+                </div>
+              )}
               
               <div className="flex flex-col gap-2 pt-1">
                 <div className="flex items-center justify-between px-2">
                   <span className="font-section-heading text-[16px] text-on-surface font-extrabold tracking-tight">Band Roster & Positions</span>
                   <button className="font-label-sm text-[12px] text-primary hover:text-primary-fixed flex items-center gap-0.5 transition-colors cursor-pointer" type="button">
                     <span>Manage Roles</span>
-                    <span className="material-symbols-outlined text-[16px]">chevron_right</span>
+                    <span className="material-symbols-outlined !text-[16px]">chevron_right</span>
                   </button>
                 </div>
                 <div className="flex items-center justify-between py-2 px-4 rounded-xl bg-surface-container-low border border-outline-variant/30 text-on-surface-variant font-label-sm text-[12px] shadow-sm">
                   <span className="text-on-surface font-bold">6 Roles Defined</span>
                   <div className="flex items-center gap-1.5">
-                    <span className="text-secondary font-bold">{stagedRoster.length} Assigned</span>
+                    {/* ✅ SURGICAL FIX: Calculate count strictly based on the selected setlist */}
+                    <span className="text-secondary font-bold">
+                      {stagedRoster.filter(r => r.setlist_id === selectedSetlistId || (!r.setlist_id && eventSetlists[0]?.id === selectedSetlistId)).length} Assigned
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1126,7 +1160,8 @@ export default function EventCockpitPage() {
               {/* STRICT 3-ROW 2-COL MATRIX */}
               <div className="grid grid-cols-2 gap-3 content-start">
                 {GRID_CARDS.map((cardRole) => {
-                  const list = stagedRoster.filter(m => m.role === cardRole);
+                  // ✅ SURGICAL FIX: Filter the roster explicitly by selectedSetlistId AND role
+                  const list = stagedRoster.filter(m => m.role === cardRole && (m.setlist_id === selectedSetlistId || (!m.setlist_id && eventSetlists[0]?.id === selectedSetlistId)));
                   const loadedUser = loadedUserId ? profiles.find(p => p.id === loadedUserId) : null;
                   const isQualified = loadedUser ? (loadedUser.ministries || []).includes(cardRole) : true;
                   const isDisabledDrop = loadedUserId && !isQualified;
@@ -1172,7 +1207,7 @@ export default function EventCockpitPage() {
                               loadedUserId ? "bg-primary border-primary text-on-primary animate-pulse shadow-md" : "bg-surface-container hover:bg-surface-bright text-outline hover:text-on-surface border-outline-variant/30"
                             }`}
                           >
-                            <span className="material-symbols-outlined text-[16px]">{loadedUserId ? "arrow_downward" : "add"}</span>
+                            <span className="material-symbols-outlined !text-[16px]">{loadedUserId ? "arrow_downward" : "add"}</span>
                           </button> 
                         )}
                       </div>
@@ -1247,14 +1282,7 @@ export default function EventCockpitPage() {
             </div>
           )}
 
-          {/* FLOATING SAVE BAR FOR MATRIX */}
-          <div className={`fixed bottom-24 left-4 right-4 md:left-auto md:right-8 bg-surface-container-highest/95 backdrop-blur-xl border border-outline-variant/40 p-4 flex items-center justify-between gap-4 rounded-2xl shadow-[0_8px_30px_rgba(0,0,0,0.5)] transition-all duration-300 z-[10000] ${hasChanges && activeRole === "admin" ? 'translate-y-0 opacity-100' : 'translate-y-16 opacity-0 pointer-events-none'}`}>
-            <p className="text-[13px] font-extrabold text-on-surface">Unsaved Lineup changes staged</p>
-            <div className="flex items-center gap-2">
-              <button type="button" onClick={() => { setStagedRoster(roster); setHasChanges(false); }} className="px-3 py-2 text-[11px] font-bold text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer">Discard</button>
-              <button type="button" onClick={saveLineupChanges} disabled={isDeploying} className="px-4 py-2 text-[11px] font-black text-on-primary bg-primary hover:bg-primary/90 rounded-xl shadow-md transition-all active:scale-95 cursor-pointer">{isDeploying ? 'Deploying...' : 'Save Lineup'}</button>
-            </div>
-          </div>
+          
 
         </div>
       </main>

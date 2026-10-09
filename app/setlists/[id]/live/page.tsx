@@ -30,10 +30,35 @@ import { TransposerModal } from "./components/TransposerModal";
 import { MdLockModal } from "./components/MdLockModal";
 import { ZenMovableFAB } from "./components/ZenMovableFAB";
 import { RecordRehearsalModal } from "./components/RecordRehearsalModal"; // ✅ Add this
+import { UserLobby } from "./components/UserLobby"; // ✅ Add this import
 
+// ✅ SURGICAL ADDITION: Timeline Segment Models & Color Engine
+interface SongSegment {
+  label: string;
+  start: number;
+  end: number;
+  duration: number;
+  color: string;
+  sectionIndex: number; // Added to easily map back to the active sections array
+}
 
+function getSectionColor(label: string) {
+  const l = label.toLowerCase();
+  if (l.includes('chorus')) return 'bg-orange-500';
+  if (l.includes('verse')) return 'bg-sky-500';
+  if (l.includes('bridge')) return 'bg-primary';
+  if (l.includes('intro') || l.includes('inst') || l.includes('inter')) return 'bg-emerald-500';
+  if (l.includes('outro')) return 'bg-purple-500';
+  if (l.includes('tag') || l.includes('pre')) return 'bg-secondary';
+  return 'bg-zinc-500';
+}
 
-
+function formatTime(seconds: number) {
+  if (!seconds || isNaN(seconds)) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 const supabase = createClient();
 
@@ -52,7 +77,7 @@ export default function SetlistPerformanceRoomPage() {
   useWakeLock();
   
   // ✅ SURGICAL FIX: Bring back fetchAndDecodeAudio
-  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio } = useWebAudioEngine();
+  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio } = useWebAudioEngine();
 
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
@@ -80,6 +105,8 @@ export default function SetlistPerformanceRoomPage() {
 
   useEffect(() => {
     if (typeof window === "undefined" || tracksList.length === 0) return;
+    
+    // 1. Preload Guide Cues
     const uniqueFiles = new Set<string>();
     tracksList.forEach(track => {
       const structure = track.custom_structure || [];
@@ -89,6 +116,13 @@ export default function SetlistPerformanceRoomPage() {
       });
     });
     uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${fileName}.wav`, fileName));
+
+    // 2. ✅ SURGICAL FIX: Explicitly Preload the Metronome Sounds!
+    const metronomeTypes = ["blip", "bell", "block", "glass"];
+    metronomeTypes.forEach(type => {
+      fetchAndDecodeAudio(`/sound_files/metronome_${type}_1.wav`, `metronome_${type}_1`);
+      fetchAndDecodeAudio(`/sound_files/metronome_${type}_2.wav`, `metronome_${type}_2`);
+    });
   }, [tracksList, fetchAndDecodeAudio]);
   // ============================================================================
 
@@ -123,9 +157,117 @@ export default function SetlistPerformanceRoomPage() {
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false); 
   const [isMdLockModalOpen, setIsMdLockModalOpen] = useState<boolean>(false);
   const [isAddBlockModalOpen, setIsAddBlockModalOpen] = useState<boolean>(false);
+
+  // ✅ SURGICAL ADDITION: Chapters & Looping Engine State
+  const [isChaptersModalOpen, setIsChaptersModalOpen] = useState(false);
+  const [isUserLobbyOpen, setIsUserLobbyOpen] = useState(false); 
   
+  // ✅ SURGICAL ADDITION: Chat Engine & MD Tracking State
+  const [lobbyMessages, setLobbyMessages] = useState<any[]>([]);
+  const prevMdRef = useRef<string | null>(null);
+  
+  // ✅ SURGICAL ADDITION: MD Request State
+  const [mdRequest, setMdRequest] = useState<any | null>(null);
+  
+  // ✅ SURGICAL FIX: Missing State Variables
+  const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+  const isUserLobbyOpenRef = useRef(isUserLobbyOpen);
+  
+  useEffect(() => {
+    isUserLobbyOpenRef.current = isUserLobbyOpen;
+    if (isUserLobbyOpen) setUnreadMessageCount(0); // Clear on open
+  }, [isUserLobbyOpen]);
+
+  // ✅ SURGICAL FIX: Initialize empty! Synced history timestamps will now trigger the badge.
+  const [lastReadTimes, setLastReadTimes] = useState<Record<string, number>>({});
+  
+  const totalUnreadCount = useMemo(() => {
+    let count = 0;
+    lobbyMessages.forEach(msg => {
+      if (msg.senderId === localPresenceUser?.id) return;
+      if (msg.targetUserId === localPresenceUser?.id) {
+        const lastRead = lastReadTimes[msg.senderId] || 0;
+        if (msg.timestamp > lastRead) count++;
+      } else if (!msg.targetUserId) {
+        const lastRead = lastReadTimes['global'] || 0;
+        if (msg.timestamp > lastRead) count++;
+      }
+    });
+    return count;
+  }, [lobbyMessages, lastReadTimes, localPresenceUser]);
+
+  const lobbyMessagesRef = useRef(lobbyMessages);
+  useEffect(() => { lobbyMessagesRef.current = lobbyMessages; }, [lobbyMessages]);
+
+  // ✅ SURGICAL ADDITION: Ping Engine State & UI Cooldown
+  const [pingAlert, setPingAlert] = useState<{ senderName: string, isWhisper: boolean, text: string } | null>(null);
+  const [pingCooldown, setPingCooldown] = useState<number>(0);
+
+  useEffect(() => {
+    if (pingCooldown > 0) {
+      const timer = setTimeout(() => setPingCooldown(prev => prev - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [pingCooldown]);
+
   // ✅ SURGICAL ADDITION: Smart Available Sections Fetcher
   const [availableSongSections, setAvailableSongSections] = useState<string[]>([]);
+
+  // Ephemeral Chat Sender
+  const sendChatMessage = (text: string, targetUserId?: string) => {
+    if (!localPresenceUserRef.current) return;
+    const msg = {
+      id: Math.random().toString(36).substring(2, 9),
+      senderId: localPresenceUserRef.current.id,
+      senderName: localPresenceUserRef.current.name || "User",
+      text,
+      targetUserId,
+      timestamp: Date.now(),
+      seenBy: [] // ✅ Initialize empty read receipt array
+    };
+    setLobbyMessages(prev => [...prev, msg].slice(-100)); // Keep last 100
+    if (realtimeChannelRef.current) {
+      realtimeChannelRef.current.send({ type: "broadcast", event: "lobby_chat", payload: msg });
+    }
+  };
+
+  // ✅ SURGICAL ADDITION: Network Read Receipt Broadcaster
+  const sendReadReceipt = (messageId: string) => {
+    if (!realtimeChannelRef.current || !localPresenceUserRef.current) return;
+    realtimeChannelRef.current.send({
+      type: "broadcast",
+      event: "lobby_chat_seen",
+      payload: {
+        messageId,
+        reader: {
+          id: localPresenceUserRef.current.id,
+          avatar: localPresenceUserRef.current.avatar,
+          initials: localPresenceUserRef.current.initials,
+          name: localPresenceUserRef.current.name
+        }
+      }
+    });
+  };
+
+  // ✅ SURGICAL FIX: Ephemeral Ping Sender now carries the message payload!
+  const sendPingMessage = (text: string, targetUserId?: string) => {
+    if (pingCooldown > 0) return;
+    setPingCooldown(60); // Start 60-second cooldown
+    
+    if (realtimeChannelRef.current && localPresenceUserRef.current) {
+      realtimeChannelRef.current.send({
+        type: "broadcast",
+        event: "lobby_ping",
+        payload: {
+          senderName: localPresenceUserRef.current.name || "User",
+          targetUserId: targetUserId || null,
+          text
+        }
+      });
+      // Mirror it as a local chat message so the sender sees it in their timeline
+      sendChatMessage(`🔔 Ping: ${text}`, targetUserId);
+    }
+  };
 
 
 
@@ -139,6 +281,7 @@ export default function SetlistPerformanceRoomPage() {
   const dragStartY = useRef<number | null>(null);
   const isDraggingRef = useRef(false);
   const isSwipingRef = useRef(false);
+  const swipeLockRef = useRef(false); // ✅ SURGICAL ADDITION: Prevent double-swiping
 
   // Safely extracts X and Y coordinates whether the user is touching or clicking
   const getClientPos = (e: React.TouchEvent | React.MouseEvent) => {
@@ -147,25 +290,24 @@ export default function SetlistPerformanceRoomPage() {
   };
 
   const handleDragStart = (e: React.TouchEvent | React.MouseEvent) => {
+    if (swipeLockRef.current) return; // ✅ Block interactions if actively snapping
     const { x, y } = getClientPos(e);
     dragStartX.current = x;
     dragStartY.current = y;
     isDraggingRef.current = true;
     isSwipingRef.current = false;
-    setSwipeTransition(false); // Turn off CSS easing so it sticks perfectly to the finger
+    setSwipeTransition(false); 
   };
 
   const handleDragMove = (e: React.TouchEvent | React.MouseEvent) => {
-    if (!isDraggingRef.current || dragStartX.current === null || dragStartY.current === null) return;
+    if (!isDraggingRef.current || dragStartX.current === null || dragStartY.current === null || swipeLockRef.current) return;
     
-    // Safety check: Disable drag if modals are open
     if (isSettingsModalOpen || isStructureModalOpen || isTransposerOpen || isRecordModalOpen) return;
 
     const { x, y } = getClientPos(e);
     const deltaX = x - dragStartX.current;
     const deltaY = y - dragStartY.current;
 
-    // Lock into swipe mode if they move 15px horizontally and aren't scrolling vertically
     if (!isSwipingRef.current) {
       if (Math.abs(deltaX) > 15 && Math.abs(deltaX) > Math.abs(deltaY)) {
         isSwipingRef.current = true;
@@ -177,7 +319,6 @@ export default function SetlistPerformanceRoomPage() {
       const isFirstSong = currentTrackIndexRef.current === 0;
       const isLastSong = currentTrackIndexRef.current === tracksListRef.current.length - 1;
       
-      // Apple-style "Rubber Banding" if trying to swipe past the first/last song
       if ((isFirstSong && deltaX > 0) || (isLastSong && deltaX < 0)) {
         resistanceDelta = deltaX * 0.25; 
       }
@@ -188,21 +329,30 @@ export default function SetlistPerformanceRoomPage() {
   const handleDragEnd = () => {
     if (!isDraggingRef.current) return;
     isDraggingRef.current = false;
-    setSwipeTransition(true); // Turn on CSS easing for the snap animation
+    setSwipeTransition(true); 
 
     if (isSwipingRef.current) {
       const deltaX = swipeOffsetX;
-      const threshold = 75; // Lowered to 75px for easier phone swiping
+      const threshold = 75; 
       const currentIndex = currentTrackIndexRef.current;
       
+      let didSwipe = false;
       if (deltaX > threshold && currentIndex > 0) {
         handleUserSelectTrackBadge(currentIndex - 1);
+        didSwipe = true;
       } else if (deltaX < -threshold && currentIndex < tracksListRef.current.length - 1) {
         handleUserSelectTrackBadge(currentIndex + 1);
+        didSwipe = true;
       }
-      setSwipeOffsetX(0); 
+
+      // ✅ SURGICAL FIX: Apply a 350ms lock to guarantee the CSS animation finishes cleanly
+      if (didSwipe) {
+        swipeLockRef.current = true;
+        setTimeout(() => { swipeLockRef.current = false; }, 350);
+      }
     }
     
+    setSwipeOffsetX(0); // ✅ Guarantee offset reset
     isSwipingRef.current = false;
     dragStartX.current = null;
     dragStartY.current = null;
@@ -214,19 +364,26 @@ export default function SetlistPerformanceRoomPage() {
       return;
     }
     const fetchAvailableSections = async () => {
-      const { data, error } = await supabase
-        .from("song_sections")
-        .select("section_name")
-        .eq("song_id", activeSong.id);
-        
-      if (!error && data) {
-        // Extract names and remove any potential duplicates
-        const uniqueNames = Array.from(new Set(data.map(s => s.section_name)));
-        setAvailableSongSections(uniqueNames);
+      try {
+        // ✅ SURGICAL FIX: Wrapped in try/catch to prevent aggressive Chrome Extensions
+        // from throwing unhandled network exceptions and crashing the React sync thread!
+        const { data, error } = await supabase
+          .from("song_sections")
+          .select("section_name")
+          .eq("song_id", activeSong.id);
+          
+        if (!error && data) {
+          // Extract names and remove any potential duplicates
+          const uniqueNames = Array.from(new Set(data.map(s => s.section_name)));
+          setAvailableSongSections(uniqueNames);
+        }
+      } catch (err) {
+        console.warn("Supabase fetch intercepted or failed:", err);
       }
     };
     fetchAvailableSections();
   }, [activeSong?.id]);
+
   const [isStructureModalOpen, setIsStructureModalOpen] = useState(false);
   const [draggedSectionIndex, setDraggedSectionIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -318,10 +475,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }, [loading]);
 
   useEffect(() => {
-    if (isPlayingFlow && !showSyncBack) {
+    // ✅ SURGICAL FIX: Removed `isPlayingFlow` so non-MDs jump to the section even when playback is paused!
+    if (!showSyncBack) {
       const activeLineId = `line-${currentSectionIndex}-${activeLineIndex}`;
       
-      // ✅ SURGICAL FIX: Isolate the query to ONLY the active song's container!
       const activeContainer = trackScrollRefs.current[currentTrackIndex]?.current;
       const targetLine = activeContainer?.querySelector(`#${activeLineId}`) || document.getElementById(activeLineId);
       
@@ -450,6 +607,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
   const beatMapRef = useRef<CompiledBeatMap>({ totalBeats: 0, nodes: [], sectionStartBeats: [] });
 
+  // ✅ SURGICAL ADDITION: Track YT setting for late-joiner sync
+  const isYoutubeSyncEnabledRef = useRef(isYoutubeSyncEnabled);
+  useEffect(() => { isYoutubeSyncEnabledRef.current = isYoutubeSyncEnabled; }, [isYoutubeSyncEnabled]);
+
   // ✅ Core Supabase Transmitter
   const sendSupabaseBroadcast = (payload: any) => {
     if (realtimeChannelRef.current) {
@@ -458,6 +619,14 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         event: "lobby_sync",
         payload
       });
+    }
+  };
+
+  // ✅ SURGICAL ADDITION: Synchronized YouTube Toggle wrapper
+  const handleSetYoutubeSync = (val: boolean) => {
+    setIsYoutubeSyncEnabled(val);
+    if (localPresenceUserRef.current?.isMD) {
+      sendSupabaseBroadcast({ action: "SYNC_YT_SETTING", value: val });
     }
   };
 
@@ -508,6 +677,12 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         localPresenceUserRef.current = downgradedPayload;
         if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(downgradedPayload);
         executeLocalResetSequence();
+      } else if (localPresenceUserRef.current?.id === payload.newMdId && !localPresenceUserRef.current?.isMD) {
+        // ✅ SURGICAL FIX: Explicitly upgrade the requester when the transfer is accepted!
+        const upgradedPayload = { ...localPresenceUserRef.current, isMD: true, updatedAt: Date.now() };
+        setLocalPresenceUser(upgradedPayload);
+        localPresenceUserRef.current = upgradedPayload;
+        if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(upgradedPayload);
       }
     }
     else if (payload.action === "MD_RELEASE") {
@@ -515,6 +690,70 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       setOnlineUsers(prev => prev.map(u => u.id === payload.releasedMdId ? { ...u, isMD: false } : u));
       executeLocalResetSequence(); 
     }
+    // ✅ SURGICAL ADDITION: MD Transfer Request Listeners
+    else if (payload.action === "MD_REQUEST") {
+      if (localPresenceUserRef.current?.isMD) setMdRequest(payload.requester);
+    }
+    else if (payload.action === "MD_REQUEST_REJECTED") {
+      if (localPresenceUserRef.current?.id === payload.requesterId) alert("The current Music Director declined your request.");
+    }
+    // ✅ SURGICAL ADDITION: Receive YouTube Setting Sync from MD
+    else if (payload.action === "SYNC_YT_SETTING") {
+      if (!localPresenceUserRef.current?.isMD) {
+        setIsYoutubeSyncEnabled(payload.value);
+      }
+    }
+    // ✅ SURGICAL FIX: Decentralized Chat History Auto-Sync
+    else if (payload.action === "CHAT_SYNC_REQUEST") {
+      // Allow ANYONE in the room with history to answer. This prevents failure if MD drops or desyncs!
+      if (lobbyMessagesRef.current.length > 0) {
+        const globalHistory = lobbyMessagesRef.current.filter(m => !m.targetUserId);
+        sendSupabaseBroadcast({ action: "CHAT_SYNC_RESPONSE", requesterId: payload.requesterId, history: globalHistory });
+      }
+      // ✅ SURGICAL ADDITION: MD automatically syncs their YouTube setting to the late-joiner!
+      if (localPresenceUserRef.current?.isMD) {
+        sendSupabaseBroadcast({ action: "SYNC_YT_SETTING", value: isYoutubeSyncEnabledRef.current });
+      }
+    }
+    else if (payload.action === "CHAT_SYNC_RESPONSE") {
+      if (payload.requesterId === localPresenceUserRef.current?.id) {
+        setLobbyMessages(prev => {
+          const existingIds = new Set(prev.map(m => m.id));
+          // ✅ Map incoming sync data to safely include seenBy arrays
+          const newMsgs = payload.history
+            .filter((m: any) => !existingIds.has(m.id))
+            .map((m: any) => ({ ...m, seenBy: m.seenBy || [] }));
+            
+          if (newMsgs.length === 0) return prev; 
+          return [...prev, ...newMsgs].sort((a, b) => a.timestamp - b.timestamp).slice(-100);
+        });
+      }
+    }
+  };
+
+  // ✅ SURGICAL ADDITION: MD Transfer Request Senders
+  const handleRequestMusicDirector = () => {
+    const currentMd = onlineUsers.find(u => u.isMD);
+    if (currentMd) {
+      sendSupabaseBroadcast({ action: "MD_REQUEST", requester: localPresenceUserRef.current });
+      alert("Transfer request sent to " + currentMd.name);
+    } else {
+      handleToggleMusicDirectorMode();
+    }
+  };
+
+  const handleAcceptMdRequest = (requesterId: string) => {
+    const downgraded = { ...localPresenceUserRef.current, isMD: false, updatedAt: Date.now() };
+    setLocalPresenceUser(downgraded);
+    localPresenceUserRef.current = downgraded;
+    if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(downgraded);
+    executeLocalResetSequence();
+    
+    // ✅ SURGICAL FIX: Delay the broadcast slightly to ensure Supabase presence updates cleanly for all clients!
+    setTimeout(() => {
+      sendSupabaseBroadcast({ action: "MD_TAKEOVER", newMdId: requesterId });
+    }, 150);
+    setMdRequest(null);
   };
 
   function executeStartSequence(useCountdown: boolean, forcedStartTimestamp?: number, isYtSource: boolean = false) {
@@ -607,17 +846,64 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         const presenceState = lobbyChannel.presenceState();
         let flatUsers = Object.values(presenceState).flat() as any[];
 
-        // 🛡️ ANTI-BOUNCE SHIELD
-        // If an instant broadcast arrived within the last 3 seconds, mathematically FORCE 
-        // the presence data to obey the broadcast, ignoring Supabase's slow cache!
+        // 🛡️ THE HIGHLANDER RULE & ANTI-BOUNCE SHIELD
+        // 1. Sort by most recent update so the newest claimant wins any MD collision
+        flatUsers.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        // ✅ SURGICAL FIX: Explicitly typed as 'any' to satisfy strict TypeScript rules
+        let mdClaimant: any = null;
+        flatUsers = flatUsers.map(u => {
+            if (u.isMD && !mdClaimant) {
+                mdClaimant = u;
+                return u;
+            } else if (u.isMD) {
+                return { ...u, isMD: false }; // Force strip MD from older claimants
+            }
+            return u;
+        });
+
+        // 2. Apply explicit manual override if a takeover happened in the last 3 seconds
         const override = latestMdBroadcastRef.current;
         if (Date.now() - override.timestamp < 3000) {
            flatUsers = flatUsers.map(u => ({ ...u, isMD: override.mdId === u.id }));
+           mdClaimant = flatUsers.find(u => u.isMD) || null;
         }
 
-        setOnlineUsers(flatUsers);
+        // ✅ SURGICAL FIX: MD Disconnect Detector & Auto-Assign
+        const currentMdId = mdClaimant ? mdClaimant.id : null;
+        if (prevMdRef.current && !currentMdId) {
+            // MD disconnected or relinquished without a successor!
+            executeLocalResetSequence(); // Instantly stop playback globally
+            
+            // Auto-assign the next senior connection (alphabetical by ID as deterministic tie-breaker)
+            if (flatUsers.length > 0) {
+                const nextMD = [...flatUsers].sort((a, b) => a.id.localeCompare(b.id))[0];
+                if (nextMD.id === localPresenceUserRef.current?.id) {
+                    const upgraded = { ...localPresenceUserRef.current, isMD: true, updatedAt: Date.now() };
+                    setLocalPresenceUser(upgraded);
+                    localPresenceUserRef.current = upgraded;
+                    if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(upgraded);
+                    sendSupabaseBroadcast({ action: "MD_TAKEOVER", newMdId: upgraded.id });
+                }
+            }
+        }
+        prevMdRef.current = currentMdId;
 
-        if (isPlayingRef.current && localPresenceUserRef.current?.isMD) {
+        // ✅ SURGICAL FIX: Strict mapping removes ghost users when they drop the connection!
+        const liveUserIds = new Set(Object.values(presenceState).flat().map((u: any) => u.id));
+        setOnlineUsers(flatUsers.filter(u => liveUserIds.has(u.id)));
+
+        // 3. If I locally think I'm MD, but the Highlander rule says someone else is, I must yield!
+        if (localPresenceUserRef.current?.isMD && mdClaimant && mdClaimant.id !== localPresenceUserRef.current.id) {
+            const downgradedPayload = { ...localPresenceUserRef.current, isMD: false, updatedAt: Date.now() };
+            setLocalPresenceUser(downgradedPayload);
+            localPresenceUserRef.current = downgradedPayload;
+            if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(downgradedPayload);
+            executeLocalResetSequence();
+        }
+
+        // 4. Ensure late-joiners get the start command if I'm currently playing
+        if (isPlayingRef.current && localPresenceUserRef.current?.isMD && (!mdClaimant || mdClaimant.id === localPresenceUserRef.current.id)) {
           sendSupabaseBroadcast({ 
             action: "START", 
             trackIndex: currentTrackIndexRef.current, 
@@ -630,10 +916,61 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       .on("broadcast", { event: "lobby_sync" }, ({ payload }) => {
         handleSyncCommand(payload);
       })
+      // ✅ SURGICAL ADDITION: Listen for ephemeral chat messages
+      .on("broadcast", { event: "lobby_chat" }, ({ payload }) => {
+        setLobbyMessages(prev => [...prev, { ...payload, seenBy: payload.seenBy || [] }].slice(-100));
+        if (!isUserLobbyOpenRef.current) setUnreadMessageCount(prev => prev + 1);
+      })
+      // ✅ SURGICAL ADDITION: Listen for network read receipts
+      .on("broadcast", { event: "lobby_chat_seen" }, ({ payload }) => {
+        setLobbyMessages(prev => prev.map(msg => {
+          // Remove this user's avatar from ALL older messages instantly
+          const filteredSeenBy = (msg.seenBy || []).filter((u: any) => u.id !== payload.reader.id);
+          
+          // Pin their avatar to the specific message they just saw!
+          if (msg.id === payload.messageId) {
+            return { ...msg, seenBy: [...filteredSeenBy, payload.reader] };
+          }
+          return { ...msg, seenBy: filteredSeenBy };
+        }));
+      })
+      // ✅ SURGICAL ADDITION: Listen for pings
+      .on("broadcast", { event: "lobby_ping" }, ({ payload }) => {
+        if (!payload.targetUserId || payload.targetUserId === localPresenceUserRef.current?.id) {
+          // ✅ Passed the text payload into the alert state
+          setPingAlert({ senderName: payload.senderName, isWhisper: !!payload.targetUserId, text: payload.text });
+          // ✅ SURGICAL FIX: Removed setTimeout. The modal is now persistent until dismissed manually.
+          
+          // Force wake audio context to play a native notification beep if possible
+          try {
+             const ctx = getAudioContext();
+             if (ctx && ctx.state === "running") {
+               const osc = ctx.createOscillator();
+               const gain = ctx.createGain();
+               osc.connect(gain); gain.connect(ctx.destination);
+               osc.type = "sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
+               gain.gain.setValueAtTime(0.1, ctx.currentTime);
+               gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+               osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.5);
+             }
+          } catch(e) {}
+        }
+      })
       .subscribe((status) => {
         if (status === "SUBSCRIBED") { 
           isChannelSubscribedRef.current = true; 
           lobbyChannel.track(localPresenceUserRef.current); 
+          // ✅ SURGICAL FIX: Request global chat history automatically when joining
+          // Increased buffer to 1200ms to guarantee WebSockets are fully established and tracking
+          setTimeout(() => {
+            if (realtimeChannelRef.current && localPresenceUserRef.current) {
+               realtimeChannelRef.current.send({
+                 type: "broadcast",
+                 event: "lobby_sync",
+                 payload: { action: "CHAT_SYNC_REQUEST", requesterId: localPresenceUserRef.current.id }
+               });
+            }
+          }, 1200);
         }
       });
 
@@ -642,6 +979,8 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }, [setlistId, localPresenceUser?.connectionId]);
 
   function executeJumpNow(targetTrackIdx: number, targetSectionIdx: number, jumpTime: number, isInitialStart: boolean = false) {
+    if (cancelFutureAudio) cancelFutureAudio(); // ✅ SURGICAL FIX: Kill all future ghost beats instantly
+    
     if (targetTrackIdx !== undefined && targetTrackIdx !== playingTrackIndexRef.current) mountTargetSetlistTrackIndex(targetTrackIdx);
     
     playingTrackIndexRef.current = targetTrackIdx !== undefined ? targetTrackIdx : currentTrackIndexRef.current;
@@ -717,6 +1056,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }
 
   function executeLocalResetSequence() {
+    if (cancelFutureAudio) cancelFutureAudio(); // ✅ SURGICAL FIX: Kill all future ghost beats instantly
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
@@ -843,6 +1183,46 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
   useEffect(() => { astTreeRef.current = memoizedSongAstTree; }, [memoizedSongAstTree]);
 
+  // ✅ SURGICAL ADDITION: Math Engine for the Chapters Modal
+  const songSegments = useMemo(() => {
+    const segments: SongSegment[] = [];
+    if (!activeSong || sections.length === 0) return segments;
+    
+    const offsetSec = (activeSong.youtube_sync_offset_ms || 0) / 1000;
+    const tempo = activeSong.tempo || 120;
+    const secPerBeat = 60 / tempo;
+    
+    let currentStartTime = offsetSec;
+    
+    sections.forEach((sec, idx) => {
+      let rawTimings = activeSong?.section_timings?.[sec.section_name];
+      if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
+      const timings = rawTimings || {};
+      
+      const beatsPerMeasure = 4; // Standardized for live
+      const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
+      const basePassBeats = ((Number(timings.measures) || 4) * beatsPerMeasure) + (Number(timings.beats) || 0);
+      const totalCoreBeats = basePassBeats * sectionMultiplier;
+      const headBeats = (Number(timings.head_m) || 0) * beatsPerMeasure;
+      const tailBeats = (Number(timings.tail_m) || 0) * beatsPerMeasure;
+      
+      let totalBeats = totalCoreBeats + headBeats + tailBeats;
+      if (totalBeats <= 0) totalBeats = 16; 
+      
+      const durationSec = totalBeats * secPerBeat;
+      segments.push({ 
+        label: sec.section_name, 
+        start: currentStartTime, 
+        end: currentStartTime + durationSec, 
+        duration: durationSec, 
+        color: getSectionColor(sec.section_name),
+        sectionIndex: idx
+      });
+      currentStartTime += durationSec;
+    });
+    
+    return segments;
+  }, [activeSong, sections]);
   // =========================================================================
   // ✅ SURGICAL ADDITION: PHASE 1 - THE MASTER SETLIST PARSING ENGINE
   // =========================================================================
@@ -1034,8 +1414,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           }
           handleSyncBack={() => setShowSyncBack(false)}
           showSyncBack={showSyncBack} 
-          // ✅ SURGICAL FIX: Hands the active ref directly to the Header!
           scrollContainerRef={trackScrollRefs.current[currentTrackIndex]} 
+          setIsUserLobbyOpen={setIsUserLobbyOpen} 
+          unreadMessageCount={totalUnreadCount} 
+          setIsChaptersModalOpen={setIsChaptersModalOpen} // ✅ Add prop to trigger modal
         />
       )}
 
@@ -1158,8 +1540,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}
         localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume} audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
-        isYoutubeSyncEnabled={isYoutubeSyncEnabled} setIsYoutubeSyncEnabled={setIsYoutubeSyncEnabled} youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}
-        canEditSong={canEditSong} 
+        isYoutubeSyncEnabled={isYoutubeSyncEnabled} 
+        setIsYoutubeSyncEnabled={handleSetYoutubeSync} // ✅ Pass the syncing wrapper
+        youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}
+        canEditSong={canEditSong}
         isRecording={isRecording} setIsRecordModalOpen={setIsRecordModalOpen} 
         recordingStartTime={recordingStartTime}
         isPaused={isPaused} recordingAccumulatedMs={recordingAccumulatedMs} 
@@ -1266,6 +1650,171 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       <MdLockModal 
         isMdLockModalOpen={isMdLockModalOpen} setIsMdLockModalOpen={setIsMdLockModalOpen} 
         activeMDConnection={onlineUsers.find(u => u.isMD && u.id !== localPresenceUser?.id)} 
+        handleToggleMusicDirectorMode={handleToggleMusicDirectorMode} 
+        handleRequestMusicDirector={handleRequestMusicDirector} // ✅ Pass the request func
+      />
+
+      {/* ✅ SURGICAL ADDITION: MD Transfer Prompt for the current MD */}
+      {mdRequest && (
+         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[400000] flex items-center justify-center p-4 animate-in fade-in">
+           <div className="bg-white rounded-[1rem] p-6 max-w-sm w-full text-center space-y-4 shadow-2xl animate-in zoom-in-95">
+              <div className="w-16 h-16 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mt-2 mb-2 shadow-inner">
+                <span className="material-symbols-outlined text-[32px]">swap_horiz</span>
+              </div>
+              <h3 className="text-xl font-black text-zinc-900 tracking-tight">MD Transfer Request</h3>
+              <p className="text-sm font-bold text-zinc-500"><strong>{mdRequest.name}</strong> wants to take over as Music Director.</p>
+              <div className="flex gap-3 pt-4">
+                 <button onClick={() => { sendSupabaseBroadcast({ action: "MD_REQUEST_REJECTED", requesterId: mdRequest.id }); setMdRequest(null); }} className="flex-1 py-3.5 rounded-xl bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-black text-xs uppercase tracking-widest transition-colors cursor-pointer">Decline</button>
+                 <button onClick={() => handleAcceptMdRequest(mdRequest.id)} className="flex-1 py-3.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-widest shadow-md transition-colors cursor-pointer">Transfer</button>
+              </div>
+           </div>
+         </div>
+      )}
+
+      {/* ✅ SURGICAL FIX: Persistent Ping Alert Modal (Blue Signature Theme) */}
+      {pingAlert && (
+        <div className="fixed inset-0 bg-zinc-950/80 backdrop-blur-sm z-[400000] flex items-center justify-center p-4 animate-in fade-in duration-100 select-none">
+          <div className="bg-white rounded-[1rem] p-6 md:p-8 max-w-sm w-full text-center space-y-5 shadow-2xl animate-in zoom-in-95 duration-100 relative border-t-4 border-blue-600">
+            <div className="w-14 h-14 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mt-1 mb-2 shadow-inner border border-blue-100">
+              <span className="material-symbols-outlined text-[28px] animate-bounce">notifications_active</span>
+            </div>
+            
+            <div className="space-y-1">
+              <h3 className="text-[18px] font-black text-zinc-900 tracking-tight">Team Alert</h3>
+              <p className="text-xs font-bold text-zinc-500">
+                <strong>{pingAlert.senderName}</strong> pinged {pingAlert.isWhisper ? "you privately" : "the team"}.
+              </p>
+            </div>
+
+            {/* ✅ SURGICAL FIX: Prominent Message Display Block (Solid Blue) */}
+            <div className="bg-blue-600 border border-blue-500 rounded-2xl p-4 shadow-sm text-left">
+              <p className="text-[14px] font-bold text-white leading-snug break-words">
+                {pingAlert.text}
+              </p>
+            </div>
+
+            <div className="pt-2 flex flex-col gap-2">
+              <button 
+                type="button" 
+                onClick={() => setPingAlert(null)} 
+                className="w-full py-3.5 bg-zinc-950 hover:bg-zinc-800 text-white font-black text-xs uppercase tracking-widest rounded-xl text-center shadow-md cursor-pointer transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ SURGICAL ADDITION: In-Video Chapters Modal for the Live Page */}
+      {isChaptersModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-150">
+          <div className="bg-surface-container rounded-t-3xl md:rounded-[2rem] shadow-2xl border-t border-x md:border border-outline-variant/30 w-full max-w-md flex flex-col max-h-[85vh] animate-in slide-in-from-bottom-full md:zoom-in-95 duration-300">
+            
+            <div className="flex items-center justify-between p-5 border-b border-outline-variant/20 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[20px] text-on-surface-variant">format_list_bulleted</span>
+                <h3 className="font-black text-[16px] text-on-surface">Song Chapters</h3>
+              </div>
+              <button 
+                onClick={() => setIsChaptersModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant flex items-center justify-center transition-colors border border-outline-variant/30"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-1.5 pb-safe">
+              {songSegments.length === 0 ? (
+                <div className="p-8 text-center text-outline font-body-compact italic">No chapters available for this arrangement.</div>
+              ) : (
+                songSegments.map((seg, idx) => {
+                  const isActive = currentSectionIndex === seg.sectionIndex;
+                  const isQueued = queuedSectionIndex === seg.sectionIndex; // ✅ Track Queue State
+                  const isMD = localPresenceUser?.isMD;
+                  
+                  return (
+                    <div 
+                      key={`chap-${idx}`}
+                      className={`group flex items-center justify-between p-3 rounded-xl transition-colors border ${isActive ? 'bg-primary/10 border-primary/30' : isQueued ? 'bg-purple-500/10 border-purple-500/30' : 'bg-surface-container border-transparent hover:bg-surface-container-high'}`}
+                    >
+                      <div className="flex flex-col min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                           <span className={`font-bold text-[14px] truncate ${isActive ? 'text-primary' : isQueued ? 'text-purple-400' : 'text-on-surface'}`}>{seg.label}</span>
+                           {isQueued && <span className="text-[8px] font-black bg-[#9333ea] text-white uppercase tracking-widest px-1.5 py-0.5 rounded shadow-sm border border-[#7e22ce]">⚡ QUEUED</span>}
+                        </div>
+                        <span className="font-mono text-[11px] text-on-surface-variant tracking-widest mt-0.5">{formatTime(seg.start)}</span>
+                      </div>
+  
+                      {isMD && !isActive ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          {/* ✅ SURGICAL ADDITION: Explicit Queue Button */}
+                          {!isQueued && (
+                            <button 
+                              onClick={(e) => {
+                                  e.stopPropagation(); // ✅ Prevents modal closure
+                                  setQueuedTrackIndex(currentTrackIndex); 
+                                  setQueuedSectionIndex(seg.sectionIndex); 
+                                  pendingQuantizedJumpRef.current = null;
+                                  sendSupabaseBroadcast({ action: "QUEUE", trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex });
+                              }}
+                              className="w-8 h-8 rounded-full flex items-center justify-center bg-surface-container-highest text-on-surface-variant hover:text-white hover:bg-[#9333ea] transition-colors border border-outline-variant/30"
+                              title="Queue Next"
+                            >
+                              <span className="material-symbols-outlined text-[16px]">queue_music</span>
+                            </button>
+                          )}
+
+                          {/* ✅ SURGICAL ADDITION: Explicit Play Now Button */}
+                          <button 
+                            onClick={(e) => {
+                                e.stopPropagation(); // ✅ Prevents modal closure
+                                jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play"; 
+                                if (!isPlayingFlow) {
+                                  const jumpTime = getGlobalTime() + 150; 
+                                  executeJumpNow(currentTrackIndex, seg.sectionIndex, jumpTime);
+                                  sendSupabaseBroadcast({ action: "JUMP", trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex, mdSectionStartTime: jumpTime });
+                                } else {
+                                  let jumpTime = getGlobalTime() + 150;
+                                  if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
+                                    const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
+                                    jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
+                                    pendingQuantizedJumpRef.current = { trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex, jumpTime };
+                                    setQueuedTrackIndex(currentTrackIndex); setQueuedSectionIndex(seg.sectionIndex);
+                                  } else { executeJumpNow(currentTrackIndex, seg.sectionIndex, jumpTime); }
+                                  sendSupabaseBroadcast({ action: "JUMP", trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex, mdSectionStartTime: jumpTime });
+                                }
+                            }}
+                            className="w-8 h-8 rounded-full flex items-center justify-center bg-primary-container text-primary hover:text-white hover:bg-primary transition-colors border border-primary/20"
+                            title="Play Now"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                          </button>
+                        </div>
+                      ) : (
+                         isActive && <span className="material-symbols-outlined text-[16px] text-primary mr-2 animate-pulse">equalizer</span>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <UserLobby 
+        isOpen={isUserLobbyOpen}
+        onClose={() => setIsUserLobbyOpen(false)} 
+        onlineUsers={onlineUsers} 
+        localPresenceUser={localPresenceUser} 
+        lobbyMessages={lobbyMessages}
+        sendChatMessage={sendChatMessage}
+        sendPingMessage={sendPingMessage}
+        sendReadReceipt={sendReadReceipt} // ✅ Pass read receipt trigger
+        pingCooldown={pingCooldown} 
+        lastReadTimes={lastReadTimes} 
+        setLastReadTimes={setLastReadTimes}
       />
 
       <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>

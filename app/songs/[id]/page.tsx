@@ -25,6 +25,34 @@ import { CompiledSectionToken, CompiledBeatMap, BeatNode, ArrangementSection, So
 import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote } from "../../setlists/[id]/live/utils/music-math";
 import { normalizeSectionNameToAudioFile } from "../../setlists/[id]/live/utils/setlist-helpers"; 
 
+// ✅ SURGICAL ADDITION: Timeline Segment Models & Color Engine
+interface SongSegment {
+  label: string;
+  start: number;
+  end: number;
+  duration: number;
+  color: string;
+  sectionIndex: number;
+}
+
+function getSectionColor(label: string) {
+  const l = label.toLowerCase();
+  if (l.includes('chorus')) return 'bg-orange-500';
+  if (l.includes('verse')) return 'bg-sky-500';
+  if (l.includes('bridge')) return 'bg-primary';
+  if (l.includes('intro') || l.includes('inst') || l.includes('inter')) return 'bg-emerald-500';
+  if (l.includes('outro')) return 'bg-purple-500';
+  if (l.includes('tag') || l.includes('pre')) return 'bg-secondary';
+  return 'bg-zinc-500';
+}
+
+function formatTime(seconds: number) {
+  if (!seconds || isNaN(seconds)) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 const { initAudioContext } = useWebAudioEngine();
 
 const supabase = createClient();
@@ -556,6 +584,49 @@ export default function SoloPracticeRoomPage() {
     astTreeRef.current = memoizedSongAstTree;
   }, [beatMap, memoizedSongAstTree]);
 
+  // ✅ SURGICAL ADDITION: Chapters Modal State & Math Engine
+  const [isChaptersModalOpen, setIsChaptersModalOpen] = useState(false);
+
+  const songSegments = useMemo(() => {
+    const segments: SongSegment[] = [];
+    if (!activeSong || sections.length === 0) return segments;
+    
+    const offsetSec = (activeSong.youtube_sync_offset_ms || 0) / 1000;
+    const tempo = activeSong.tempo || 120;
+    const secPerBeat = 60 / tempo;
+    
+    let currentStartTime = offsetSec;
+    
+    sections.forEach((sec, idx) => {
+      let rawTimings = activeSong?.section_timings?.[sec.section_name];
+      if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
+      const timings = rawTimings || {};
+      
+      const beatsPerMeasure = 4; // Standardized for live
+      const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
+      const basePassBeats = ((Number(timings.measures) || 4) * beatsPerMeasure) + (Number(timings.beats) || 0);
+      const totalCoreBeats = basePassBeats * sectionMultiplier;
+      const headBeats = (Number(timings.head_m) || 0) * beatsPerMeasure;
+      const tailBeats = (Number(timings.tail_m) || 0) * beatsPerMeasure;
+      
+      let totalBeats = totalCoreBeats + headBeats + tailBeats;
+      if (totalBeats <= 0) totalBeats = 16; 
+      
+      const durationSec = totalBeats * secPerBeat;
+      segments.push({ 
+        label: sec.section_name, 
+        start: currentStartTime, 
+        end: currentStartTime + durationSec, 
+        duration: durationSec, 
+        color: getSectionColor(sec.section_name),
+        sectionIndex: idx
+      });
+      currentStartTime += durationSec;
+    });
+    
+    return segments;
+  }, [activeSong, sections]);
+
   const getSectionDurationString = (sectionName: string, sectionIdx?: number) => {
     const timings = activeSong?.section_timings?.[sectionName] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
     const sectionMultiplier = (timings.repeats || 0) + 1;
@@ -606,6 +677,7 @@ export default function SoloPracticeRoomPage() {
           handleSyncBack={() => setShowSyncBack(false)}
           showSyncBack={showSyncBack} 
           scrollContainerRef={trackScrollRefs.current[0]}
+          setIsChaptersModalOpen={setIsChaptersModalOpen} // ✅ Add prop to trigger modal
         />
       )}
 
@@ -689,6 +761,99 @@ export default function SoloPracticeRoomPage() {
           handleResetFlowTrigger();
         }}
       />
+
+      {/* ✅ SURGICAL ADDITION: In-Video Chapters Modal for Solo Page */}
+      {isChaptersModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-150">
+          <div className="bg-surface-container rounded-t-3xl md:rounded-[2rem] shadow-2xl border-t border-x md:border border-outline-variant/30 w-full max-w-md flex flex-col max-h-[85vh] animate-in slide-in-from-bottom-full md:zoom-in-95 duration-300">
+            
+            <div className="flex items-center justify-between p-5 border-b border-outline-variant/20 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[20px] text-on-surface-variant">format_list_bulleted</span>
+                <h3 className="font-black text-[16px] text-on-surface">Song Chapters</h3>
+              </div>
+              <button 
+                onClick={() => setIsChaptersModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant flex items-center justify-center transition-colors border border-outline-variant/30"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-1.5 pb-safe">
+              {songSegments.length === 0 ? (
+                <div className="p-8 text-center text-outline font-body-compact italic">No chapters available for this arrangement.</div>
+              ) : (
+                songSegments.map((seg, idx) => {
+                  const isActive = currentSectionIndex === seg.sectionIndex;
+                  const isQueued = queuedSectionIndex === seg.sectionIndex; 
+                  
+                  return (
+                    <div 
+                      key={`chap-${idx}`}
+                      className={`group flex items-center justify-between p-3 rounded-xl transition-colors border ${isActive ? 'bg-primary/10 border-primary/30' : isQueued ? 'bg-purple-500/10 border-purple-500/30' : 'bg-surface-container border-transparent hover:bg-surface-container-high'}`}
+                    >
+                      <div className="flex flex-col min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className={`font-bold text-[14px] truncate ${isActive ? 'text-primary' : isQueued ? 'text-purple-400' : 'text-on-surface'}`}>{seg.label}</span>
+                          {isQueued && <span className="text-[8px] font-black bg-[#9333ea] text-white uppercase tracking-widest px-1.5 py-0.5 rounded shadow-sm border border-[#7e22ce]">⚡ QUEUED</span>}
+                        </div>
+                        <span className="font-mono text-[11px] text-on-surface-variant tracking-widest mt-0.5">{formatTime(seg.start)}</span>
+                      </div>
+  
+                      {!isActive ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          {/* Queue Button */}
+                          {!isQueued && (
+                            <button 
+                              onClick={(e) => {
+                                  e.stopPropagation();
+                                  setQueuedSectionIndex(seg.sectionIndex); 
+                                  pendingQuantizedJumpRef.current = null;
+                              }}
+                              className="w-8 h-8 rounded-full flex items-center justify-center bg-surface-container-highest text-on-surface-variant hover:text-white hover:bg-[#9333ea] transition-colors border border-outline-variant/30"
+                              title="Queue Next"
+                            >
+                              <span className="material-symbols-outlined text-[16px]">queue_music</span>
+                            </button>
+                          )}
+
+                          {/* Play Now Button */}
+                          <button 
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (!isPlayingFlow) {
+                                  const jumpTime = getGlobalTime() + 150; 
+                                  executeJumpNow(0, seg.sectionIndex, jumpTime);
+                                } else {
+                                  let jumpTime = getGlobalTime() + 150;
+                                  if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
+                                    const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
+                                    jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
+                                    pendingQuantizedJumpRef.current = { trackIndex: 0, sectionIndex: seg.sectionIndex, jumpTime };
+                                    setQueuedSectionIndex(seg.sectionIndex);
+                                    if (sectionsRef.current[seg.sectionIndex]) playGuideCue(sectionsRef.current[seg.sectionIndex].section_name);
+                                    hasPlayedCueRef.current = true;
+                                  } else { executeJumpNow(0, seg.sectionIndex, jumpTime); }
+                                }
+                            }}
+                            className="w-8 h-8 rounded-full flex items-center justify-center bg-primary-container text-primary hover:text-white hover:bg-primary transition-colors border border-primary/20"
+                            title="Play Now"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                          </button>
+                        </div>
+                      ) : (
+                         isActive && <span className="material-symbols-outlined text-[16px] text-primary mr-2 animate-pulse">equalizer</span>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {countdownValue !== null && (
         <div className="fixed inset-0 z-[400000] bg-zinc-950/90 backdrop-blur-md flex flex-col items-center justify-center animate-in fade-in duration-100 select-none touch-none">

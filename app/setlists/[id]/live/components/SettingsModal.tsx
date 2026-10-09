@@ -321,12 +321,15 @@ export function SettingsModal(props: SettingsModalProps) {
                     <span className="material-symbols-outlined text-[20px] text-primary">smart_display</span>
                     <div className="flex flex-col">
                       <span className="text-[13px] text-on-surface font-bold">YouTube Telemetry Sync</span>
-                      <span className="text-[11px] text-on-surface-variant">Lock stage clock to backing track</span>
+                      <span className="text-[11px] text-on-surface-variant">
+                        {alternateMD ? "Locked to Music Director" : "Lock stage clock to backing track"}
+                      </span>
                     </div>
                   </div>
                   <button 
+                    disabled={!!alternateMD} // ✅ Lock if there's an active MD
                     onClick={() => setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled)} 
-                    className={`relative inline-flex h-7 w-12 items-center rounded-full p-0.5 transition-colors focus:outline-none cursor-pointer ${isYoutubeSyncEnabled ? 'bg-[#2563eb]' : 'bg-surface-container-highest'}`} 
+                    className={`relative inline-flex h-7 w-12 items-center rounded-full p-0.5 transition-colors focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isYoutubeSyncEnabled ? 'bg-[#2563eb]' : 'bg-surface-container-highest'}`} 
                     type="button"
                   >
                     <span className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform duration-200 ease-in-out shadow-sm ${isYoutubeSyncEnabled ? 'translate-x-5' : 'translate-x-0 bg-outline'}`}></span>

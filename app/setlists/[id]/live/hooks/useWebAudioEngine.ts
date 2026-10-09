@@ -4,6 +4,9 @@ import { normalizeSectionNameToAudioFile } from "../utils/setlist-helpers";
 let globalAudioContext: AudioContext | null = null;
 const audioBufferCache: Record<string, AudioBuffer> = {};
 
+// ✅ SURGICAL FIX: Track scheduled nodes so we can kill ghost beats on jumps
+let scheduledNodes: { source: AudioBufferSourceNode; time: number }[] = [];
+
 export const initAudioContext = () => {
   if (typeof window !== "undefined" && !globalAudioContext) {
     globalAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -29,29 +32,33 @@ export const fetchAndDecodeAudio = async (url: string, key: string) => {
 };
 
 export const playZeroLatencyAudio = (key: string, volume: number = 1.0, time: number = 0) => {
-    // 1. Grab the context first
     const ctx = getAudioContext() || globalAudioContext; 
 
-    // 2. Safety Check: Abort if no context, if autoplay is blocked, or if audio file is missing
     if (!ctx || ctx.state === 'suspended' || !audioBufferCache[key]) {
-      return; 
+      return null; 
     }
 
-    // 3. Create the audio source and attach the memory buffer
     const source = ctx.createBufferSource();
     source.buffer = audioBufferCache[key];
 
-    // 4. Create the volume control (GainNode)
     const gainNode = ctx.createGain();
     gainNode.gain.value = volume;
 
-    // 5. Connect the wiring: Source -> Volume -> Speakers
     source.connect(gainNode);
     gainNode.connect(ctx.destination);
 
-    // 6. Fire the audio at the precise hardware time
-    source.start(time); 
-  };
+    // ✅ SURGICAL FIX: Clamp time to 0 to prevent RangeError crashes on deep section jumps
+    const safeTime = Math.max(0, time);
+    source.start(safeTime); 
+
+    // Track the scheduled sound in memory
+    scheduledNodes.push({ source, time: safeTime });
+    
+    // Memory cleanup: remove nodes that already finished playing
+    scheduledNodes = scheduledNodes.filter(n => n.time >= ctx.currentTime - 0.5);
+
+    return source;
+};
 
 export const playGuideCue = (rawSectionName: string) => {
   if (!rawSectionName) return;
@@ -61,12 +68,27 @@ export const playGuideCue = (rawSectionName: string) => {
 
 export const getAudioContext = () => globalAudioContext;
 
+// ✅ SURGICAL FIX: Function to sweep and kill any clicks scheduled in the future
+export const cancelFutureAudio = () => {
+  const ctx = getAudioContext() || globalAudioContext;
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  scheduledNodes.forEach(node => {
+      // If the node is scheduled to play right now or in the future, stop it!
+      if (node.time >= now) {
+          try { node.source.stop(); } catch(e) {}
+      }
+  });
+  scheduledNodes = []; // Clear the array
+};
+
 export function useWebAudioEngine() {
   return { 
-    initAudioContext, // ✅ Ensure this is exported!
+    initAudioContext, 
     fetchAndDecodeAudio, 
     playZeroLatencyAudio, 
     playGuideCue, 
-    getAudioContext 
+    getAudioContext,
+    cancelFutureAudio // ✅ Exported for the Live Page to use
   };
 }

@@ -134,7 +134,7 @@ export default function SongDashboardPage() {
             onClick={() => router.push("/songs/new/edit")}
             className="hidden sm:flex items-center gap-2 px-4 py-2 bg-primary text-on-primary rounded-xl font-black text-[11px] uppercase tracking-widest shadow-md hover:bg-primary/90 transition-colors cursor-pointer border border-primary/20"
           >
-            <span className="material-symbols-outlined text-[16px]">add</span> Add New Song
+            <span className="material-symbols-outlined !text-[16px]">add</span> Add New Song
           </button>
         </div>
 
@@ -239,7 +239,7 @@ export default function SongDashboardPage() {
                     <div className="flex flex-col mb-4 relative z-10">
                       <h2 className="text-xl text-white font-extrabold tracking-tight truncate leading-tight mb-1">{song.title}</h2>
                       <div className="flex items-center gap-1.5 text-zinc-400">
-                        <span className="material-symbols-outlined text-[16px]">mic</span>
+                        <span className="material-symbols-outlined !text-[16px]">mic</span>
                         <span className="text-[13px] font-semibold truncate">{song.artist || "Unknown Artist"}</span>
                       </div>
                     </div>

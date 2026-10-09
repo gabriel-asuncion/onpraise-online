@@ -237,7 +237,7 @@ export default function EventsManagerPage() {
                   href="/events/create-team"
                   className="px-4 py-2 md:px-5 md:py-2.5 bg-white border border-zinc-200 hover:border-blue-500 hover:text-blue-600 text-zinc-500 font-black text-[10px] md:text-xs rounded-xl shadow-sm transition-all active:scale-95 uppercase tracking-wider shrink-0 flex items-center gap-1.5"
                 >
-                  <span className="text-sm leading-none">🏛️</span> Create Team
+                 Create Team
                 </Link>
 
                 <button 
@@ -258,7 +258,7 @@ export default function EventsManagerPage() {
                 className="w-full px-4 py-3 flex items-center justify-between font-bold text-zinc-700 hover:bg-zinc-100 transition-colors text-xs uppercase tracking-wider outline-none"
               >
                 <div className="flex items-center gap-2.5">
-                  <span className="text-sm">🎛️</span>
+                  {/* <span className="text-sm">🎛️</span> */}
                   <span>Search Filters</span>
                   {isAnyFilterActive && (
                     <span className="bg-blue-100/50 text-blue-600 border border-blue-200/50 text-[9px] font-black tracking-wide px-2 py-0.5 rounded-md flex items-center gap-1">
@@ -394,9 +394,11 @@ export default function EventsManagerPage() {
                   </div>
                   
                   <div className="pt-4 border-t border-zinc-100 flex justify-between items-center text-[11px] font-bold text-zinc-400 mt-4 select-none">
-                    <span className={`${isPlanExpired ? "text-zinc-400 line-through" : "text-zinc-500 font-black tracking-tight"}`}>
-                      📅 {cleanEvtDate}
-                    </span>
+                    {/* ✅ SURGICAL FIX: Replaced Unicode emoji with Material Symbol */}
+                    <div className={`flex items-center gap-1.5 ${isPlanExpired ? "text-zinc-400 line-through" : "text-zinc-500 font-black tracking-tight"}`}>
+                      <span className="material-symbols-outlined !text-[16px]">calendar_month</span>
+                      <span>{cleanEvtDate}</span>
+                    </div>
                   </div>
                 </div>
               );

@@ -31,6 +31,9 @@ interface LiveHeaderProps {
   nextSectionName?: string;
   handleSyncBack?: () => void;
   showSyncBack?: boolean;
+  setIsUserLobbyOpen?: (val: boolean) => void;
+  unreadMessageCount?: number;
+  setIsChaptersModalOpen?: (val: boolean) => void; // ✅ Add this
 }
 
 export function LiveHeader({
@@ -41,7 +44,7 @@ export function LiveHeader({
   accentProgressBarRef, isSoloMode = false,
   wakeUpAudioEngine, 
   scrollContainerRef, activeSectionName, nextSectionName, handleSyncBack,
-  showSyncBack
+  showSyncBack, setIsUserLobbyOpen, unreadMessageCount = 0, setIsChaptersModalOpen
 }: LiveHeaderProps) {
   
   const [isExpanded, setIsExpanded] = useState(false);
@@ -120,14 +123,6 @@ export function LiveHeader({
             {activeSong?.title || "No Track Selected"}
           </h2>
           <div className="flex items-center gap-1.5 mt-0.5">
-            {!isSoloMode && displayedOnlineUsers.length > 0 && (
-               <div className="flex items-center gap-1 shrink-0">
-                  <div className="w-3.5 h-3.5 rounded-full bg-blue-600 flex items-center justify-center overflow-hidden">
-                    {displayedOnlineUsers[0].avatar ? <img src={displayedOnlineUsers[0].avatar} alt="" className="w-full h-full object-cover" /> : <span className="text-[5px] text-white font-bold">{displayedOnlineUsers[0].initials}</span>}
-                  </div>
-                  <span className="text-[9px] font-bold text-zinc-400 lowercase">online</span>
-               </div>
-            )}
             <span className="text-[11px] font-semibold text-zinc-400 truncate">
               {activeSong?.artist || "Unknown"}
             </span>
@@ -146,6 +141,31 @@ export function LiveHeader({
           </button>
         )}
 
+        {/* ✅ SURGICAL FIX: Mobile Lobby Button with Badge */}
+        {!isSoloMode && (
+          <button 
+            onClick={(e) => { e.stopPropagation(); setIsUserLobbyOpen?.(true); }}
+            className="relative w-8 h-8 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10 active:scale-95 transition-colors cursor-pointer"
+            title="Lobby"
+          >
+            <span className="material-symbols-outlined text-[18px]">group</span>
+            {unreadMessageCount > 0 && (
+              <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-black text-white shadow-sm border border-[#18181A]">
+                {unreadMessageCount > 9 ? '9+' : unreadMessageCount}
+              </span>
+            )}
+          </button>
+        )}
+
+        {/* ✅ SURGICAL ADDITION: Mobile Chapters Button */}
+        <button 
+          onClick={(e) => { e.stopPropagation(); setIsChaptersModalOpen?.(true); }}
+          className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10 active:scale-95 transition-colors"
+          title="Chapters"
+        >
+          <span className="material-symbols-outlined text-[18px]">format_list_bulleted</span>
+        </button>
+
         <button 
           onClick={(e) => { e.stopPropagation(); setIsSettingsModalOpen?.(true); }}
           className="w-8 h-8 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10 active:scale-95 transition-colors"
@@ -160,7 +180,8 @@ export function LiveHeader({
             if (wakeUpAudioEngine) wakeUpAudioEngine();
             handleToggleFlowPlaybackState();
           }}
-          className={`w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 ${isPlayingFlow ? "text-primary" : "text-white"}`}
+          // ✅ SURGICAL FIX: Play button glows blue if you are the MD!
+          className={`w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 ${isPlayingFlow || localPresenceUser?.isMD ? "text-primary" : "text-white"}`}
         >
           {isPlayingFlow ? <PauseIcon /> : <PlayIcon />}
         </button>
@@ -387,9 +408,35 @@ export function LiveHeader({
             </button>
           )}
 
+          {/* ✅ SURGICAL FIX: Desktop Lobby Button with Badge */}
+          {!isSoloMode && (
+            <button 
+              onClick={() => setIsUserLobbyOpen?.(true)}
+              className="relative w-10 h-10 rounded-full flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors cursor-pointer border border-outline-variant/30"
+              title="View Lobby"
+            >
+              <span className="material-symbols-outlined text-[20px]">group</span>
+              {unreadMessageCount > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-black text-white shadow-sm border border-surface">
+                  {unreadMessageCount > 9 ? '9+' : unreadMessageCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* ✅ SURGICAL ADDITION: Desktop Chapters Button */}
+          <button 
+            onClick={() => setIsChaptersModalOpen?.(true)}
+            className="w-10 h-10 rounded-full flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors cursor-pointer border border-outline-variant/30"
+            title="Chapters"
+          >
+            <span className="material-symbols-outlined text-[20px]">format_list_bulleted</span>
+          </button>
+
           <button 
             onClick={handleToggleFlowPlaybackState}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-transform active:scale-90 cursor-pointer ${isPlayingFlow ? "bg-primary-container text-primary shadow-sm" : "bg-transparent text-on-surface"}`}
+            // ✅ SURGICAL FIX: MD is Blue, non-MD is transparent/white
+            className={`w-12 h-12 rounded-full flex items-center justify-center transition-transform active:scale-90 cursor-pointer shadow-sm ${isPlayingFlow ? 'bg-primary-container text-primary' : (localPresenceUser?.isMD ? 'bg-primary text-on-primary shadow-md' : 'bg-transparent text-on-surface')}`}
           >
             {isPlayingFlow ? <PauseIcon /> : <PlayIcon />}
           </button>

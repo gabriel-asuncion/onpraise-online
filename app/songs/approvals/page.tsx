@@ -150,7 +150,7 @@ export default function ApprovalsDashboardPage() {
             onClick={() => router.push("/songs")}
             className="w-10 h-10 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant flex items-center justify-center font-bold transition-all active:scale-95 border border-outline-variant/30 cursor-pointer"
           >
-            <span className="material-symbols-outlined text-[18px]">arrow_back</span>
+            <span className="material-symbols-outlined !text-[16px]">arrow_back</span>
           </button>
           <div>
             <h2 className="text-xl md:text-2xl font-bold tracking-tight text-on-surface" style={{ fontFamily: "Georgia, serif" }}>
@@ -223,7 +223,7 @@ export default function ApprovalsDashboardPage() {
                   <div className="flex flex-col mb-4 relative z-10">
                     <h2 className="text-xl text-white font-extrabold tracking-tight truncate leading-tight mb-1">{song.title}</h2>
                     <div className="flex items-center gap-1.5 text-zinc-400">
-                      <span className="material-symbols-outlined text-[16px]">mic</span>
+                      <span className="material-symbols-outlined !text-[16px]">mic</span>
                       <span className="text-[13px] font-semibold truncate">{song.artist || "Unknown Artist"}</span>
                     </div>
                   </div>
@@ -300,7 +300,7 @@ export default function ApprovalsDashboardPage() {
               onClick={() => setFeedbackModal({ isOpen: false, songId: "", songTitle: "", feedback: "" })}
               className="absolute top-4 right-4 w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant flex items-center justify-center transition-colors cursor-pointer"
             >
-              <span className="material-symbols-outlined text-[18px]">close</span>
+              <span className="material-symbols-outlined !text-[16px]">close</span>
             </button>
             
             <div className="flex items-center gap-3 mb-4 border-b border-outline-variant/20 pb-4 pr-6">
