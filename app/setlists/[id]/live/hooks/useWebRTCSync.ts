@@ -25,6 +25,7 @@ export function useWebRTCSync(setlistId: string, isMD: boolean, onCommandReceive
 
     const initializeHost = async () => {
       const Peer = (await import("peerjs")).default;
+      if (!isMounted) return;
       if (peerRef.current) { peerRef.current.destroy(); connectionsRef.current.clear(); }
       
       setRtcStatus("connecting");
@@ -32,44 +33,64 @@ export function useWebRTCSync(setlistId: string, isMD: boolean, onCommandReceive
       
       peer.on("open", () => { if (isMounted) setRtcStatus("hosting"); });
       peer.on("connection", (conn) => {
-        conn.on("open", () => connectionsRef.current.set(conn.peer, conn));
-        conn.on("close", () => connectionsRef.current.delete(conn.peer));
-        conn.on("error", () => connectionsRef.current.delete(conn.peer));
+        if (!isMounted) return;
+        conn.on("open", () => {
+          if (isMounted) connectionsRef.current.set(conn.peer, conn);
+        });
+        conn.on("close", () => {
+          if (isMounted) connectionsRef.current.delete(conn.peer);
+        });
+        conn.on("error", () => {
+          if (isMounted) connectionsRef.current.delete(conn.peer);
+        });
       });
-      peer.on("disconnected", () => { if (!peer.destroyed) peer.reconnect(); });
+      peer.on("disconnected", () => {
+        if (isMounted && !peer.destroyed) peer.reconnect();
+      });
       peerRef.current = peer;
     };
 
     const initializeFollower = async () => {
       const Peer = (await import("peerjs")).default;
+      if (!isMounted) return;
       if (peerRef.current) { peerRef.current.destroy(); connectionsRef.current.clear(); }
       
       setRtcStatus("connecting");
       const peer = new Peer({ debug: 0 });
       
       peer.on("open", () => {
+        if (!isMounted) return;
         const conn = peer.connect(mdHostId, { reliable: false });
         
         conn.on("open", () => {
-          if (isMounted) setRtcStatus("connected");
-          connectionsRef.current.set(mdHostId, conn);
+          if (isMounted) {
+            setRtcStatus("connected");
+            connectionsRef.current.set(mdHostId, conn);
+          }
         });
 
         conn.on("data", (data: unknown) => {
+          if (!isMounted) return;
           handleCommandRef.current(data as SyncPayload);
         });
 
         conn.on("close", () => {
-          if (isMounted) setRtcStatus("disconnected");
+          if (!isMounted) return;
+          setRtcStatus("disconnected");
           if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
-          retryTimeoutRef.current = setTimeout(initializeFollower, 3000);
+          retryTimeoutRef.current = setTimeout(() => {
+            if (isMounted) void initializeFollower();
+          }, 3000);
         });
       });
 
       peer.on("error", () => {
-        if (isMounted) setRtcStatus("disconnected");
+        if (!isMounted) return;
+        setRtcStatus("disconnected");
         if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
-        retryTimeoutRef.current = setTimeout(initializeFollower, 3000);
+        retryTimeoutRef.current = setTimeout(() => {
+          if (isMounted) void initializeFollower();
+        }, 3000);
       });
 
       peerRef.current = peer;

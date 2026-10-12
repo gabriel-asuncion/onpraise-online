@@ -37,6 +37,7 @@ export function useSetlistData(setlistId: string, supabase: any) {
 
       try {
         const { data: setlistRow } = await supabase.from("setlists").select("name").eq("id", setlistId).maybeSingle();
+        if (!isCurrentActiveMount) return;
         if (setlistRow?.name) setNewSetlistName(setlistRow.name);
 
         const primaryResponse = await supabase
@@ -96,10 +97,16 @@ export function useSetlistData(setlistId: string, supabase: any) {
             setLoading(false);
           }
         } else {
-          setLoadingStatus("Handshake clean, but this setlist has no songs added to it yet.");
+          if (isCurrentActiveMount) {
+            setLoadingStatus("Handshake clean, but this setlist has no songs added to it yet.");
+            setLoading(false);
+          }
         }
       } catch (err: any) {
-        setLoadingStatus(`Critical Crash: ${err?.message || "Check connection parameters"}`);
+        if (isCurrentActiveMount) {
+          setLoadingStatus(`Critical Crash: ${err?.message || "Check connection parameters"}`);
+          setLoading(false);
+        }
       }
     }
 

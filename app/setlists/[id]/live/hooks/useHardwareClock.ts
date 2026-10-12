@@ -323,13 +323,10 @@ export function useHardwareClock(config: HardwareClockConfig) {
           c.setCurrentSectionIndex(nextSectionIdx);
           c.hasPlayedCueRef.current = false;
           c.mdSectionStartTimeRef.current = c.mdSectionStartTimeRef.current + totalDurationMs;
+        } else {
+          // Final section is complete: stop playback instead of letting elapsedMs grow forever.
+          c.handleAdvanceToNextSetlistTrack();
         }
-        
-        // ✅ SURGICAL FIX: The "Else" Boundary is DELETED!
-        // If nextSectionIdx >= secs.length, we do nothing.
-        // elapsedMs keeps ticking up endlessly.
-        // The metronome uses the fallback modulo math to keep clicking in time.
-        // The UI lock uses cappedElapsedMs to stay glued perfectly to the final line.
       }
     };
 

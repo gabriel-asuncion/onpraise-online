@@ -157,6 +157,19 @@ export default function SongsListPage() {
   const [ytResults, setYtResults] = useState<any[]>([]);
   const [isSearchingYt, setIsSearchingYt] = useState(false);
   const [isYtDropdownOpen, setIsYtDropdownOpen] = useState(false);
+  
+  // ✅ SURGICAL ADDITION: Ref to detect clicks outside the YouTube search dropdown
+  const ytSearchContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (isYtDropdownOpen && ytSearchContainerRef.current && !ytSearchContainerRef.current.contains(e.target as Node)) {
+        setIsYtDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [isYtDropdownOpen]);
 
   const pendingSongsCount = allDatabaseSongs.filter(song => song.approval_status === 'pending').length;
   // ✅ SURGICAL ADDITION: Calculate how many songs the current user owns
@@ -886,11 +899,18 @@ export default function SongsListPage() {
               </label>
 
               {/* SEARCH ROW */}
-              <div className="flex gap-2 relative mb-3">
+              <div ref={ytSearchContainerRef} className="flex gap-2 relative mb-3">
                 <input
                   type="text"
                   value={ytSearchQuery}
-                  onChange={(e) => setYtSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setYtSearchQuery(e.target.value);
+                    if (!isYtDropdownOpen) setIsYtDropdownOpen(true);
+                  }}
+                  onFocus={() => {
+                    // ✅ SURGICAL FIX: Re-open the dropdown if clicked and there are cached results
+                    if (ytSearchQuery.trim() !== "" && ytResults.length > 0) setIsYtDropdownOpen(true);
+                  }}
                   onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSearchYouTube(e); } }}
                   placeholder="e.g., 'Oceans Hillsong Live'..."
                   className="flex-1 w-full bg-surface-container-lowest border border-outline-variant/50 rounded-xl px-4 py-3 text-xs font-semibold text-on-surface outline-none focus:border-secondary shadow-inner transition-colors"

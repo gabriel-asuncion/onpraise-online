@@ -50,16 +50,31 @@ export async function GET(request: Request) {
     if (action === 'scrape') {
       if (!targetUrl) return NextResponse.json({ error: "Missing URL to scrape" }, { status: 400 });
 
-      // Helper function to fetch HTML, with a toggle to route through a proxy
-      const fetchLyricsHtml = async (url: string, useProxy = false) => {
-        const fetchUrl = useProxy ? `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` : url;
-        const res = await fetch(fetchUrl, {
+      // ✅ SURGICAL FIX: Direct backend fetch that mimics a standard browser to bypass Cloudflare
+      const fetchLyricsHtml = async (url: string) => {
+        const res = await fetch(url, {
+          // Setting standard browser headers prevents 403 Forbidden errors from Genius
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"macOS"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1'
           }
         });
+        
+        if (!res.ok) {
+           throw new Error(`Genius Scrape Blocked: ${res.status}`);
+        }
+        
         return await res.text();
       };
 
@@ -74,15 +89,18 @@ export async function GET(request: Request) {
         return extracted.trim();
       };
 
-      // 1. Attempt Direct Fetch
-      let html = await fetchLyricsHtml(targetUrl, false);
-      let rawLyrics = extractLyricsFromHtml(html);
-
-      // 2. Fallback to Proxy if Direct Fetch was blocked by Cloudflare (empty result)
-      if (!rawLyrics) {
-        console.log("⚠️ Direct scrape blocked by Cloudflare. Attempting proxy fetch...");
-        html = await fetchLyricsHtml(targetUrl, true);
+      let rawLyrics = "";
+      try {
+        const html = await fetchLyricsHtml(targetUrl);
         rawLyrics = extractLyricsFromHtml(html);
+        
+        if (!rawLyrics) {
+           console.error("🚨 HTML fetched but lyrics container not found.");
+           return NextResponse.json({ error: "Cloudflare bypassed, but Genius changed their HTML layout." }, { status: 500 });
+        }
+      } catch (e: any) {
+        console.error("🚨 Scraping Failed entirely.", e.message);
+        return NextResponse.json({ error: "Failed to scrape lyrics. Network or security block." }, { status: 500 });
       }
 
       // 3. Fatal Error if both fail

@@ -1771,9 +1771,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
                                 e.stopPropagation(); // ✅ Prevents modal closure
                                 jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play"; 
                                 if (!isPlayingFlow) {
-                                  const jumpTime = getGlobalTime() + 150; 
-                                  executeJumpNow(currentTrackIndex, seg.sectionIndex, jumpTime);
-                                  sendSupabaseBroadcast({ action: "JUMP", trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex, mdSectionStartTime: jumpTime });
+                                  // ✅ SURGICAL FIX: "Play Now" while stopped actually STARTS the playback from this chapter!
+                                  currentSectionIndexRef.current = seg.sectionIndex;
+                                  setCurrentSectionIndex(seg.sectionIndex);
+                                  executeStartSequence(false, undefined, isYoutubeSyncEnabled && !!youtubeVideoId);
                                 } else {
                                   let jumpTime = getGlobalTime() + 150;
                                   if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
@@ -1819,7 +1820,8 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
       <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>
       
-      {(countdownValue !== null || isYtBuffering) && (
+      {/* ✅ SURGICAL FIX: The buffering overlay is completely forbidden from rendering if playback is stopped. */}
+      {(countdownValue !== null || (isYtBuffering && isPlayingFlow)) && (
         <div className="fixed inset-0 z-[400000] bg-zinc-950/90 backdrop-blur-md flex flex-col items-center justify-center animate-in fade-in duration-100 select-none touch-none">
           {countdownValue !== null ? (
             <>
