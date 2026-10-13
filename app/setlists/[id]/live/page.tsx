@@ -272,91 +272,43 @@ export default function SetlistPerformanceRoomPage() {
 
 
   // =========================================================================
-  // ✅ SURGICAL FIX: UNIFIED PHYSICS-BASED DRAG ENGINE (Mouse + Touch)
+  // ✅ NATIVE SCROLL SNAPPING ENGINE (Replaces Custom Physics)
   // =========================================================================
-  const [swipeOffsetX, setSwipeOffsetX] = useState(0);
-  const [swipeTransition, setSwipeTransition] = useState(false);
-  
-  const dragStartX = useRef<number | null>(null);
-  const dragStartY = useRef<number | null>(null);
-  const isDraggingRef = useRef(false);
-  const isSwipingRef = useRef(false);
-  const swipeLockRef = useRef(false); // ✅ SURGICAL ADDITION: Prevent double-swiping
+  const carouselRef = useRef<HTMLDivElement>(null);
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Safely extracts X and Y coordinates whether the user is touching or clicking
-  const getClientPos = (e: React.TouchEvent | React.MouseEvent) => {
-    if ('touches' in e) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    return { x: (e as React.MouseEvent).clientX, y: (e as React.MouseEvent).clientY };
-  };
-
-  const handleDragStart = (e: React.TouchEvent | React.MouseEvent) => {
-    if (swipeLockRef.current) return; // ✅ Block interactions if actively snapping
-    const { x, y } = getClientPos(e);
-    dragStartX.current = x;
-    dragStartY.current = y;
-    isDraggingRef.current = true;
-    isSwipingRef.current = false;
-    setSwipeTransition(false); 
-  };
-
-  const handleDragMove = (e: React.TouchEvent | React.MouseEvent) => {
-    if (!isDraggingRef.current || dragStartX.current === null || dragStartY.current === null || swipeLockRef.current) return;
+  const handleNativeScroll = () => {
+    if (!carouselRef.current) return;
     
-    if (isSettingsModalOpen || isStructureModalOpen || isTransposerOpen || isRecordModalOpen) return;
-
-    const { x, y } = getClientPos(e);
-    const deltaX = x - dragStartX.current;
-    const deltaY = y - dragStartY.current;
-
-    if (!isSwipingRef.current) {
-      if (Math.abs(deltaX) > 15 && Math.abs(deltaX) > Math.abs(deltaY)) {
-        isSwipingRef.current = true;
-      }
-    }
-
-    if (isSwipingRef.current) {
-      let resistanceDelta = deltaX;
-      const isFirstSong = currentTrackIndexRef.current === 0;
-      const isLastSong = currentTrackIndexRef.current === tracksListRef.current.length - 1;
-      
-      if ((isFirstSong && deltaX > 0) || (isLastSong && deltaX < 0)) {
-        resistanceDelta = deltaX * 0.25; 
-      }
-      setSwipeOffsetX(resistanceDelta);
-    }
-  };
-
-  const handleDragEnd = () => {
-    if (!isDraggingRef.current) return;
-    isDraggingRef.current = false;
-    setSwipeTransition(true); 
-
-    if (isSwipingRef.current) {
-      const deltaX = swipeOffsetX;
-      const threshold = 75; 
-      const currentIndex = currentTrackIndexRef.current;
-      
-      let didSwipe = false;
-      if (deltaX > threshold && currentIndex > 0) {
-        handleUserSelectTrackBadge(currentIndex - 1);
-        didSwipe = true;
-      } else if (deltaX < -threshold && currentIndex < tracksListRef.current.length - 1) {
-        handleUserSelectTrackBadge(currentIndex + 1);
-        didSwipe = true;
-      }
-
-      // ✅ SURGICAL FIX: Apply a 350ms lock to guarantee the CSS animation finishes cleanly
-      if (didSwipe) {
-        swipeLockRef.current = true;
-        setTimeout(() => { swipeLockRef.current = false; }, 350);
-      }
-    }
+    if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
     
-    setSwipeOffsetX(0); // ✅ Guarantee offset reset
-    isSwipingRef.current = false;
-    dragStartX.current = null;
-    dragStartY.current = null;
+    // ✅ SURGICAL FIX: Debounce the entire state update so React doesn't fight the native swipe.
+    scrollTimeoutRef.current = setTimeout(() => {
+      if (!carouselRef.current) return;
+      
+      const index = Math.round(carouselRef.current.scrollLeft / carouselRef.current.clientWidth);
+      
+      if (index !== currentTrackIndexRef.current) {
+        // ✅ SURGICAL FIX: We MUST call `mountTargetSetlistTrackIndex` instead of `setCurrentTrackIndex`
+        // so that the active song, keys, and AST data update correctly to match the visual track!
+        mountTargetSetlistTrackIndex(index);
+        
+        if (!isPlayingRef.current && localPresenceUserRef.current?.isMD) {
+          sendSupabaseBroadcast({ action: "TRACK_CHANGE", trackIndex: index });
+        }
+      }
+    }, 150);
   };
+
+  // Keep carousel aligned if MD broadcasts a jump or user clicks LiveHeader
+  useEffect(() => {
+    if (carouselRef.current) {
+      const targetLeft = currentTrackIndex * carouselRef.current.clientWidth;
+      if (Math.abs(carouselRef.current.scrollLeft - targetLeft) > 10) {
+        carouselRef.current.scrollTo({ left: targetLeft, behavior: "smooth" });
+      }
+    }
+  }, [currentTrackIndex]);
   
   useEffect(() => {
     if (!activeSong?.id) {
@@ -981,7 +933,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   function executeJumpNow(targetTrackIdx: number, targetSectionIdx: number, jumpTime: number, isInitialStart: boolean = false) {
     if (cancelFutureAudio) cancelFutureAudio(); // ✅ SURGICAL FIX: Kill all future ghost beats instantly
     
-    if (targetTrackIdx !== undefined && targetTrackIdx !== playingTrackIndexRef.current) mountTargetSetlistTrackIndex(targetTrackIdx);
+    if (targetTrackIdx !== undefined && targetTrackIdx !== playingTrackIndexRef.current) {
+      mountTargetSetlistTrackIndex(targetTrackIdx);
+      // CSS Native Snapping useEffect will automatically handle the smooth glide!
+    }
     
     playingTrackIndexRef.current = targetTrackIdx !== undefined ? targetTrackIdx : currentTrackIndexRef.current;
     setPlayingTrackIndex(playingTrackIndexRef.current);
@@ -1071,6 +1026,8 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
   function handleUserSelectTrackBadge(trackIdx: number) {
     mountTargetSetlistTrackIndex(trackIdx);
+    // CSS Native Snapping useEffect will automatically handle the smooth glide!
+    
     if (!isPlayingFlow && localPresenceUser?.isMD) {
       sendSupabaseBroadcast({ action: "TRACK_CHANGE", trackIndex: trackIdx });
     }
@@ -1425,23 +1382,9 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       {/* ✅ HORIZONTAL CAROUSEL CANVAS */}
       {/* ========================================================================= */}
       <div 
-        className="flex-1 flex flex-row w-full h-full relative"
-        style={{ 
-          transform: `translateX(calc(${-currentTrackIndex * 100}% + ${swipeOffsetX}px))`, 
-          transition: swipeTransition ? 'transform 0.35s cubic-bezier(0.32, 0.72, 0, 1)' : 'none',
-          overscrollBehaviorX: 'none',
-          touchAction: 'pan-y' 
-        }}
-        // ✅ Native Mouse Events
-        onMouseDown={handleDragStart}
-        onMouseMove={handleDragMove}
-        onMouseUp={handleDragEnd}
-        onMouseLeave={handleDragEnd}
-        // ✅ Native Touch Events (Guaranteed to work on iOS/Android)
-        onTouchStart={handleDragStart}
-        onTouchMove={handleDragMove}
-        onTouchEnd={handleDragEnd}
-        onTouchCancel={handleDragEnd}
+        ref={carouselRef}
+        onScroll={handleNativeScroll}
+        className="flex-1 flex flex-row w-full h-full relative overflow-x-auto snap-x snap-mandatory [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
       >
         {memoizedSetlistAst.map((trackAst, idx) => {
           const isActive = idx === currentTrackIndex;
@@ -1450,8 +1393,8 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           const localSectionRefs = trackSectionRefs.current[idx];
 
           return (
-            // 2. ✅ SURGICAL FIX: Added `flex flex-col` so the inner scroll container knows how to shrink!
-            <div key={trackAst.trackId} className="w-full h-full shrink-0 relative flex flex-col">
+            // ✅ SURGICAL FIX: Strictly enforce max/min width so long text never stretches the child and displaces the sibling songs!
+            <div key={trackAst.trackId} className="w-full min-w-full max-w-full h-full shrink-0 relative flex flex-col overflow-x-hidden snap-center">
               
               {isSimplifiedMode ? (
                 <SimplifiedStackView

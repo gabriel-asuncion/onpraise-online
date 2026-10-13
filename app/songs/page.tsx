@@ -161,6 +161,9 @@ export default function SongsListPage() {
   // ✅ SURGICAL ADDITION: Ref to detect clicks outside the YouTube search dropdown
   const ytSearchContainerRef = useRef<HTMLDivElement>(null);
 
+  // ✅ SURGICAL ADDITION: Unverified Song Warning State
+  const [pendingWarningSongId, setPendingWarningSongId] = useState<string | null>(null);
+
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
       if (isYtDropdownOpen && ytSearchContainerRef.current && !ytSearchContainerRef.current.contains(e.target as Node)) {
@@ -450,13 +453,10 @@ export default function SongsListPage() {
     if (activeFilterId === "chords-lyrics" && type !== "Chords + Lyrics") return false;
     if (activeFilterId === "bookmarked" && !bookmarkedSongIds.includes(song.id)) return false;
     
-    // ✅ SURGICAL FIX: Strict logic for the Pending state
-    // If the active filter is EXACTLY "pending", ONLY show pending songs.
+    // ✅ SURGICAL FIX: If the active filter is exactly "pending", ONLY show pending songs.
+    // Otherwise, allow pending songs to display in the main list natively.
     if (activeFilterId === "pending") {
       if (song.approval_status !== "pending") return false;
-    } else {
-      // Otherwise, ALWAYS hide pending songs.
-      if (song.approval_status === "pending") return false;
     }
     
     // Fast / Slow Presets
@@ -791,7 +791,7 @@ export default function SongsListPage() {
                         </button>
                       )}
                       <button 
-                        onClick={() => router.push(`/songs/${song.id}`)}
+                        onClick={() => setPendingWarningSongId(song.id)} // ✅ Intercept click with Warning Modal
                         className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-colors flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_music</span>
@@ -863,6 +863,39 @@ export default function SongsListPage() {
         )}
       </div>
     </main>
+
+    {/* ✅ SURGICAL ADDITION: Unverified Song Warning Modal */}
+    {pendingWarningSongId && (
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200000] flex items-center justify-center p-4">
+        <div className="bg-surface-container border border-outline-variant/30 rounded-[2rem] shadow-2xl p-6 max-w-sm w-full space-y-4 text-center animate-in zoom-in-95 duration-200">
+          <div className="w-12 h-12 bg-amber-500/10 text-amber-500 rounded-full flex items-center justify-center mx-auto mb-2 shadow-sm border border-amber-500/20">
+            <span className="material-symbols-outlined text-[24px]">warning</span>
+          </div>
+          <div className="space-y-1">
+            <h4 className="font-extrabold text-[18px] text-on-surface tracking-tight">Unverified Track</h4>
+            <p className="text-[13px] text-on-surface-variant font-medium leading-relaxed px-2">
+              This song is still pending review and may contain inaccurate lyrics or chords. Do you still want to proceed?
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 pt-2">
+            <button 
+              type="button" 
+              onClick={() => setPendingWarningSongId(null)} 
+              className="py-3 bg-surface-container-high hover:bg-surface-bright text-on-surface text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer border border-outline-variant/30 shadow-sm"
+            >
+              Go Back
+            </button>
+            <button 
+              type="button" 
+              onClick={() => router.push(`/songs/${pendingWarningSongId}`)} 
+              className="py-3 bg-primary hover:bg-primary/90 text-on-primary text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-95 cursor-pointer border border-primary/20"
+            >
+              Proceed
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {/* ========================================= */}
     {/* 3. ADD NEW SONG MODAL                     */}

@@ -783,7 +783,7 @@ export default function DashboardPage() {
                       </div>
                       <div className="flex items-center gap-2.5 shrink-0 z-10">
                         {/* ✅ SURGICAL FIX: Added Chapters button directly beside it */}
-                          <button 
+                          {/* <button 
                             onClick={(e) => {
                               e.stopPropagation(); 
                               setIsChaptersModalOpen(true);
@@ -792,7 +792,7 @@ export default function DashboardPage() {
                             className="w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 disabled:opacity-50 text-on-surface-variant hover:text-white"
                           >
                             <span className="material-symbols-outlined text-[20px]">format_list_bulleted</span>
-                          </button>
+                          </button> */}
                           {/* ✅ SURGICAL FIX: Restored Play/Pause Button */}
                           <button 
                             onClick={(e) => {
