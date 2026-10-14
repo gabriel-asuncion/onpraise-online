@@ -201,7 +201,8 @@ export default function Home() {
       title: "Sync your stage.",
       desc: "Realtime sets, connected bands, and zero paper. No pressure, just presence.",
       graphics: (
-        <div className="absolute inset-0 flex items-start justify-center pt-[12vh] md:pt-[15vh] pointer-events-none">
+        // ✅ SURGICAL FIX: Bound the container to bottom-[250px] so it never touches the text below it
+        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs (Snappy & Morphing) */}
           <Blob color="#2563EB" w="110px" hasEyes animClass="animate-dart-x" delay="-1s" top="15%" left="15%" />
           <Blob color="#60A5FA" w="90px" hasEyes animClass="animate-morph-squish" delay="-3s" top="35%" right="20%" />
@@ -213,7 +214,7 @@ export default function Home() {
           <Blob color="#60A5FA" w="25px" hasEyes={false} animClass="animate-drift-a" delay="-7s" top="5%" left="50%" />
           <Blob color="#DBEAFE" w="35px" hasEyes={false} animClass="animate-drift-b" delay="-4s" top="25%" right="15%" />
           
-          <Player autoplay loop src="/assets/login_01.json" className="w-[100%] max-w-[450px] aspect-square animate-float-lottie relative z-10" />
+          <Player autoplay loop src="/assets/login_01.json" className="w-full max-w-[320px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
         </div>
       )
     },
@@ -221,7 +222,7 @@ export default function Home() {
       title: "Perfectly timed.",
       desc: "Sample-accurate metronomes and vocal cues locked to your band's flow.",
       graphics: (
-        <div className="absolute inset-0 flex items-start justify-center pt-[12vh] md:pt-[15vh] pointer-events-none">
+        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs */}
           <Blob color="#EF4444" w="120px" hasEyes animClass="animate-dart-y" delay="-2s" top="10%" right="18%" />
           <Blob color="#FCA5A5" w="80px" hasEyes animClass="animate-pulse-ghost" delay="-4s" top="40%" left="22%" />
@@ -233,7 +234,7 @@ export default function Home() {
           <Blob color="#FCA5A5" w="15px" hasEyes={false} animClass="animate-drift-b" delay="-2s" top="5%" left="30%" />
           <Blob color="#EF4444" w="35px" hasEyes={false} animClass="animate-dart-x" delay="-7s" top="45%" right="25%" />
           
-          <Player autoplay loop src="/assets/login_02.json" className="w-[80%] max-w-[450px] aspect-square animate-float-lottie relative z-10" />
+          <Player autoplay loop src="/assets/login_02.json" className="w-[85%] max-w-[320px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
         </div>
       )
     },
@@ -241,7 +242,7 @@ export default function Home() {
       title: "Build your set.",
       desc: "Arrange songs, map sections, and transpose keys on the fly. Total control.",
       graphics: (
-        <div className="absolute inset-0 flex items-start justify-center pt-[12vh] md:pt-[15vh] pointer-events-none">
+        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs */}
           <Blob color="#F59E0B" w="100px" hasEyes animClass="animate-morph-squish" delay="0s" top="35%" left="18%" />
           {/* Scatter Cluster */}
@@ -253,7 +254,7 @@ export default function Home() {
           <Blob color="#F59E0B" w="30px" hasEyes={false} animClass="animate-drift-a" delay="-6s" top="8%" right="40%" />
           <Blob color="#FEF3C7" w="15px" hasEyes={false} animClass="animate-dart-x" delay="-4s" top="30%" right="5%" />
 
-          <Player autoplay loop src="/assets/login_03.json" className="w-[110%] max-w-[450px] aspect-square animate-float-lottie relative z-10" />
+          <Player autoplay loop src="/assets/login_03.json" className="w-[95%] max-w-[340px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
         </div>
       )
     },
@@ -261,7 +262,7 @@ export default function Home() {
       title: "Ready to play.",
       desc: "Join your team's workspace and perform with absolute confidence.",
       graphics: (
-        <div className="absolute inset-0 flex items-start justify-center pt-[12vh] md:pt-[15vh] pointer-events-none">
+        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs */}
           <Blob color="#A855F7" w="110px" hasEyes animClass="animate-float-spin" delay="-3s" top="25%" right="15%" />
           <Blob color="#C084FC" w="85px" hasEyes animClass="animate-dart-y" delay="-1s" top="40%" left="15%" />
@@ -273,7 +274,7 @@ export default function Home() {
           <Blob color="#A855F7" w="15px" hasEyes={false} animClass="animate-drift-b" delay="-8s" top="5%" right="15%" />
           <Blob color="#C084FC" w="30px" hasEyes={false} animClass="animate-dart-x" delay="-2.5s" top="50%" left="35%" />
 
-          <Player autoplay loop src="/assets/login_04.json" className="w-[80%] max-w-[450px] aspect-square animate-float-lottie relative z-10" />
+          <Player autoplay loop src="/assets/login_04.json" className="w-[85%] max-w-[320px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
         </div>
       )
     }

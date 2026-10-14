@@ -231,14 +231,16 @@ export default function EventsManagerPage() {
               Events
             </h1>
             
-            {activeRole === "admin" && (
+            {["admin", "moderator"].includes(activeRole) && (
               <div className="flex items-center gap-2 md:gap-3">
-                <Link
-                  href="/events/create-team"
-                  className="px-4 py-2 md:px-5 md:py-2.5 bg-white border border-zinc-200 hover:border-blue-500 hover:text-blue-600 text-zinc-500 font-black text-[10px] md:text-xs rounded-xl shadow-sm transition-all active:scale-95 uppercase tracking-wider shrink-0 flex items-center gap-1.5"
-                >
-                 Create Team
-                </Link>
+                {activeRole === "admin" && (
+                  <Link
+                    href="/events/create-team"
+                    className="px-4 py-2 md:px-5 md:py-2.5 bg-white border border-zinc-200 hover:border-blue-500 hover:text-blue-600 text-zinc-500 font-black text-[10px] md:text-xs rounded-xl shadow-sm transition-all active:scale-95 uppercase tracking-wider shrink-0 flex items-center gap-1.5"
+                  >
+                   Create Team
+                  </Link>
+                )}
 
                 <button 
                   onClick={() => setIsCreateModalOpen(true)}

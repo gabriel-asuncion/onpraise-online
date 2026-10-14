@@ -81,6 +81,9 @@ export default function EventCockpitPage() {
   const eventId = params?.id as string; 
   const { activeRole, userTeamId } = useEngine();
 
+  // ✅ SURGICAL FIX: Allow both Admins and Moderators to edit the event layout!
+  const canEditEvent = ["admin", "moderator"].includes(activeRole);
+
   const [hasMounted, setHasMounted] = useState(false);
   const [loading, setLoading] = useState(true);
   
@@ -339,7 +342,7 @@ export default function EventCockpitPage() {
 
   async function handleDeleteSetlistBlock(e: React.MouseEvent, slId: string) {
     e.stopPropagation();
-    if (activeRole !== "admin") return;
+    if (!canEditEvent) return;
     if (!confirm("Are you sure you want to delete this Setlist Block? All tracks inside will be permanently unlinked.")) return;
     
     setIsDeploying(true); // Re-use loading state briefly
@@ -355,7 +358,7 @@ export default function EventCockpitPage() {
   }
   
   async function handleDeleteEvent() {
-    if (activeRole !== "admin") return;
+    if (!canEditEvent) return;
     setIsDeleting(true);
     try {
       const { error } = await supabase.from('events').delete().eq('id', eventId);
@@ -370,7 +373,7 @@ export default function EventCockpitPage() {
 
   // ✅ SURGICAL FIX: Auto-Save logic for Lineups
   async function handleLocalAddOrMove(userId: string, targetRole: string, sourceRole: string | null = null) {
-    if (activeRole !== "admin") return;
+    if (!canEditEvent) return;
     
     const isLegacyFallback = eventSetlists.length > 0 && eventSetlists[0].id === selectedSetlistId;
     if (stagedRoster.some(r => r.user_id === userId && r.role === targetRole && (r.setlist_id === selectedSetlistId || (!r.setlist_id && isLegacyFallback)))) return; 
@@ -404,7 +407,7 @@ export default function EventCockpitPage() {
   }
   
   async function handleOriginalLocalRemove(rowId: string) { 
-    if (activeRole !== "admin") return; 
+    if (!canEditEvent) return; 
     
     // 1. Optimistic UI Update
     setStagedRoster(prev => prev.filter(r => r.id !== rowId)); 
@@ -439,7 +442,7 @@ export default function EventCockpitPage() {
   }
 
   async function handleAddSongSubmit() {
-    if (activeRole !== "admin" || !selectedNewSongId) return;
+    if (!canEditEvent || !selectedNewSongId) return;
     const songToAdd = allDatabaseSongs.find(s => s.id === selectedNewSongId);
     if (!songToAdd) return;
     
@@ -458,19 +461,19 @@ export default function EventCockpitPage() {
   }
 
   function handleDragStart(index: number) { 
-    if (activeRole === "admin") setDraggedSongIndex(index); 
+    if (canEditEvent) setDraggedSongIndex(index); 
   }
   
   function handleDragOver(e: React.DragEvent, targetIndex: number) {
     e.preventDefault(); // ✅ Required to allow dropping
-    if (draggedSongIndex === null || activeRole !== "admin") return;
+    if (draggedSongIndex === null || !canEditEvent) return;
     if (dragOverSongIndex !== targetIndex) setDragOverSongIndex(targetIndex);
   }
 
   // ✅ SURGICAL FIX: Perform the array swap and DB save ONLY when dropped!
   async function handleDrop(e: React.DragEvent, targetIndex: number) {
     e.preventDefault();
-    if (draggedSongIndex === null || activeRole !== "admin") return;
+    if (draggedSongIndex === null || !canEditEvent) return;
 
     const startIndex = draggedSongIndex;
     setDraggedSongIndex(null);
@@ -519,7 +522,7 @@ export default function EventCockpitPage() {
   // ✅ SURGICAL FIX: New function to break/ungroup a bundle
   async function handleUngroup(e: React.MouseEvent, groupName: string) {
     e.stopPropagation();
-    if (activeRole !== "admin") return;
+    if (!canEditEvent) return;
     if (!confirm(`Remove the "${groupName}" grouping?`)) return;
     
     setIsSavingTracks(true);
@@ -538,7 +541,7 @@ export default function EventCockpitPage() {
   function handleToggleCheckboxSelect(id: string) { setSelectedForGroup(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); }
 
   async function applyGroupTransformation() {
-    if (selectedForGroup.length === 0 || activeRole !== "admin") return;
+    if (selectedForGroup.length === 0 || !canEditEvent) return;
     const finalGroupName = customGroupName.trim() || null;
     const selectedIds = [...selectedForGroup];
     
@@ -664,7 +667,7 @@ export default function EventCockpitPage() {
                   {group.items.length} {group.items.length === 1 ? 'Song' : 'Songs'}
                 </span>
                 {/* ✅ SURGICAL FIX: Ungroup 'X' Button */}
-                {activeRole === "admin" && group.groupName && (
+                {canEditEvent && group.groupName && (
                   <button 
                     onClick={(e) => handleUngroup(e, group.groupName)}
                     className="w-6 h-6 rounded-md flex items-center justify-center bg-error/10 text-error hover:bg-error hover:text-white transition-colors border border-error/20 cursor-pointer shadow-sm"
@@ -683,7 +686,7 @@ export default function EventCockpitPage() {
       const renderTrackRow = (item: SetlistSongItem, globalIndex: number) => (
         <div 
           key={item.id} 
-          draggable={activeRole === "admin"}
+          draggable={canEditEvent}
           onDragStart={() => handleDragStart(globalIndex)}
           onDragOver={(e) => handleDragOver(e, globalIndex)}
           onDrop={(e) => handleDrop(e, globalIndex)} // ✅ Added onDrop
@@ -699,10 +702,10 @@ export default function EventCockpitPage() {
         >
           <div className="flex items-center gap-3 md:gap-4 flex-1 min-w-0">
             <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
-              {activeRole === "admin" && (
+              {canEditEvent && (
                 <input type="checkbox" className="w-4 h-4 rounded border-outline-variant bg-surface-container-highest checked:bg-primary cursor-pointer accent-primary" checked={selectedForGroup.includes(item.id)} onChange={() => handleToggleCheckboxSelect(item.id)} />
               )}
-              {activeRole === "admin" && <div className="material-symbols-outlined text-outline text-[18px] select-none cursor-grab active:cursor-grabbing hover:text-on-surface transition-colors">drag_indicator</div>}
+              {canEditEvent && <div className="material-symbols-outlined text-outline text-[18px] select-none cursor-grab active:cursor-grabbing hover:text-on-surface transition-colors">drag_indicator</div>}
             </div>
             <div className="flex flex-col flex-1 min-w-0 select-none">
               <h4 className="font-bold text-[15px] md:text-[16px] text-on-surface leading-tight truncate">{item.songs?.title}</h4>
@@ -715,7 +718,7 @@ export default function EventCockpitPage() {
             </div>
           </div>
           <div className="ml-3 flex items-center shrink-0" onClick={e => e.stopPropagation()}>
-            {activeRole === "admin" && ( 
+            {canEditEvent && ( 
               <button 
                 onClick={async (e) => {
                   e.stopPropagation(); 
@@ -783,7 +786,7 @@ export default function EventCockpitPage() {
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {activeRole === "admin" && (
+            {canEditEvent && (
               <button 
                 onClick={handleOpenEditEventModal} 
                 className="w-8 h-8 rounded-full bg-surface-container-high flex items-center justify-center text-on-surface hover:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm"
@@ -916,7 +919,7 @@ export default function EventCockpitPage() {
                           </button>
                           
                           {/* ✅ SURGICAL FIX: Delete Setlist Block Button */}
-                          {activeRole === "admin" && (
+                          {canEditEvent && (
                             <button 
                               onClick={(e) => handleDeleteSetlistBlock(e, sl.id)}
                               className="w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer border bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error/10 hover:border-error/30 border-outline-variant/30"
@@ -967,7 +970,7 @@ export default function EventCockpitPage() {
                   )
                 })}
                 
-                {activeRole === "admin" && (
+                {canEditEvent && (
                   <div 
                     onClick={() => setIsCreateSetlistOpen(true)}
                     className="p-4 rounded-xl border-2 border-dashed border-outline-variant/30 hover:border-primary hover:bg-primary-container/5 text-primary font-extrabold text-[12px] uppercase tracking-widest flex items-center justify-center min-h-[120px] transition-all cursor-pointer shadow-sm select-none"
@@ -1005,7 +1008,7 @@ export default function EventCockpitPage() {
               )}
               
               {/* Add Song Input Field */}
-              {activeRole === "admin" && (
+              {canEditEvent && (
                 <div className="flex gap-2 items-stretch">
                   <div className="flex-1 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-container border border-outline-variant/30 shadow-inner relative z-50">
                     <span className="material-symbols-outlined text-[20px] text-outline">search</span>
@@ -1049,7 +1052,7 @@ export default function EventCockpitPage() {
               )}
 
               {/* Grouping Controller */}
-              {selectedForGroup.length > 0 && activeRole === "admin" && (
+              {selectedForGroup.length > 0 && canEditEvent && (
                 <div className="bg-surface-container-low p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-outline-variant/30 shadow-md animate-in zoom-in-95 duration-150">
                   <div className="space-y-1">
                     <h5 className="text-[10px] font-black uppercase tracking-widest text-primary">Section Grouping</h5>
@@ -1160,25 +1163,29 @@ export default function EventCockpitPage() {
               {/* STRICT 3-ROW 2-COL MATRIX */}
               <div className="grid grid-cols-2 gap-3 content-start">
                 {GRID_CARDS.map((cardRole) => {
-                  // ✅ SURGICAL FIX: Filter the roster explicitly by selectedSetlistId AND role
                   const list = stagedRoster.filter(m => m.role === cardRole && (m.setlist_id === selectedSetlistId || (!m.setlist_id && eventSetlists[0]?.id === selectedSetlistId)));
                   const loadedUser = loadedUserId ? profiles.find(p => p.id === loadedUserId) : null;
                   const isQualified = loadedUser ? (loadedUser.ministries || []).includes(cardRole) : true;
-                  const isDisabledDrop = loadedUserId && !isQualified;
 
                   return (
                     <div 
                       key={cardRole} 
                       onClick={() => {
-                        if (loadedUserId && activeRole === "admin" && isQualified) {
+                        if (loadedUserId && canEditEvent) {
                           handleLocalAddOrMove(loadedUserId, cardRole);
                           setLoadedUserId(null); 
                           setIsDockOpen(false);
+                        } else if (!loadedUserId && canEditEvent) {
+                          // ✅ SURGICAL FIX: Allow clicking the card itself to open the full roster
+                          setIsDockOpen(true);
+                          setMatrixFilter("All");
                         }
                       }}
-                      className={`bg-surface-container-lowest p-4 rounded-xl border flex flex-col justify-between min-h-[90px] transition-all duration-300 ${
-                        loadedUserId && activeRole === "admin" 
-                          ? isQualified ? "hover:border-primary border-primary/50 cursor-pointer ring-2 ring-primary/20 bg-primary-container/5" : "opacity-40 grayscale cursor-not-allowed border-outline-variant/20"
+                      className={`bg-surface-container-lowest p-4 rounded-xl border flex flex-col justify-between min-h-[90px] transition-all duration-300 cursor-pointer ${
+                        loadedUserId && canEditEvent 
+                          ? isQualified 
+                             ? "hover:border-primary border-primary/50 ring-2 ring-primary/20 bg-primary-container/5" 
+                             : "hover:border-amber-500 border-amber-500/50 ring-2 ring-amber-500/20 bg-amber-500/5"
                           : "border-outline-variant/30 hover:border-outline-variant/50 shadow-sm"
                       }`}
                     >
@@ -1187,24 +1194,25 @@ export default function EventCockpitPage() {
                           <h5 className="font-extrabold text-[15px] text-on-surface leading-tight truncate">{cardRole}</h5>
                           <p className="text-[10px] font-bold text-on-surface-variant mt-0.5">{list.length} Assigned</p>
                         </div>
-                        {activeRole === "admin" && ( 
+                        {canEditEvent && ( 
                           <button 
                             type="button" 
-                            disabled={!!isDisabledDrop}
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (loadedUserId && isQualified) {
+                              if (loadedUserId) {
                                 handleLocalAddOrMove(loadedUserId, cardRole);
                                 setLoadedUserId(null);
                                 setIsDockOpen(false); 
                               } else if (!loadedUserId) {
                                 setIsDockOpen(true);
-                                setMatrixFilter(cardRole);
+                                // ✅ SURGICAL FIX: Opens the dock with "All" users selected instead of filtering
+                                setMatrixFilter("All");
                               }
                             }} 
                             className={`w-7 h-7 rounded-full flex items-center justify-center text-[18px] border transition-all duration-300 shrink-0 cursor-pointer ${
-                              isDisabledDrop ? "bg-surface-container-highest text-outline-variant border-transparent" :
-                              loadedUserId ? "bg-primary border-primary text-on-primary animate-pulse shadow-md" : "bg-surface-container hover:bg-surface-bright text-outline hover:text-on-surface border-outline-variant/30"
+                              loadedUserId 
+                                ? (isQualified ? "bg-primary border-primary text-on-primary animate-pulse shadow-md" : "bg-amber-500 border-amber-500 text-white animate-pulse shadow-md") 
+                                : "bg-surface-container hover:bg-surface-bright text-outline hover:text-on-surface border-outline-variant/30"
                             }`}
                           >
                             <span className="material-symbols-outlined !text-[16px]">{loadedUserId ? "arrow_downward" : "add"}</span>
@@ -1214,18 +1222,24 @@ export default function EventCockpitPage() {
                       
                       {list.length > 0 && (
                         <div className="flex items-center gap-1.5 mt-3 overflow-hidden">
-                          {list.map(m => (
-                            <div key={m.id} className="relative group cursor-pointer" onClick={e => e.stopPropagation()}>
-                              {m.profiles?.avatar_url ? (
-                                <img src={m.profiles.avatar_url} alt="" className="w-8 h-8 rounded-full object-cover shadow-sm border border-outline-variant/50" />
-                              ) : (
-                                <div className="w-8 h-8 rounded-full bg-secondary-container text-on-secondary-container text-[11px] font-black flex items-center justify-center shadow-sm border border-secondary/20">{m.profiles?.full_name?.charAt(0) || "U"}</div>
-                              )}
-                              {activeRole === "admin" && ( 
-                                <button type="button" onClick={() => handleOriginalLocalRemove(m.id)} className="absolute -top-1 -right-1 bg-error/90 text-on-error rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-black opacity-100 md:opacity-0 md:group-hover:opacity-100 hover:scale-110 transition-all shadow-sm cursor-pointer">✕</button> 
-                              )}
-                            </div>
-                          ))}
+                          {list.map(m => {
+                            const isMemberQualified = (m.profiles?.ministries || []).includes(cardRole);
+                            return (
+                              <div key={m.id} className="relative group cursor-pointer" onClick={e => e.stopPropagation()}>
+                                {m.profiles?.avatar_url ? (
+                                  <img src={m.profiles.avatar_url} alt="" className="w-8 h-8 rounded-full object-cover shadow-sm border border-outline-variant/50" />
+                                ) : (
+                                  <div className="w-8 h-8 rounded-full bg-secondary-container text-on-secondary-container text-[11px] font-black flex items-center justify-center shadow-sm border border-secondary/20">{m.profiles?.full_name?.charAt(0) || "U"}</div>
+                                )}
+                                {!isMemberQualified && (
+                                  <div className="absolute -bottom-1 -left-1 bg-error text-on-error rounded-full w-[14px] h-[14px] flex items-center justify-center text-[8px] font-black border border-surface shadow-sm z-10" title="Assigned outside of primary roles">!</div>
+                                )}
+                                {canEditEvent && ( 
+                                  <button type="button" onClick={() => handleOriginalLocalRemove(m.id)} className="absolute -top-1 -right-1 bg-error/90 text-on-error rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-black opacity-100 md:opacity-0 md:group-hover:opacity-100 hover:scale-110 transition-all shadow-sm cursor-pointer z-20">✕</button> 
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -1233,7 +1247,7 @@ export default function EventCockpitPage() {
                 })}
               </div>
 
-              {activeRole === "admin" && isDockOpen && (
+              {canEditEvent && isDockOpen && (
                 <div className="bg-surface-container border border-outline-variant/30 p-4 rounded-2xl shadow-lg mt-2 flex flex-col gap-3 animate-in fade-in slide-in-from-top-4 duration-200 mb-8 md:mb-0">
                   <div className="flex items-center justify-between border-b border-outline-variant/20 pb-3">
                     <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar no-scrollbar flex-1 pr-4">

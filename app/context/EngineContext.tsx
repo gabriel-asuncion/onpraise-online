@@ -146,41 +146,49 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     };
   }, [supabase.auth, realUserId]);
   
-  // ✅ SURGICAL FIX: Trigger the modal instead of an instant redirect
+  // ✅ SURGICAL FIX: Trigger the modal instead of an instant redirect (Strict-Mode safe)
   useEffect(() => {
-    if (!realUserId || realUserId === "") return;
+    if (!realUserId) return;
+    
+    let isSubscribed = true; // ✅ Prevents ghost broadcasts on strict mode remounts
 
     const exclusiveUserChannel = supabase.channel(`exclusive_session_${realUserId}`);
 
     exclusiveUserChannel
       .on("broadcast", { event: "CLAIM_SESSION" }, async ({ payload }) => {
+        if (!isSubscribed) return; // ✅ Ignore ghost messages from unmounted renders
+
         if (payload.instanceId !== instanceFingerprintRef.current) {
           console.warn("Duplicate cross-device session detected. Logging out.");
           
-          // 1. Flag it so the background listener doesn't whisk them away immediately
           isKickedOutRef.current = true;
           setIsKickedOut(true);
 
-          // 2. Safely wipe the local session in the background
           await supabase.auth.signOut();
           localStorage.removeItem("active_workspace_id");
           localStorage.removeItem("onpraise_sim_role");
         }
       })
       .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          exclusiveUserChannel.send({
-            type: "broadcast",
-            event: "CLAIM_SESSION",
-            payload: { instanceId: instanceFingerprintRef.current }
-          });
+        if (status === "SUBSCRIBED" && isSubscribed && !isKickedOutRef.current) {
+          // ✅ Slight delay ensures old unmounted ghost components have died before we shout
+          setTimeout(() => {
+             if (isSubscribed) {
+                exclusiveUserChannel.send({
+                  type: "broadcast",
+                  event: "CLAIM_SESSION",
+                  payload: { instanceId: instanceFingerprintRef.current }
+                });
+             }
+          }, 500);
         }
       });
 
     return () => {
+      isSubscribed = false; // ✅ Kill flag
       supabase.removeChannel(exclusiveUserChannel);
     };
-  }, [realUserId]);
+  }, [realUserId, supabase]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {

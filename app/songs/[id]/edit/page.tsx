@@ -562,11 +562,111 @@ export default function SongEditPage() {
     }
 
     if (targetTimeToSeek !== null) {
-        if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-           ytPlayerRef.current.seekTo(targetTimeToSeek, true);
-           setYtCurrentTime(targetTimeToSeek);
-           if (!ytPlaying) ytPlayerRef.current.pauseVideo();
-        }
+        setTimeout(() => {
+          if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+             ytPlayerRef.current.seekTo(targetTimeToSeek, true);
+             setYtCurrentTime(targetTimeToSeek);
+             if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+          }
+        }, 0);
+    }
+  };
+
+  // ✅ New Slip Edit Physics: Moves BOTH boundaries, carving space from adjacent blocks by dropping Spacers
+  const handleMoveSection = (markerId: string, deltaSecs: number) => {
+    let targetTimeToSeek: number | null = null;
+    let newSequenceArray: TrackMarker[] | null = null;
+
+    const targetMarkerIdx = trackMarkersRef.current.findIndex(m => m.id === markerId);
+    if (targetMarkerIdx === -1) return;
+
+    const updated = [...trackMarkersRef.current];
+    let delta = deltaSecs;
+
+    if (delta < 0) { // Move Left
+      if (updated[0].time + delta < 0) delta = -updated[0].time;
+      if (delta === 0) return;
+
+      const oldTime = updated[targetMarkerIdx].time;
+      const nextMarker = updated[targetMarkerIdx + 1];
+      const oldDuration = nextMarker ? nextMarker.time - oldTime : ytDuration - oldTime;
+
+      // Shift target and everything before it left
+      for (let j = 0; j <= targetMarkerIdx; j++) {
+         updated[j] = { ...updated[j], time: updated[j].time + delta };
+      }
+
+      const newEndTime = updated[targetMarkerIdx].time + oldDuration;
+
+      if (nextMarker && nextMarker.type.startsWith("Spacer")) {
+         updated[targetMarkerIdx + 1] = { ...updated[targetMarkerIdx + 1], time: newEndTime };
+      } else {
+         // Drop a padding spacer at the tail to prevent the section from stretching
+         const spCount = updated.filter(m => m.type.startsWith("Spacer")).length + 1;
+         const newSpacer: TrackMarker = {
+           id: `spacer-${Date.now()}-${Math.random()}`,
+           sectionId: `spacer-sec-${Date.now()}`,
+           time: newEndTime,
+           type: `Spacer ${spCount}`,
+           label: `Spacer ${spCount}`,
+           color: "text-zinc-400 border-zinc-500/30 bg-zinc-500/10"
+         };
+         updated.splice(targetMarkerIdx + 1, 0, newSpacer);
+      }
+
+      const newOffset = Math.round(updated[0].time * 1000);
+      prevOffsetVal.current = newOffset;
+      setTimeout(() => setFormYoutubeSyncOffset(newOffset), 0);
+      
+      targetTimeToSeek = updated[targetMarkerIdx].time;
+      newSequenceArray = updated;
+
+    } else if (delta > 0) { // Move Right
+      const lastIdx = updated.length - 1;
+      if (updated[lastIdx].time + delta > ytDuration - 0.1) delta = (ytDuration - 0.1) - updated[lastIdx].time;
+      if (delta === 0) return;
+
+      const oldTime = updated[targetMarkerIdx].time;
+      const prevMarker = targetMarkerIdx > 0 ? updated[targetMarkerIdx - 1] : null;
+
+      // Shift target and everything after it right
+      for (let j = targetMarkerIdx; j < updated.length; j++) {
+         updated[j] = { ...updated[j], time: updated[j].time + delta };
+      }
+
+      if (prevMarker && prevMarker.type.startsWith("Spacer")) {
+         // Spacer naturally absorbs the gap, no action needed
+      } else if (targetMarkerIdx > 0 || (targetMarkerIdx === 0 && oldTime > 0)) {
+         // Drop a padding spacer at the old start time to absorb the void
+         const spCount = updated.filter(m => m.type.startsWith("Spacer")).length + 1;
+         const newSpacer: TrackMarker = {
+           id: `spacer-${Date.now()}-${Math.random()}`,
+           sectionId: `spacer-sec-${Date.now()}`,
+           time: oldTime,
+           type: `Spacer ${spCount}`,
+           label: `Spacer ${spCount}`,
+           color: "text-zinc-400 border-zinc-500/30 bg-zinc-500/10"
+         };
+         updated.splice(targetMarkerIdx, 0, newSpacer);
+      }
+      
+      targetTimeToSeek = updated.find(m => m.id === markerId)!.time;
+      newSequenceArray = updated;
+    }
+
+    if (newSequenceArray) {
+       setTrackMarkers(newSequenceArray);
+       commitSequence(newSequenceArray);
+    }
+
+    if (targetTimeToSeek !== null) {
+        setTimeout(() => {
+          if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+             ytPlayerRef.current.seekTo(targetTimeToSeek, true);
+             setYtCurrentTime(targetTimeToSeek);
+             if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+          }
+        }, 0);
     }
   };
 
@@ -636,6 +736,13 @@ export default function SongEditPage() {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: ytPlaying }));
     }
+    
+    // ✅ SURGICAL FIX: Clean up and force playmode off when leaving/unmounting the Edit page!
+    return () => {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: false }));
+      }
+    };
   }, [ytPlaying]);
 
   const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
@@ -695,45 +802,48 @@ function formatTimeWithMs(seconds: number) {
 
   useEffect(() => {
     const updateScrubber = () => {
-      if (ytPlaying && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
-        const currentTime = ytPlayerRef.current.getCurrentTime();
-        setYtCurrentTime(currentTime);
+      if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isTimelineScrubbingRef.current) {
+        // Double check internal playing state directly from the player
+        const playerState = typeof ytPlayerRef.current.getPlayerState === 'function' ? ytPlayerRef.current.getPlayerState() : -1;
+        const isActuallyPlaying = playerState === 1 || playerState === 3;
+        
+        if (isActuallyPlaying) {
+          const currentTime = ytPlayerRef.current.getCurrentTime();
+          setYtCurrentTime(currentTime);
 
-        const tempo = parseInt(formTempo) || 0;
-        if (tempo > 0 && formYoutubeSyncOffset !== null) {
-          const elapsedMs = (currentTime * 1000) - formYoutubeSyncOffset;
-          if (elapsedMs >= 0) {
-            const msPerBeat = 60000 / tempo;
-            const currentBeat = Math.floor(elapsedMs / msPerBeat);
-            
-            if (currentBeat !== lastTickedBeatRef.current) {
-              if (currentBeat > lastTickedBeatRef.current) {
-                const isDownbeat = currentBeat % 4 === 0; 
-                // ✅ SURGICAL FIX: Only play the click if the user hasn't muted it
-                if (!isMetronomeMutedRef.current) {
-                  playZeroLatencyAudio(isDownbeat ? 'metronome_blip_1' : 'metronome_blip_2', 1.0);
+          const tempo = parseInt(formTempo) || 0;
+          if (tempo > 0 && formYoutubeSyncOffset !== null) {
+            const elapsedMs = (currentTime * 1000) - formYoutubeSyncOffset;
+            if (elapsedMs >= 0) {
+              const msPerBeat = 60000 / tempo;
+              const currentBeat = Math.floor(elapsedMs / msPerBeat);
+              
+              if (currentBeat !== lastTickedBeatRef.current) {
+                if (currentBeat > lastTickedBeatRef.current) {
+                  const isDownbeat = currentBeat % 4 === 0; 
+                  if (!isMetronomeMutedRef.current) {
+                    playZeroLatencyAudio(isDownbeat ? 'metronome_blip_1' : 'metronome_blip_2', 1.0);
+                  }
                 }
+                lastTickedBeatRef.current = currentBeat;
               }
-              lastTickedBeatRef.current = currentBeat;
+            } else {
+              lastTickedBeatRef.current = -1; 
             }
-          } else {
-            lastTickedBeatRef.current = -1; 
           }
+        } else {
+          lastTickedBeatRef.current = -1;
         }
-      } else {
-        lastTickedBeatRef.current = -1;
       }
       ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
     };
 
-    if (ytPlaying) {
-      ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
-    }
+    ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
     
     return () => {
       if (ytTimeTrackerRef.current) cancelAnimationFrame(ytTimeTrackerRef.current);
     };
-  }, [ytPlaying, formTempo, formYoutubeSyncOffset, initAudioContext, playZeroLatencyAudio]);
+  }, [formTempo, formYoutubeSyncOffset, initAudioContext, playZeroLatencyAudio]);
   
   const ytPlayerRef = useRef<any>(null);
   const isYtPlayerReadyRef = useRef<boolean>(false);
@@ -2524,20 +2634,216 @@ function formatTimeWithMs(seconds: number) {
                 <p>Please calculate the BPM in the Details tab first so measures can be mathematically mapped.</p>
               </div>
             ) : (
-              <div className="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm space-y-6">
+              <div className="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl shadow-sm space-y-6">
                 
                 <div className="flex justify-between items-end">
                    <div>
                      <h3 className="font-black text-[16px] text-on-surface tracking-tight flex items-center gap-1.5">
                        <span className="material-symbols-outlined text-primary">linear_scale</span> Timeline Markers
                      </h3>
-                     <p className="text-[11px] font-bold text-on-surface-variant">Play the track and tap the sections below to mark their exact start times.</p>
                    </div>
                    <button type="button" onClick={() => setTrackMarkers([])} className="text-[10px] font-black uppercase tracking-widest text-error hover:bg-error/10 px-3 py-1.5 rounded-lg transition-colors border border-error/20 cursor-pointer">Clear</button>
                 </div>            
               <div className="relative mt-6" ref={trackWorkspaceRef}>
+                  
+
+                  {/* Horizontal Scroll Boundary for Timeline */}
+                  <div className="w-full bg-surface-container-highest rounded-xl overflow-x-auto overflow-y-hidden shadow-inner border border-outline-variant/40 custom-scrollbar relative">
+                    <div className="relative pb-3" style={{ width: `${timelineZoom * 100}%` }}>
+                      <div 
+                        className="h-40 relative flex flex-col z-10 touch-none"
+                        onPointerDown={(e) => {
+                        const target = e.target as HTMLElement;
+                        if (target.dataset.dragHandle || target.closest('[data-marker-block="true"]')) return; 
+                        
+                        isTimelineScrubbingRef.current = true;
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                        const seekTime = percent * ytDuration;
+                        setYtCurrentTime(seekTime);
+                        setSelectedMarkerId(null);
+                        
+                        setTimeout(() => {
+                           if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+                              ytPlayerRef.current.seekTo(seekTime, true);
+                              if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+                           }
+                        }, 0);
+                      }}
+                        onPointerMove={(e) => {
+                          if (e.buttons !== 1) return; 
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+
+                          const activeDrag = activeDragHandleRef.current;
+                          if (activeDrag) {
+                             const targetTimeSecs = percent * ytDuration;
+                             
+                             setTrackMarkers(prev => {
+                                const targetMarkerIdx = prev.findIndex(m => m.id === activeDrag.id);
+                                if (targetMarkerIdx === -1) return prev;
+
+                                const updated = [...prev];
+                                let delta = 0;
+
+                                if (activeDrag.type === "start") {
+                                   delta = targetTimeSecs - updated[targetMarkerIdx].time;
+                                   if (delta < 0) {
+                                      delta = Math.max(delta, -updated[0].time);
+                                   } else {
+                                      if (targetMarkerIdx === 0) {
+                                         const maxDelta = ytDuration - 0.1 - updated[updated.length - 1].time;
+                                         if (delta > maxDelta) delta = maxDelta;
+                                      } else {
+                                         const maxTime = targetMarkerIdx < updated.length - 1 ? updated[targetMarkerIdx + 1].time - 0.1 : ytDuration - 0.1;
+                                         if (updated[targetMarkerIdx].time + delta > maxTime) delta = maxTime - updated[targetMarkerIdx].time;
+                                      }
+                                   }
+                                   if (delta === 0) return prev;
+                                   
+                                   if (targetMarkerIdx === 0) {
+                                      for (let j = 0; j < updated.length; j++) {
+                                         updated[j] = { ...updated[j], time: updated[j].time + delta };
+                                      }
+                                      const newOffset = Math.round(updated[0].time * 1000);
+                                      prevOffsetVal.current = newOffset;
+                                      setTimeout(() => setFormYoutubeSyncOffset(newOffset), 0);
+                                   } else {
+                                      for (let j = 0; j <= targetMarkerIdx; j++) {
+                                         updated[j] = { ...updated[j], time: updated[j].time + delta };
+                                      }
+                                   }
+                                } else if (activeDrag.type === "end") {
+                                   const nextIdx = targetMarkerIdx + 1;
+                                   if (nextIdx >= updated.length) return prev;
+
+                                   delta = targetTimeSecs - updated[nextIdx].time;
+                                   if (delta > 0) {
+                                      const lastIdx = updated.length - 1;
+                                      if (updated[lastIdx].time + delta > ytDuration - 0.1) delta = (ytDuration - 0.1) - updated[lastIdx].time;
+                                   } else {
+                                      const minTime = updated[targetMarkerIdx].time + 0.1;
+                                      if (updated[nextIdx].time + delta < minTime) delta = minTime - updated[nextIdx].time;
+                                   }
+                                   if (delta === 0) return prev;
+                                   
+                                   for (let j = nextIdx; j < updated.length; j++) {
+                                      updated[j] = { ...updated[j], time: updated[j].time + delta };
+                                   }
+                                }
+                                return updated;
+                             });
+                             return; 
+                          }
+
+                          if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+                             ytPlayerRef.current.seekTo(percent * ytDuration, true);
+                             if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+                          }
+                          setYtCurrentTime(percent * ytDuration);
+                        }}
+                        onPointerUp={() => { 
+                           isTimelineScrubbingRef.current = false;
+                           if (activeDragHandleRef.current) commitSequence(trackMarkersRef.current);
+                           activeDragHandleRef.current = null; 
+                        }}
+                        onPointerLeave={() => { 
+                           isTimelineScrubbingRef.current = false;
+                           if (activeDragHandleRef.current) commitSequence(trackMarkersRef.current);
+                           activeDragHandleRef.current = null; 
+                        }}
+                      >
+                         <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
+                           <div className="absolute top-0 left-0 bottom-0 bg-primary/10 transition-all duration-75" style={{ width: `${(ytCurrentTime / ytDuration) * 100}%` }} />
+                         </div>
+                         
+                         <div className="absolute inset-0 pointer-events-none z-20">
+                           {trackMarkers.map((marker, i) => {
+                              const nextMarker = trackMarkers[i + 1];
+                              const leftPercent = (marker.time / ytDuration) * 100;
+                              const widthPercent = nextMarker ? ((nextMarker.time - marker.time) / ytDuration) * 100 : 100 - leftPercent;
+                              const isSelected = selectedMarkerId === marker.id;
+                              const catalogItem = SECTION_BASE_CATALOG.find(c => marker.type.toLowerCase().startsWith(c.display.toLowerCase())) || SECTION_BASE_CATALOG[0];
+                              const metrics = getMarkerMetrics(marker, nextMarker);
+
+                              return (
+                                 <div 
+                                   key={`${marker.id}-${i}`} 
+                                   data-marker-block="true" 
+                                   className={`absolute top-0 bottom-0 border-l-[3px] transition-all pointer-events-auto ${isSelected ? 'border-primary z-30 bg-primary/10' : 'border-white/50 hover:border-white/80 z-20 cursor-pointer'} ${marker.color.split(' ')[2]}`} 
+                                   style={{ left: `${leftPercent}%`, width: `${widthPercent}%` }}
+                                   onClick={(e) => { 
+                                     e.stopPropagation();
+                                     if (!isSelected) {
+                                       setSelectedMarkerId(marker.id); 
+                                     }
+                                   }}
+                                 >
+                                    {isSelected && (
+                                      <>
+                                         {/* Drag Handle START */}
+                                         <div 
+                                           className="absolute -left-2.5 top-0 bottom-0 w-5 cursor-col-resize z-[100] flex items-center justify-center group/handle"
+                                           data-drag-handle="true"
+                                           onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "start" }; }}
+                                         >
+                                           <div className="w-1.5 h-6 rounded-full bg-primary/0 group-hover/handle:bg-primary/50 transition-colors pointer-events-none" />
+                                         </div>
+
+                                         {/* Drag Handle END (If not last marker) */}
+                                         {nextMarker && (
+                                           <div 
+                                             className="absolute -right-2.5 top-0 bottom-0 w-5 cursor-col-resize z-[100] flex items-center justify-center group/handle"
+                                             data-drag-handle="true"
+                                             onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "end" }; }}
+                                           >
+                                             <div className="w-1.5 h-6 rounded-full bg-primary/0 group-hover/handle:bg-primary/50 transition-colors pointer-events-none" />
+                                           </div>
+                                         )}
+                                      </>
+                                    )}
+
+                                    <div className={`absolute bottom-2 left-1 px-1.5 py-1.5 rounded-lg backdrop-blur-md shadow-sm pointer-events-none flex flex-col items-start transition-colors ${isSelected ? 'bg-primary text-on-primary' : 'bg-black/70 text-white'}`}>
+                                       <span className="text-[11px] font-black uppercase tracking-widest leading-none block">{catalogItem.abbr}</span>
+                                       {/* <span className={`text-[9px] font-mono font-bold block mt-1 leading-none ${isSelected ? 'text-on-primary/80' : 'text-white/70'}`}>
+                                         {isSelected ? "Selected" : `${metrics.measures}m ${metrics.beats}b`}
+                                       </span> */}
+                                    </div>
+                                 </div>
+                              );
+                           })}
+                         </div>
+                         
+                         {/* <div className="absolute top-0 bottom-0 w-[2px] bg-primary shadow-[0_0_10px_rgba(59,130,246,1)] z-40 pointer-events-none" style={{ left: `${(ytCurrentTime / ytDuration) * 100}%`, transition: 'left 0.1s linear' }}>
+                           <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-primary border-2 border-white shadow-[0_0_10px_rgba(59,130,246,1)]" />
+                         </div> */}
+                      </div>
+
+                      {/* ✅ SURGICAL FIX: Independent Active Scrubber pinned to bottom edge */}
+                      <input 
+                        type="range" 
+                        min={0} max={ytDuration || 100} step="0.01" 
+                        value={ytCurrentTime} 
+                        onChange={(e) => {
+                          const t = parseFloat(e.target.value);
+                          setYtCurrentTime(t);
+                          if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+                            ytPlayerRef.current.seekTo(t, true);
+                            if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+                          }
+                        }}
+                        onMouseDown={() => { isTimelineScrubbingRef.current = true; }}
+                        onMouseUp={() => { isTimelineScrubbingRef.current = false; }}
+                        onTouchStart={() => { isTimelineScrubbingRef.current = true; }}
+                        onTouchEnd={() => { isTimelineScrubbingRef.current = false; }}
+                        onClick={() => setSelectedMarkerId(null)}
+                        className="absolute bottom-0 left-0 w-full h-3 outline-none appearance-none cursor-pointer z-50 bg-outline-variant/30 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-primary [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all"
+                        style={{ background: `linear-gradient(to right, rgba(59,130,246,0.6) ${ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0}%, transparent ${ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0}%)` }}
+                      />
+                    </div>
+                  </div>
                   {/* Zoom Controls */}
-                  <div className="absolute -top-8 right-0 flex items-center gap-1.5 z-20">
+                  <div className="absolute top-1.5 right-2 flex items-center gap-1.5 z-20">
                     <button type="button" onClick={() => setTimelineZoom(p => Math.max(1, p - 0.5))} className="w-6 h-6 rounded bg-surface-container border border-outline-variant/30 flex items-center justify-center text-on-surface hover:bg-surface-bright transition-colors shadow-sm cursor-pointer disabled:opacity-50" disabled={timelineZoom <= 1}>
                       <span className="material-symbols-outlined !text-[14px]">zoom_out</span>
                     </button>
@@ -2546,195 +2852,6 @@ function formatTimeWithMs(seconds: number) {
                       <span className="material-symbols-outlined !text-[14px]">zoom_in</span>
                     </button>
                   </div>  
-
-                  {/* Horizontal Scroll Boundary for Timeline */}
-                  <div className="w-full bg-surface-container-highest rounded-xl overflow-x-auto overflow-y-hidden shadow-inner border border-outline-variant/40 custom-scrollbar relative">
-                    <div 
-                      className="h-40 relative flex flex-col z-10 touch-none"
-                      style={{ width: `${timelineZoom * 100}%` }}
-                      onPointerDown={(e) => {
-                        const target = e.target as HTMLElement;
-                        if (target.dataset.dragHandle) return; 
-                        
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                        if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-                           ytPlayerRef.current.seekTo(percent * ytDuration, true);
-                           if (!ytPlaying) ytPlayerRef.current.pauseVideo();
-                        }
-                        setYtCurrentTime(percent * ytDuration);
-                        setSelectedMarkerId(null);
-                      }}
-                      onPointerMove={(e) => {
-                        if (e.buttons !== 1) return; 
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-
-                        const activeDrag = activeDragHandleRef.current;
-                        if (activeDrag) {
-                           const targetTimeSecs = percent * ytDuration;
-                           
-                           setTrackMarkers(prev => {
-                              const targetMarkerIdx = prev.findIndex(m => m.id === activeDrag.id);
-                              if (targetMarkerIdx === -1) return prev;
-
-                              const updated = [...prev];
-                              let delta = 0;
-
-                              if (activeDrag.type === "start") {
-                                 delta = targetTimeSecs - updated[targetMarkerIdx].time;
-                                 if (delta < 0) {
-                                    delta = Math.max(delta, -updated[0].time);
-                                 } else {
-                                    if (targetMarkerIdx === 0) {
-                                       const maxDelta = ytDuration - 0.1 - updated[updated.length - 1].time;
-                                       if (delta > maxDelta) delta = maxDelta;
-                                    } else {
-                                       const maxTime = targetMarkerIdx < updated.length - 1 ? updated[targetMarkerIdx + 1].time - 0.1 : ytDuration - 0.1;
-                                       if (updated[targetMarkerIdx].time + delta > maxTime) delta = maxTime - updated[targetMarkerIdx].time;
-                                    }
-                                 }
-                                 if (delta === 0) return prev;
-                                 
-                                 if (targetMarkerIdx === 0) {
-                                    for (let j = 0; j < updated.length; j++) {
-                                       updated[j] = { ...updated[j], time: updated[j].time + delta };
-                                    }
-                                    const newOffset = Math.round(updated[0].time * 1000);
-                                    prevOffsetVal.current = newOffset;
-                                    setTimeout(() => setFormYoutubeSyncOffset(newOffset), 0);
-                                 } else {
-                                    for (let j = 0; j <= targetMarkerIdx; j++) {
-                                       updated[j] = { ...updated[j], time: updated[j].time + delta };
-                                    }
-                                 }
-                              } else if (activeDrag.type === "end") {
-                                 const nextIdx = targetMarkerIdx + 1;
-                                 if (nextIdx >= updated.length) return prev;
-
-                                 delta = targetTimeSecs - updated[nextIdx].time;
-                                 if (delta > 0) {
-                                    const lastIdx = updated.length - 1;
-                                    if (updated[lastIdx].time + delta > ytDuration - 0.1) delta = (ytDuration - 0.1) - updated[lastIdx].time;
-                                 } else {
-                                    const minTime = updated[targetMarkerIdx].time + 0.1;
-                                    if (updated[nextIdx].time + delta < minTime) delta = minTime - updated[nextIdx].time;
-                                 }
-                                 if (delta === 0) return prev;
-                                 
-                                 for (let j = nextIdx; j < updated.length; j++) {
-                                    updated[j] = { ...updated[j], time: updated[j].time + delta };
-                                 }
-                              }
-                              return updated;
-                           });
-                           return; 
-                        }
-
-                        if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-                           ytPlayerRef.current.seekTo(percent * ytDuration, true);
-                           if (!ytPlaying) ytPlayerRef.current.pauseVideo();
-                        }
-                        setYtCurrentTime(percent * ytDuration);
-                      }}
-                      onPointerUp={() => { 
-                         if (activeDragHandleRef.current) commitSequence(trackMarkersRef.current);
-                         activeDragHandleRef.current = null; 
-                      }}
-                      onPointerLeave={() => { 
-                         if (activeDragHandleRef.current) commitSequence(trackMarkersRef.current);
-                         activeDragHandleRef.current = null; 
-                      }}
-                    >
-                       
-                       <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
-                         <div className="absolute inset-0 opacity-20 flex items-center justify-center px-1 gap-[1px]">
-                           {Array.from({ length: Math.floor(150 * timelineZoom) }).map((_, i) => {
-                             const peak = Math.sin(i * 0.1) * Math.cos(i * 0.05) * Math.sin(i * 0.02);
-                             const height = 15 + Math.abs(peak) * 80 + Math.random() * 10;
-                             return <div key={i} className="flex-1 bg-on-surface rounded-full opacity-60" style={{ height: `${height}%` }} />;
-                           })}
-                         </div>
-                         <div className="absolute top-0 left-0 bottom-0 bg-primary/20 transition-all duration-75" style={{ width: `${(ytCurrentTime / ytDuration) * 100}%` }} />
-                       </div>
-                       
-                       <input 
-                         type="range" 
-                         min={0} max={ytDuration || 100} step="0.1" 
-                         value={ytCurrentTime} 
-                         onChange={(e) => {
-                           const t = parseFloat(e.target.value);
-                           setYtCurrentTime(t);
-                           if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-                             ytPlayerRef.current.seekTo(t, true);
-                             if (!ytPlaying) ytPlayerRef.current.pauseVideo();
-                           }
-                         }}
-                         onClick={() => setSelectedMarkerId(null)}
-                         className="absolute inset-0 w-full h-full opacity-0 cursor-text z-10" 
-                       />
-                       
-                       <div className="absolute inset-0 pointer-events-none z-20">
-                         {trackMarkers.map((marker, i) => {
-                            const nextMarker = trackMarkers[i + 1];
-                            const leftPercent = (marker.time / ytDuration) * 100;
-                            const widthPercent = nextMarker ? ((nextMarker.time - marker.time) / ytDuration) * 100 : 100 - leftPercent;
-                            const isSelected = selectedMarkerId === marker.id;
-                            const catalogItem = SECTION_BASE_CATALOG.find(c => marker.type.toLowerCase().startsWith(c.display.toLowerCase())) || SECTION_BASE_CATALOG[0];
-                            const metrics = getMarkerMetrics(marker, nextMarker);
-
-                            return (
-                               <div 
-                                 key={`${marker.id}-${i}`} 
-                                 className={`absolute top-0 bottom-0 border-l-[3px] transition-all pointer-events-auto ${isSelected ? 'border-primary z-30 bg-primary/10' : 'border-white/50 hover:border-white/80 z-20 cursor-pointer'} ${marker.color.split(' ')[2]}`} 
-                                 style={{ left: `${leftPercent}%`, width: `${widthPercent}%` }}
-                                 onClick={(e) => { 
-                                   if (!isSelected) {
-                                     e.stopPropagation(); 
-                                     setSelectedMarkerId(marker.id); 
-                                   }
-                                 }}
-                               >
-                                  {isSelected && (
-                                    <>
-                                       {/* Drag Handle START */}
-                                       <div 
-                                         className="absolute -left-2.5 top-0 bottom-0 w-5 cursor-col-resize z-[100] flex items-center justify-center group/handle"
-                                         data-drag-handle="true"
-                                         onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "start" }; }}
-                                       >
-                                         <div className="w-1.5 h-6 rounded-full bg-primary/0 group-hover/handle:bg-primary/50 transition-colors pointer-events-none" />
-                                       </div>
-
-                                       {/* Drag Handle END (If not last marker) */}
-                                       {nextMarker && (
-                                         <div 
-                                           className="absolute -right-2.5 top-0 bottom-0 w-5 cursor-col-resize z-[100] flex items-center justify-center group/handle"
-                                           data-drag-handle="true"
-                                           onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "end" }; }}
-                                         >
-                                           <div className="w-1.5 h-6 rounded-full bg-primary/0 group-hover/handle:bg-primary/50 transition-colors pointer-events-none" />
-                                         </div>
-                                       )}
-                                    </>
-                                  )}
-
-                                  <div className={`absolute top-2 left-1.5 px-2 py-1.5 rounded-lg backdrop-blur-md shadow-sm pointer-events-none flex flex-col items-start min-w-[36px] transition-colors ${isSelected ? 'bg-primary text-on-primary' : 'bg-black/70 text-white'}`}>
-                                     <span className="text-[11px] font-black uppercase tracking-widest leading-none block">{catalogItem.abbr}</span>
-                                     <span className={`text-[9px] font-mono font-bold block mt-1 leading-none ${isSelected ? 'text-on-primary/80' : 'text-white/70'}`}>
-                                       {isSelected ? "Selected" : `${metrics.measures}m ${metrics.beats}b`}
-                                     </span>
-                                  </div>
-                               </div>
-                            );
-                         })}
-                       </div>
-                       
-                       <div className="absolute top-0 bottom-0 w-[2px] bg-primary shadow-[0_0_10px_rgba(59,130,246,1)] z-40 pointer-events-none" style={{ left: `${(ytCurrentTime / ytDuration) * 100}%`, transition: 'left 0.1s linear' }}>
-                         <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-primary border-2 border-white shadow-[0_0_10px_rgba(59,130,246,1)]" />
-                       </div>
-                    </div>
-                  </div>
 
                   {/* Anchored Editor Menu directly below the timeline (Un-clipped) */}
                   {selectedMarkerId && (() => {
@@ -2776,21 +2893,33 @@ function formatTimeWithMs(seconds: number) {
                                <div className="flex flex-col gap-1.5">
                                   <span className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest">Start Boundary (Nudge 100ms)</span>
                                   <div className="flex items-center justify-between bg-surface-container-lowest rounded-lg border border-outline-variant/30 overflow-hidden h-9 shadow-sm">
-                                    <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "start", -0.1)} className="w-12 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[14px] flex items-center justify-center">◀</button>
+                                    {/* ✅ NEW: Move Section Left */}
+                                    <button type="button" onClick={() => handleMoveSection(marker.id, -0.1)} className="w-10 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black flex items-center justify-center bg-primary/10 hover:bg-primary/20 text-primary" title="Move Entire Section Left">
+                                      ◀
+                                    </button>
                                     <div className="w-px h-5 bg-outline-variant/30" />
+
                                     <button type="button" onClick={() => { 
                                        initAudioContext();
-                                       if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') { 
-                                         ytPlayerRef.current.seekTo(marker.time, true); 
-                                         setYtCurrentTime(marker.time);
-                                         if (!ytPlaying) ytPlayerRef.current.pauseVideo();
-                                       } 
-                                    }} className="flex-1 h-full hover:bg-primary/20 text-primary transition-colors flex items-center justify-center font-mono text-[11px] font-bold">
+                                       setTimeout(() => {
+                                         if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') { 
+                                           ytPlayerRef.current.seekTo(marker.time, true); 
+                                           setYtCurrentTime(marker.time);
+                                           if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+                                         } 
+                                       }, 0);
+                                    }} className="flex-1 h-full hover:bg-primary/10 text-primary transition-colors flex items-center justify-center font-mono text-[11px] font-bold" title="Seek to Start">
                                        <span className="material-symbols-outlined !text-[14px] mr-1" style={{ fontVariationSettings: "'FILL' 1" }}>my_location</span>
                                        {formatTimeWithMs(marker.time)}
                                     </button>
                                     <div className="w-px h-5 bg-outline-variant/30" />
-                                    <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "start", 0.1)} className="w-12 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[14px] flex items-center justify-center">▶</button>
+                                    
+                                    {/* ✅ Trim Start Boundary */}
+                                    <div className="flex w-16 h-full">
+                                      <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "start", -0.1)} className="flex-1 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[12px] flex items-center justify-center" title="Trim Start Left">◀</button>
+                                      <div className="w-px h-full bg-outline-variant/30" />
+                                      <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "start", 0.1)} className="flex-1 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[12px] flex items-center justify-center" title="Trim Start Right">▶</button>
+                                    </div>
                                   </div>
                                </div>
                                
@@ -2798,22 +2927,34 @@ function formatTimeWithMs(seconds: number) {
                                  <div className="flex flex-col gap-1.5">
                                     <span className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest">End Boundary (Nudge 100ms)</span>
                                     <div className="flex items-center justify-between bg-surface-container-lowest rounded-lg border border-outline-variant/30 overflow-hidden h-9 shadow-sm">
-                                      <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "end", -0.1)} className="w-12 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[14px] flex items-center justify-center">◀</button>
+                                      {/* ✅ Trim End Boundary */}
+                                      <div className="flex w-16 h-full">
+                                        <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "end", -0.1)} className="flex-1 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[12px] flex items-center justify-center" title="Trim End Left">◀</button>
+                                        <div className="w-px h-full bg-outline-variant/30" />
+                                        <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "end", 0.1)} className="flex-1 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[12px] flex items-center justify-center" title="Trim End Right">▶</button>
+                                      </div>
                                       <div className="w-px h-5 bg-outline-variant/30" />
+
                                       <button type="button" onClick={() => { 
                                          initAudioContext();
-                                         if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') { 
-                                           const targetTime = Math.max(0, nextMarker.time - 3); 
-                                           ytPlayerRef.current.seekTo(targetTime, true); 
-                                           setYtCurrentTime(targetTime);
-                                           if (!ytPlaying) ytPlayerRef.current.pauseVideo();
-                                         } 
-                                      }} className="flex-1 h-full hover:bg-primary/20 text-primary transition-colors flex items-center justify-center font-mono text-[11px] font-bold">
+                                         setTimeout(() => {
+                                           if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') { 
+                                             const targetTime = Math.max(0, nextMarker.time - 3); 
+                                             ytPlayerRef.current.seekTo(targetTime, true); 
+                                             setYtCurrentTime(targetTime);
+                                             if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+                                           } 
+                                         }, 0);
+                                      }} className="flex-1 h-full hover:bg-primary/10 text-primary transition-colors flex items-center justify-center font-mono text-[11px] font-bold" title="Seek to End">
                                          <span className="material-symbols-outlined !text-[14px] mr-1" style={{ fontVariationSettings: "'FILL' 1" }}>my_location</span>
                                          {formatTimeWithMs(nextMarker.time)}
                                       </button>
                                       <div className="w-px h-5 bg-outline-variant/30" />
-                                      <button type="button" onClick={() => handleAdjustMarkerTime(marker.id, "end", 0.1)} className="w-12 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black text-[14px] flex items-center justify-center">▶</button>
+
+                                      {/* ✅ NEW: Move Section Right */}
+                                      <button type="button" onClick={() => handleMoveSection(marker.id, 0.1)} className="w-10 h-full hover:bg-surface-bright transition-colors text-on-surface-variant font-black flex items-center justify-center bg-primary/10 hover:bg-primary/20 text-primary" title="Move Entire Section Right">
+                                        ▶
+                                      </button>
                                     </div>
                                  </div>
                                ) : (
@@ -2866,9 +3007,9 @@ function formatTimeWithMs(seconds: number) {
                     <button 
                       type="button" 
                       onClick={() => addTrackMarker(`spacer-${Date.now()}`, "Spacer", "Unmarked", "text-zinc-300 border-zinc-400/30 bg-zinc-400/10")} 
-                      className="h-[46px] px-6 flex items-center justify-center rounded-xl bg-surface-container-high hover:bg-surface-bright text-on-surface text-[12px] font-black uppercase tracking-widest shadow-sm transition-colors border border-outline-variant/30 cursor-pointer shrink-0"
+                      className="h-[44px] px-6 flex items-center justify-center rounded-xl bg-surface-container-high hover:bg-surface-bright text-on-surface text-[12px] font-black uppercase tracking-widest shadow-sm transition-colors border border-outline-variant/30 cursor-pointer shrink-0"
                     >
-                      + Add Unmarked
+                      +
                     </button>
                   </div>
                 </div>

@@ -248,12 +248,13 @@ export default function DevFab() {
             </div>
           </div>
           
-          <div className="flex items-center justify-between gap-2 text-xs font-bold">
-            <span className="text-zinc-400 font-medium">Access Role</span>
-            <select 
+          <div className="flex items-center justify-between gap-4 text-xs font-bold">
+            <div className="flex flex-col gap-1">
+              <span className="text-zinc-400 font-medium">Access Role</span>
+              <select 
               value={simulatedRole} 
               onChange={(e) => setSimulatedRole(e.target.value as RoleType)}
-              className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[11px] font-black text-white outline-none cursor-pointer focus:border-blue-500"
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[12px] font-black text-white outline-none cursor-pointer focus:border-blue-500"
             >
               <option value="admin">ADMIN</option>
               <option value="moderator">MODERATOR</option>
@@ -261,15 +262,19 @@ export default function DevFab() {
               <option value="member">MEMBER</option>
               <option value="none">NONE (AUTH)</option>
             </select>
-          </div>
-
-          <button
+            </div>
+            
+            
+            <button
             type="button"
             onClick={() => { setIsGlobalModalOpen(true); setIsOpen(false); }}
             className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white font-black text-[11px] uppercase tracking-wider rounded-xl shadow-md cursor-pointer transition-colors text-center"
           >
-            👥 Open Global User Manager
+            <span className="material-symbols-outlined">manage_accounts</span>
           </button>
+          </div>
+
+          
         </div>
       )}
 

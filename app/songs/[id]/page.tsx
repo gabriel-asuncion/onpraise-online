@@ -94,6 +94,15 @@ export default function SoloPracticeRoomPage() {
   const metronomeSoundTypeRef = useRef(metronomeSoundType);
   useEffect(() => { metronomeSoundTypeRef.current = metronomeSoundType; }, [metronomeSoundType]);
 
+  // ✅ SURGICAL FIX: Force window scroll to top on mount to reset the Global Bottom Nav state!
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+      // Dispatch a manual upward scroll event to force the nav bar to un-hide itself
+      window.dispatchEvent(new CustomEvent("onpraise-scroll", { detail: false }));
+    }
+  }, []);
+
   useEffect(() => {
     if (isMetronomeSoundEnabledRef) {
       isMetronomeSoundEnabledRef.current = isMetronomeSoundEnabled;
