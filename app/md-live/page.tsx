@@ -4,7 +4,7 @@ import React, { useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
 import { useEngine } from "../context/EngineContext";
-import GlobalLoader from "../../components/GlobalLoader";
+import PageSkeleton from "../../components/PageSkeleton";
 
 interface MDProject {
   id: string;
@@ -226,7 +226,7 @@ export default function MDLiveDashboard() {
     });
   }, [projects, searchQuery]);
 
-  if (loading) return <GlobalLoader message="LOADING STUDIO PROJECTS..." />;
+  if (loading) return <PageSkeleton message="LOADING STUDIO PROJECTS..." variant="studio" />;
 
   return (
     <div className="bg-[#0e0e11] text-[#f3f4f6] font-sans antialiased min-h-[100dvh] w-full flex flex-col items-center select-none">

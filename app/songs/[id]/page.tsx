@@ -4,7 +4,7 @@ import React, { useEffect, useState, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext"; 
-import GlobalLoader from '../../../components/GlobalLoader';
+import PageSkeleton from '../../../components/PageSkeleton';
 
 import { useTimesync } from '../../../hooks/useTimesync';
 import { useWakeLock } from "../../setlists/[id]/live/hooks/useWakeLock";
@@ -658,7 +658,7 @@ export default function SoloPracticeRoomPage() {
     return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
   };
 
-  if (loading) return <GlobalLoader message="LOADING SONG..." />;
+  if (loading) return <PageSkeleton message="LOADING SONG..." variant="live" />;
 
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">

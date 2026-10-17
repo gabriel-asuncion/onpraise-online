@@ -7,8 +7,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: 'Live Setlist and Worship Management',
     start_url: '/',
     display: 'standalone',
-    background_color: '#1954D5',
-    theme_color: '#009DFE',
+    background_color: '#09090B',
+    theme_color: '#09090B',
     // ✅ SURGICAL ADDITION: Registering the custom protocol
     protocol_handlers: [
       {

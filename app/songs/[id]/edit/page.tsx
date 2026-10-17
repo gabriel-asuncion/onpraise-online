@@ -6,7 +6,6 @@ import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
-import GlobalLoader from '../../../../components/GlobalLoader';
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
 
 // =======================================================
@@ -309,6 +308,7 @@ export default function SongEditPage() {
   useEffect(() => { sectionTimingsRef.current = sectionTimings; }, [sectionTimings]);
 
   const isInternalTrackEditRef = useRef(false);
+  const hasPendingTrackCommitRef = useRef(false);
   const prevOffsetVal = useRef(formYoutubeSyncOffset);
 
   // ✅ Global Offset Sync
@@ -373,52 +373,122 @@ export default function SongEditPage() {
   // ✅ Auto-Commit Engine: Locks in the Exact Float timestamps without snapping back
   const commitSequence = (markersArray: TrackMarker[]) => {
     if (markersArray.length === 0) {
+      trackMarkersRef.current = [];
       setTrackMarkers([]);
+      hasPendingTrackCommitRef.current = false;
       return;
     }
+    
     const bpm = parseInt(formTempo) || 75;
     const secPerBeat = 60 / bpm;
 
     const newSections: SongSectionBlock[] = [];
-    const newTimings: SectionTimingMap = { ...sectionTimingsRef.current };
+    // Keep canonical Spacer N timing definitions as a duration-template cache,
+    // but discard legacy duration-in-name keys from earlier versions.
+    const newTimings: SectionTimingMap = Object.fromEntries(
+      Object.entries(sectionTimingsRef.current).filter(([sectionType]) =>
+        !/^spacer(?:\s|$)/i.test(sectionType) || /^spacer\s+\d+$/i.test(sectionType)
+      )
+    );
     const consumedSectionIds = new Set<string>();
+    const spacerTypeByDuration = new Map<number, string>();
+    let nextSpacerNumber = 1;
 
-    markersArray.forEach((marker, idx) => {
-      const nextMarker = markersArray[idx + 1];
+    Object.entries(sectionTimingsRef.current).forEach(([sectionType, timings]) => {
+      const existingSpacerMatch = sectionType.match(/^spacer\s+(\d+)$/i);
+      if (!existingSpacerMatch) return;
+      const durationBeats = (Number(timings.measures) || 0) * 4 + (Number(timings.beats) || 0);
+      if (durationBeats > 0 && !spacerTypeByDuration.has(durationBeats)) {
+        spacerTypeByDuration.set(durationBeats, `Spacer ${existingSpacerMatch[1]}`);
+      }
+      nextSpacerNumber = Math.max(nextSpacerNumber, Number(existingSpacerMatch[1]) + 1);
+    });
+
+    const committedMarkers = markersArray
+      .map(marker => ({ ...marker }))
+      .sort((a, b) => a.time - b.time);
+
+    committedMarkers.forEach((marker, idx) => {
+      const nextMarker = committedMarkers[idx + 1];
       const durationSecs = nextMarker ? nextMarker.time - marker.time : ytDuration - marker.time;
-      const physicalBeats = Math.round(Math.max(0, durationSecs / secPerBeat));
+      const physicalBeats = Math.max(1, Math.round(Math.max(0, durationSecs / secPerBeat)));
+      const isSpacer = marker.type.toLowerCase().startsWith("spacer");
+      let committedType = marker.type;
+      if (isSpacer) {
+        committedType = spacerTypeByDuration.get(physicalBeats) || `Spacer ${nextSpacerNumber++}`;
+        spacerTypeByDuration.set(physicalBeats, committedType);
+      }
+      const committedLabel = isSpacer ? committedType : marker.label;
 
-      const existingTimings = newTimings[marker.type] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
-      const sectionMultiplier = (Number(existingTimings.repeats) || 0) + 1;
-      const paddingBeats = (Number(existingTimings.head_m) || 0) * 4 + (Number(existingTimings.tail_m) || 0) * 4;
-      const coreBeats = Math.max(0, Math.round((physicalBeats - paddingBeats) / sectionMultiplier));
+      if (isSpacer) {
+        // Reuse one shared spacer definition for each rounded musical duration.
+        // Each appearance remains a separate sequence item with its own section ID.
+        newTimings[committedType] = {
+          measures: Math.floor(physicalBeats / 4),
+          beats: physicalBeats % 4,
+          repeats: 0,
+          head_m: 0,
+          tail_m: 0,
+        };
+      } else {
+        const existingTimings = newTimings[committedType] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
+        const sectionMultiplier = (Number(existingTimings.repeats) || 0) + 1;
+        const paddingBeats = (Number(existingTimings.head_m) || 0) * 4 + (Number(existingTimings.tail_m) || 0) * 4;
+        const coreBeats = Math.max(0, Math.round((physicalBeats - paddingBeats) / sectionMultiplier));
+        newTimings[committedType] = { ...existingTimings, measures: Math.floor(coreBeats / 4), beats: coreBeats % 4 };
+      }
 
-      newTimings[marker.type] = { ...existingTimings, measures: Math.floor(coreBeats / 4), beats: coreBeats % 4 };
-
-      let referenceSec = formSectionsRef.current.find(s => s.id === marker.sectionId) || formSectionsRef.current.find(s => s.type === marker.type);
-      let safeId = marker.type.startsWith("Spacer") ? `spacer-${Math.random().toString(36).substring(7)}` : marker.sectionId;
-      if (consumedSectionIds.has(safeId) || marker.type.startsWith("Spacer") || !referenceSec) {
-          safeId = `sec-copy-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+      const referenceSec = formSectionsRef.current.find(s => s.id === marker.sectionId)
+        || formSectionsRef.current.find(s => s.type === committedType)
+        || formSectionsRef.current.find(s => s.type === marker.type);
+      let safeId = marker.sectionId || `sec-copy-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+      if (consumedSectionIds.has(safeId)) {
+        safeId = `sec-copy-${Date.now()}-${Math.random().toString(36).substring(7)}`;
       }
       consumedSectionIds.add(safeId);
 
-      if (!marker.type.startsWith("Spacer")) {
-          newSections.push({ id: safeId, type: marker.type, label: marker.label, content: referenceSec ? referenceSec.content : "", repetitions: 1 });
-      }
+      const catalogItem = SECTION_BASE_CATALOG.find(item => committedType.toLowerCase().startsWith(item.display.toLowerCase())) || SECTION_BASE_CATALOG[0];
+      newSections.push({
+        id: safeId,
+        type: committedType,
+        label: committedLabel,
+        content: isSpacer ? (referenceSec?.content || "") : (referenceSec ? referenceSec.content : ""),
+        repetitions: 1,
+      });
       marker.sectionId = safeId;
+      marker.type = committedType;
+      marker.label = committedLabel;
+      marker.color = catalogItem.color;
     });
 
     isInternalTrackEditRef.current = true; // ✅ Prevent Auto-Sync from overwriting floats
     setFormSections(newSections);
     setSectionTimings(newTimings);
-    setTrackMarkers(markersArray.sort((a,b) => a.time - b.time)); // ✅ Retain exact dragged floats
+    setTrackMarkers(committedMarkers); // ✅ Retain exact dragged floats without mutating caller state
+    trackMarkersRef.current = committedMarkers;
+    hasPendingTrackCommitRef.current = false;
     
-    if (markersArray.length > 0) {
-       const newOffset = Math.round(markersArray[0].time * 1000);
+     if (committedMarkers.length > 0) {
+       const newOffset = Math.round(committedMarkers[0].time * 1000);
        prevOffsetVal.current = newOffset;
        setFormYoutubeSyncOffset(newOffset);
     }
     setHasUnsavedChanges(true);
+  };
+
+  const stageTrackSequence = (markers: TrackMarker[]) => {
+    const stagedMarkers = markers.map(marker => ({ ...marker })).sort((a, b) => a.time - b.time);
+    trackMarkersRef.current = stagedMarkers;
+    setTrackMarkers(stagedMarkers);
+    hasPendingTrackCommitRef.current = true;
+    setHasUnsavedChanges(true);
+  };
+
+  const handleEditorTabChange = (nextTab: typeof editorActiveTab) => {
+    if (editorActiveTab === "track" && nextTab !== "track" && hasPendingTrackCommitRef.current) {
+      commitSequence(trackMarkersRef.current);
+    }
+    setEditorActiveTab(nextTab);
   };
 
   const addTrackMarker = (sectionId: string, baseType: string, label: string, color: string) => {
@@ -426,12 +496,13 @@ export default function SongEditPage() {
     const time = ytCurrentTime;
     const bpm = parseInt(formTempo) || 75;
     const secPerBeat = 60 / bpm;
+    const isSpacerMarker = baseType.toLowerCase().startsWith("spacer");
     
     const hasExistingContent = formSectionsRef.current.length > 1 || (formSectionsRef.current.length === 1 && formSectionsRef.current[0].content.trim() !== "");
     let finalLabel = label;
     let finalType = baseType;
 
-    if (!hasExistingContent && baseType !== "Spacer") {
+    if (!hasExistingContent && !isSpacerMarker) {
         const regex = new RegExp(`^${baseType}\\s+(\\d+)$`, 'i');
         let maxNum = 0;
         trackMarkersRef.current.forEach(m => {
@@ -443,7 +514,7 @@ export default function SongEditPage() {
         });
         finalType = `${baseType} ${maxNum + 1}`;
         finalLabel = finalType;
-    } else if (baseType === "Spacer") {
+    } else if (baseType.toLowerCase() === "spacer") {
         const spCount = trackMarkersRef.current.filter(m => m.type.startsWith("Spacer")).length + 1;
         finalType = `Spacer ${spCount}`;
         finalLabel = finalType;
@@ -453,10 +524,12 @@ export default function SongEditPage() {
     const newMarker = { id: uniqueMarkerId, sectionId, time, type: finalType, label: finalLabel, color };
     const newMarkers = [...trackMarkersRef.current, newMarker];
 
-    if (hasExistingContent && baseType !== "Spacer") {
+    if (hasExistingContent && !isSpacerMarker) {
       const timings = sectionTimingsRef.current[finalType];
       if (timings) {
-         const totalBeats = (timings.measures * 4) + timings.beats;
+         const totalBeats = (((timings.measures * 4) + timings.beats) * ((timings.repeats || 0) + 1))
+           + ((timings.head_m || 0) * 4)
+           + ((timings.tail_m || 0) * 4);
          if (totalBeats > 0) {
             const spCount = trackMarkersRef.current.filter(m => m.type.startsWith("Spacer")).length + 1;
             newMarkers.push({
@@ -470,7 +543,7 @@ export default function SongEditPage() {
          }
       }
     }
-    commitSequence(newMarkers.sort((a, b) => a.time - b.time));
+    stageTrackSequence(newMarkers);
   };
 
   const getMarkerMetrics = (marker: TrackMarker, nextMarker?: TrackMarker) => {
@@ -557,8 +630,7 @@ export default function SongEditPage() {
     }
 
     if (newSequenceArray) {
-       setTrackMarkers(newSequenceArray); // Synchronous UI update
-       commitSequence(newSequenceArray);
+      stageTrackSequence(newSequenceArray);
     }
 
     if (targetTimeToSeek !== null) {
@@ -655,8 +727,7 @@ export default function SongEditPage() {
     }
 
     if (newSequenceArray) {
-       setTrackMarkers(newSequenceArray);
-       commitSequence(newSequenceArray);
+      stageTrackSequence(newSequenceArray);
     }
 
     if (targetTimeToSeek !== null) {
@@ -2090,7 +2161,7 @@ function formatTimeWithMs(seconds: number) {
             <div className="flex gap-4 text-xs font-bold">
               {/* ✅ SURGICAL FIX: Added the "track" tab */}
               {(["details", "content", "track", "structure"] as const).map(tab => (
-                <button key={tab} type="button" onClick={() => setEditorActiveTab(tab)} className={`py-3 capitalize tracking-wide transition-all border-b-2 font-black ${editorActiveTab === tab ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}>{tab}</button>
+                <button key={tab} type="button" onClick={() => handleEditorTabChange(tab)} className={`py-3 capitalize tracking-wide transition-all border-b-2 font-black ${editorActiveTab === tab ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}>{tab}</button>
               ))}
             </div>
 
@@ -2642,7 +2713,7 @@ function formatTimeWithMs(seconds: number) {
                        <span className="material-symbols-outlined text-primary">linear_scale</span> Timeline Markers
                      </h3>
                    </div>
-                   <button type="button" onClick={() => setTrackMarkers([])} className="text-[10px] font-black uppercase tracking-widest text-error hover:bg-error/10 px-3 py-1.5 rounded-lg transition-colors border border-error/20 cursor-pointer">Clear</button>
+                   <button type="button" onClick={() => { trackMarkersRef.current = []; setTrackMarkers([]); hasPendingTrackCommitRef.current = false; }} className="text-[10px] font-black uppercase tracking-widest text-error hover:bg-error/10 px-3 py-1.5 rounded-lg transition-colors border border-error/20 cursor-pointer">Clear</button>
                 </div>            
               <div className="relative mt-6" ref={trackWorkspaceRef}>
                   
@@ -2744,12 +2815,10 @@ function formatTimeWithMs(seconds: number) {
                         }}
                         onPointerUp={() => { 
                            isTimelineScrubbingRef.current = false;
-                           if (activeDragHandleRef.current) commitSequence(trackMarkersRef.current);
                            activeDragHandleRef.current = null; 
                         }}
                         onPointerLeave={() => { 
                            isTimelineScrubbingRef.current = false;
-                           if (activeDragHandleRef.current) commitSequence(trackMarkersRef.current);
                            activeDragHandleRef.current = null; 
                         }}
                       >
@@ -2785,7 +2854,7 @@ function formatTimeWithMs(seconds: number) {
                                          <div 
                                            className="absolute -left-2.5 top-0 bottom-0 w-5 cursor-col-resize z-[100] flex items-center justify-center group/handle"
                                            data-drag-handle="true"
-                                           onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "start" }; }}
+                                           onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "start" }; hasPendingTrackCommitRef.current = true; }}
                                          >
                                            <div className="w-1.5 h-6 rounded-full bg-primary/0 group-hover/handle:bg-primary/50 transition-colors pointer-events-none" />
                                          </div>
@@ -2795,7 +2864,7 @@ function formatTimeWithMs(seconds: number) {
                                            <div 
                                              className="absolute -right-2.5 top-0 bottom-0 w-5 cursor-col-resize z-[100] flex items-center justify-center group/handle"
                                              data-drag-handle="true"
-                                             onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "end" }; }}
+                                             onPointerDown={(e) => { e.stopPropagation(); activeDragHandleRef.current = { id: marker.id, type: "end" }; hasPendingTrackCommitRef.current = true; }}
                                            >
                                              <div className="w-1.5 h-6 rounded-full bg-primary/0 group-hover/handle:bg-primary/50 transition-colors pointer-events-none" />
                                            </div>
@@ -2880,7 +2949,7 @@ function formatTimeWithMs(seconds: number) {
                                <button type="button" onClick={() => { 
                                    if (window.confirm("Are you sure you want to remove this section marker?")) {
                                      const updated = trackMarkersRef.current.filter(m => m.id !== marker.id);
-                                     commitSequence(updated); 
+                                     stageTrackSequence(updated); 
                                      setSelectedMarkerId(null); 
                                    }
                                  }} className="w-8 h-8 rounded-lg bg-error/10 text-error hover:bg-error/20 flex items-center justify-center transition-colors border border-error/20 shadow-sm" title="Delete Marker">

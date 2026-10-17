@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useEffect, useState, useRef, useMemo } from "react";
+import React, { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext"; 
-import GlobalLoader from '../../../../components/GlobalLoader';
+import PageSkeleton from '../../../../components/PageSkeleton';
 import { useTimesync } from '../../../../hooks/useTimesync';
 
 import { CompiledSectionToken, CompiledBeatMap, BeatNode, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "./types/setlist";
@@ -67,7 +67,7 @@ export default function SetlistPerformanceRoomPage() {
   const params = useParams();
   const setlistId = params?.id as string;
 
-  const { simulatedUserId, simulatedRole, activeRole } = useEngine(); // ✅ Added activeRole
+  const { simulatedUserId, simulatedRole, activeRole, userTeamId } = useEngine(); // ✅ Added activeRole
   const { isSynced, getGlobalTime } = useTimesync();
   
 
@@ -90,7 +90,7 @@ export default function SetlistPerformanceRoomPage() {
   } = useLocalPreferences();
 
   const {
-    loading, loadingStatus, setlistName, tracksList, setTracksList, tracksListRef,
+    loading, loadingStatus, setlistName, setlistEventName, setlistTeamId, setlistTrackTitles, tracksList, setTracksList, tracksListRef,
     currentTrackIndex, setCurrentTrackIndex, currentTrackIndexRef,
     activeSong, setActiveSong, activeSongRef,
     sections, setSections, sectionsRef,
@@ -232,7 +232,7 @@ export default function SetlistPerformanceRoomPage() {
   };
 
   // ✅ SURGICAL ADDITION: Network Read Receipt Broadcaster
-  const sendReadReceipt = (messageId: string) => {
+  const sendReadReceipt = useCallback((messageId: string) => {
     if (!realtimeChannelRef.current || !localPresenceUserRef.current) return;
     realtimeChannelRef.current.send({
       type: "broadcast",
@@ -247,7 +247,7 @@ export default function SetlistPerformanceRoomPage() {
         }
       }
     });
-  };
+  }, []);
 
   // ✅ SURGICAL FIX: Ephemeral Ping Sender now carries the message payload!
   const sendPingMessage = (text: string, targetUserId?: string) => {
@@ -1343,7 +1343,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
   };
 
-  if (loading) return <GlobalLoader message="LOADING SETLIST..." />;
+  if (loading) return <PageSkeleton message="LOADING SETLIST..." variant="live" />;
 
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
@@ -1440,7 +1440,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
               )}
 
               {/* The Scrubber slides in and out attached to the active song */}
-              {isActive && !isZenMode && (
+              {/* {isActive && !isZenMode && (
                 <ScrubberOverlay 
                   sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={queuedTrackIndex} currentTrackIndex={currentTrackIndex}
                   queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
@@ -1448,7 +1448,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
                   // ✅ Feed the independent refs in
                   sectionRefs={localSectionRefs} 
                 />
-              )}
+              )} */}
             </div>
           );
         })}
@@ -1759,6 +1759,11 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         pingCooldown={pingCooldown} 
         lastReadTimes={lastReadTimes} 
         setLastReadTimes={setLastReadTimes}
+        teamId={setlistTeamId || userTeamId}
+        setlistId={setlistId}
+        setlistName={setlistName}
+        eventName={setlistEventName}
+        trackTitles={setlistTrackTitles}
       />
 
       <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>

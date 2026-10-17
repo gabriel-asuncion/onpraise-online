@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
 import { useEngine } from "../context/EngineContext";
 import { getAllSongs } from "../../utils/supabase/actions";
-import GlobalLoader from '../../components/GlobalLoader';
+import PageSkeleton from '../../components/PageSkeleton';
 
 import { getSongContentType, SongContentType } from "../setlists/[id]/live/utils/setlist-helpers";
 
@@ -494,7 +494,7 @@ export default function SongsListPage() {
   });
 
   if (loading) {
-    return <GlobalLoader message="LOADING SONGS LIBRARY..." />;
+    return <PageSkeleton message="LOADING SONGS LIBRARY..." variant="song-library" />;
   }
 
   return (

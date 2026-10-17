@@ -55,6 +55,9 @@ export default function Home() {
   // ✅ SURGICAL ADDITION: iOS Custom Prompt States
   const [isIOS, setIsIOS] = useState(false);
   const [showIOSTutorial, setShowIOSTutorial] = useState(false);
+  const [showInstallHelp, setShowInstallHelp] = useState(false);
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+  const [isInAppBrowser, setIsInAppBrowser] = useState(false);
 
   // ✅ SURGICAL ADDITION: Device Detection & PWA Event Listeners
   useEffect(() => {
@@ -65,24 +68,31 @@ export default function Home() {
     setIsInBrowserTab(!isStandalone);
     if (isStandalone) setHasInstalledApp(true);
 
-    // 2. Detect iOS (iPad, iPhone, iPod)
-    const userAgent = window.navigator.userAgent.toLowerCase();
-    const isAppleDevice = /iphone|ipad|ipod/.test(userAgent);
+    // Detect mobile platforms, including iPads reporting desktop Safari.
+    const userAgent = window.navigator.userAgent;
+    const normalizedUserAgent = userAgent.toLowerCase();
+    const isAppleDevice = /iphone|ipad|ipod/.test(normalizedUserAgent) ||
+      (window.navigator.platform === 'MacIntel' && window.navigator.maxTouchPoints > 1);
+    const isAndroidDevice = /android/.test(normalizedUserAgent);
+    const isMobile = isAppleDevice || isAndroidDevice || /mobile/.test(normalizedUserAgent);
+    setIsMobileDevice(isMobile);
     setIsIOS(isAppleDevice);
+    setIsInAppBrowser(/FBAN|FBAV|FB_IAB|Messenger|Instagram|Line\/|Twitter|TikTok/i.test(userAgent));
 
-    // 3. Listen for Android/Chrome Install Prompt
+    // 4. Listen for Android/Chrome Install Prompt
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault(); // Stop Chrome from showing the mini-infobar automatically
       setDeferredPrompt(e);
       setIsInstallable(true);
     };
 
-    // 4. Listen for Successful Installation
+    // 5. Listen for Successful Installation
     const handleAppInstalled = () => {
       setIsInstallable(false);
       setHasInstalledApp(true);
       setShowInstallSuccessModal(true);
       setShowIOSTutorial(false);
+      setShowInstallHelp(false);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
@@ -151,23 +161,30 @@ export default function Home() {
   }, [supabase, router, inviteCode]);
 
   const handleInstallClick = async () => {
-    // ✅ SURGICAL FIX: If iOS, show our custom tutorial overlay
-    if (isIOS) {
+    // iOS Safari requires the user to add the app from its Share menu.
+    if (isIOS && !isInAppBrowser) {
       setShowIOSTutorial(true);
       return;
     }
 
-    // Android / Desktop Chrome Native Prompt
+    // Use the native install dialog only when the browser actually provided it.
     if (deferredPrompt) {
-      deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
-      if (outcome === 'accepted') {
-        setIsInstallable(false);
+      try {
+        await deferredPrompt.prompt();
+        const { outcome } = await deferredPrompt.userChoice;
+        if (outcome === 'accepted') setIsInstallable(false);
+        setDeferredPrompt(null);
+      } catch (error) {
+        console.error('PWA install prompt failed:', error);
+        setDeferredPrompt(null);
+        setShowInstallHelp(true);
       }
-      setDeferredPrompt(null);
-    } else {
-      alert("Installation is not fully supported on this browser. Try using Chrome or Safari.");
+      return;
     }
+
+    // In-app browsers commonly do not expose beforeinstallprompt. Explain the
+    // supported manual steps instead of leaving the install button inert.
+    setShowInstallHelp(true);
   };
 
   const handleGoogleLogin = async () => {
@@ -444,12 +461,13 @@ export default function Home() {
       <div className="absolute bottom-0 left-0 w-full z-50 p-6 pb-10 pointer-events-auto flex flex-col items-center justify-center">
         
         {/* ✅ SURGICAL FIX: Show button if native installable OR if it's an iOS device in the browser */}
-        {((isInstallable || isIOS) && !hasInstalledApp && isInBrowserTab) && (
+        {((isInstallable || isIOS || isMobileDevice) && !hasInstalledApp && isInBrowserTab) && (
           <button
             onClick={handleInstallClick}
             className="w-full max-w-sm mb-3 bg-zinc-900 hover:bg-zinc-800 text-white font-black text-sm uppercase tracking-wider py-4 px-4 rounded-2xl shadow-xl transition-all active:scale-95 flex items-center justify-center gap-3 cursor-pointer"
           >
-            <span className="text-lg">📱</span> Install to Home Screen
+            <span className="text-lg">📱</span>
+            {isInAppBrowser && !deferredPrompt ? 'Open in Browser to Install' : 'Install to Home Screen'}
           </button>
         )}
 
@@ -566,6 +584,43 @@ export default function Home() {
               </svg>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {showInstallHelp && (
+        <div className="fixed inset-0 z-[250000] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 pointer-events-auto">
+          <div role="dialog" aria-modal="true" aria-labelledby="install-help-title" className="w-full max-w-sm rounded-[2rem] bg-white p-6 text-center shadow-2xl">
+            <button
+              type="button"
+              onClick={() => setShowInstallHelp(false)}
+              aria-label="Close install instructions"
+              className="float-right -mt-2 -mr-2 flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 font-bold text-zinc-500"
+            >
+              ✕
+            </button>
+            <div className="clear-both pt-2">
+              <h3 id="install-help-title" className="mb-2 text-xl font-black tracking-tight text-zinc-900">
+                {isInAppBrowser ? 'Open OnPraise in your browser' : 'Install OnPraise'}
+              </h3>
+              <p className="mb-5 text-[13px] font-semibold leading-relaxed text-zinc-600">
+                {isInAppBrowser
+                  ? 'Messenger and some other in-app browsers do not support app installation. Use the app menu to open this page in Safari or Chrome, then install it there.'
+                  : 'This browser has not provided an automatic install prompt. Open its menu and choose “Install app” or “Add to Home Screen.”'}
+              </p>
+              {isInAppBrowser && (
+                <p className="mb-5 rounded-xl bg-zinc-50 p-3 text-left text-xs font-semibold leading-relaxed text-zinc-600">
+                  Your sign-in link will carry over when you open it in the browser. This page cannot launch another browser automatically.
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowInstallHelp(false)}
+                className="w-full rounded-xl bg-zinc-900 px-4 py-3 text-sm font-black uppercase tracking-wider text-white"
+              >
+                Got it
+              </button>
+            </div>
           </div>
         </div>
       )}

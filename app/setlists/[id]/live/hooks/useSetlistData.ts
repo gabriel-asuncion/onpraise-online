@@ -3,8 +3,12 @@ import { SongRecord, SetlistTrackItem, ArrangementSection } from "../types/setli
 
 export function useSetlistData(setlistId: string, supabase: any) {
   const [loading, setLoading] = useState(true);
+  const [loadedSetlistId, setLoadedSetlistId] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState("Initializing performance space...");
   const [setlistName, setNewSetlistName] = useState("Live Performance Setlist");
+  const [setlistEventName, setSetlistEventName] = useState("Event");
+  const [setlistTeamId, setSetlistTeamId] = useState<string | null>(null);
+  const [setlistTrackTitles, setSetlistTrackTitles] = useState<string[]>([]);
   
   const [tracksList, setTracksList] = useState<SetlistTrackItem[]>([]);
   const tracksListRef = useRef<SetlistTrackItem[]>([]);
@@ -34,11 +38,21 @@ export function useSetlistData(setlistId: string, supabase: any) {
         setLoadingStatus("Waiting for Next.js route parameters to hydrate...");
         return;
       }
+      setSetlistTeamId(null);
+      setSetlistEventName("Event");
+      setSetlistTrackTitles([]);
 
       try {
-        const { data: setlistRow } = await supabase.from("setlists").select("name").eq("id", setlistId).maybeSingle();
+        const { data: setlistRow } = await supabase.from("setlists").select("name, event_id").eq("id", setlistId).maybeSingle();
         if (!isCurrentActiveMount) return;
         if (setlistRow?.name) setNewSetlistName(setlistRow.name);
+        if (setlistRow?.event_id) {
+          const { data: eventRow } = await supabase.from("events").select("team_id, title").eq("id", setlistRow.event_id).maybeSingle();
+          if (isCurrentActiveMount && eventRow) {
+            if (eventRow.team_id) setSetlistTeamId(eventRow.team_id);
+            if (eventRow.title) setSetlistEventName(eventRow.title);
+          }
+        }
 
         const primaryResponse = await supabase
           .from("setlist_songs")
@@ -57,6 +71,10 @@ export function useSetlistData(setlistId: string, supabase: any) {
         }
 
         if (rawQueryData && rawQueryData.length > 0) {
+          const trackTitles = rawQueryData.flatMap((row) => {
+            const song = Array.isArray(row.songs) ? row.songs[0] : row.songs;
+            return song?.title ? [song.title as string] : [];
+          });
           const formattedTracks = await Promise.all(rawQueryData.map(async (t: any) => {
             const flattenedSongNode = Array.isArray(t.songs) ? t.songs[0] : t.songs;
             if (!flattenedSongNode) return null;
@@ -84,6 +102,8 @@ export function useSetlistData(setlistId: string, supabase: any) {
           const cleanTracks = formattedTracks.filter(t => t !== null) as SetlistTrackItem[];
           
           if (isCurrentActiveMount) {
+            setLoadedSetlistId(setlistId);
+            setSetlistTrackTitles(trackTitles);
             setTracksList(cleanTracks);
             if (cleanTracks.length > 0) {
               const firstItem = cleanTracks[0];
@@ -99,12 +119,14 @@ export function useSetlistData(setlistId: string, supabase: any) {
         } else {
           if (isCurrentActiveMount) {
             setLoadingStatus("Handshake clean, but this setlist has no songs added to it yet.");
+            setLoadedSetlistId(setlistId);
             setLoading(false);
           }
         }
       } catch (err: any) {
         if (isCurrentActiveMount) {
           setLoadingStatus(`Critical Crash: ${err?.message || "Check connection parameters"}`);
+          setLoadedSetlistId(setlistId);
           setLoading(false);
         }
       }
@@ -135,7 +157,7 @@ export function useSetlistData(setlistId: string, supabase: any) {
   };
 
   return {
-    loading, loadingStatus, setlistName, tracksList, setTracksList, tracksListRef,
+    loading: loading || loadedSetlistId !== setlistId, loadingStatus, setlistName, setlistEventName, setlistTeamId, setlistTrackTitles, tracksList, setTracksList, tracksListRef,
     currentTrackIndex, setCurrentTrackIndex, currentTrackIndexRef,
     activeSong, setActiveSong, activeSongRef,
     sections, setSections, sectionsRef,

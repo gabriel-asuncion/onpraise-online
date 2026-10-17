@@ -1,30 +1,104 @@
 import React, { useRef, useState, useEffect, useMemo } from "react";
+import { createClient } from "../../../../../utils/supabase/client";
+import { useSetlistInvites } from "../../../../../components/SetlistInviteProvider";
+
+interface TeamRosterProfile {
+  id: string;
+  full_name: string | null;
+  role: string | null;
+  ministries: string[] | null;
+  avatar_url: string | null;
+}
+
+interface LobbyPerson {
+  id: string;
+  name: string;
+  initials?: string;
+  avatar?: string | null;
+  isMD?: boolean;
+}
+
+interface LobbyReader {
+  id: string;
+  name: string;
+  initials?: string;
+  avatar?: string | null;
+}
+
+interface LobbyMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  targetUserId?: string;
+  timestamp: number;
+  seenBy?: LobbyReader[];
+}
 
 interface UserLobbyProps {
   isOpen: boolean;
   onClose: () => void;
-  onlineUsers: any[];
-  localPresenceUser: any;
-  lobbyMessages: any[];
+  onlineUsers: LobbyPerson[];
+  localPresenceUser: LobbyPerson | null;
+  lobbyMessages: LobbyMessage[];
   sendChatMessage: (text: string, targetId?: string) => void;
   sendPingMessage: (text: string, targetId?: string) => void;
   sendReadReceipt: (messageId: string) => void; // ✅ Add Prop
   pingCooldown: number;
   lastReadTimes: Record<string, number>;
   setLastReadTimes: React.Dispatch<React.SetStateAction<Record<string, number>>>;
+  teamId: string | null;
+  setlistId: string;
+  setlistName: string;
+  eventName: string;
+  trackTitles: string[];
 }
 
-export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lobbyMessages, sendChatMessage, sendPingMessage, sendReadReceipt, pingCooldown, lastReadTimes, setLastReadTimes }: UserLobbyProps) {
+export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lobbyMessages, sendChatMessage, sendPingMessage, sendReadReceipt, pingCooldown, lastReadTimes, setLastReadTimes, teamId, setlistId, setlistName, eventName, trackTitles }: UserLobbyProps) {
+  const supabase = useMemo(() => createClient(), []);
+  const { onlineByTeam, sendInvite, cooldownSeconds } = useSetlistInvites();
   const [dragY, setDragY] = useState(0);
   const [isClosing, setIsClosing] = useState(false);
   const [chatInput, setChatInput] = useState("");
-  const [whisperTarget, setWhisperTarget] = useState<any | null>(null);
+  const [whisperTarget, setWhisperTarget] = useState<LobbyPerson | null>(null);
   
   // ✅ SURGICAL ADDITION: Ping Toggle State
   const [isPingMode, setIsPingMode] = useState(false);
+  const [showInviteList, setShowInviteList] = useState(false);
+  const [onlineOnly, setOnlineOnly] = useState(true);
+  const [rosterLoading, setRosterLoading] = useState(false);
+  const [teamRoster, setTeamRoster] = useState<TeamRosterProfile[]>([]);
+  const [inviteSearch, setInviteSearch] = useState("");
+  const [sentInvites, setSentInvites] = useState<Record<string, boolean>>({});
   
   const startY = useRef(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const rosterLoadedForTeamRef = useRef<string | null>(null);
+  const lastReadEffectKeyRef = useRef("");
+
+  useEffect(() => {
+    if (!isOpen || !showInviteList || !teamId) return;
+    if (rosterLoadedForTeamRef.current === teamId) return;
+    let cancelled = false;
+    const loadingTimer = window.setTimeout(() => setRosterLoading(true), 0);
+    supabase
+      .from("profiles")
+      .select("id, full_name, role, ministries, avatar_url")
+      .or(`team_id.eq.${teamId},secondary_team_ids.cs.{${teamId}}`)
+      .order("full_name", { ascending: true })
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          console.error("Failed to load team members for setlist invites:", error.message);
+          rosterLoadedForTeamRef.current = null;
+        } else {
+          rosterLoadedForTeamRef.current = teamId;
+        }
+        setTeamRoster((data || []) as TeamRosterProfile[]);
+        setRosterLoading(false);
+      });
+    return () => { cancelled = true; window.clearTimeout(loadingTimer); };
+  }, [isOpen, showInviteList, teamId, supabase]);
 
   const triggerClose = () => {
     if (isClosing) return;
@@ -32,6 +106,7 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
     setTimeout(() => {
       setIsClosing(false);
       setDragY(0);
+      setShowInviteList(false);
       onClose();
     }, 250);
   };
@@ -74,7 +149,7 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
   }, [lobbyMessages, lastReadTimes, localPresenceUser]);
 
   const allUsers = useMemo(() => {
-    const usersMap = new Map();
+    const usersMap = new Map<string, LobbyPerson>();
     onlineUsers.forEach((user) => { if (user.id) usersMap.set(user.id, user); });
     if (localPresenceUser) usersMap.set(localPresenceUser.id, localPresenceUser);
     
@@ -85,6 +160,29 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
     });
   }, [onlineUsers, localPresenceUser]);
 
+  const teamPresence = useMemo(() => onlineByTeam[teamId || ""] || [], [onlineByTeam, teamId]);
+  const presenceByUser = useMemo(() => new Map(teamPresence.map((user) => [user.userId, user])), [teamPresence]);
+  const inviteCandidates = useMemo(() => teamRoster
+    .filter((profile) => profile.id !== localPresenceUser?.id)
+    .map((profile) => ({ profile, presence: presenceByUser.get(profile.id) }))
+    .filter(({ profile, presence }) => (!onlineOnly || Boolean(presence)) &&
+      `${profile.full_name || ""} ${profile.role || ""} ${(profile.ministries || []).join(" ")}`.toLowerCase().includes(inviteSearch.toLowerCase().trim()))
+    .sort((a, b) => Number(Boolean(b.presence)) - Number(Boolean(a.presence)) || (a.profile.full_name || "").localeCompare(b.profile.full_name || "")),
+  [teamRoster, presenceByUser, onlineOnly, inviteSearch, localPresenceUser]);
+
+  const handleInvite = async (recipientId: string) => {
+    if (!teamId) return;
+    const sent = await sendInvite(teamId, recipientId, setlistId, setlistName, eventName, trackTitles);
+    if (sent) {
+      setSentInvites((previous) => ({ ...previous, [recipientId]: true }));
+      window.setTimeout(() => setSentInvites((previous) => {
+        const next = { ...previous };
+        delete next[recipientId];
+        return next;
+      }), 10_000);
+    }
+  };
+
   // Effects execute now that dependencies exist
   useEffect(() => {
     if (isOpen) chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -92,6 +190,11 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
 
   useEffect(() => {
     if (!isOpen) return;
+    const latestMessage = visibleMessages[visibleMessages.length - 1];
+    const readKey = `${whisperTarget?.id || "global"}:${latestMessage?.id || "empty"}`;
+    if (lastReadEffectKeyRef.current === readKey) return;
+    lastReadEffectKeyRef.current = readKey;
+
     if (whisperTarget) {
       setLastReadTimes(prev => ({ ...prev, [whisperTarget.id]: Date.now() }));
     } else {
@@ -101,13 +204,13 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
     // Broadcast Network Read Receipt for the latest message visible
     if (visibleMessages.length > 0) {
       const lastMsg = visibleMessages[visibleMessages.length - 1];
-      const iHaveSeenIt = (lastMsg.seenBy || []).some((u: any) => u.id === localPresenceUser?.id);
+      const iHaveSeenIt = (lastMsg.seenBy || []).some((user) => user.id === localPresenceUser?.id);
       
       if (lastMsg.senderId !== localPresenceUser?.id && !iHaveSeenIt) {
         sendReadReceipt(lastMsg.id);
       }
     }
-  }, [whisperTarget, visibleMessages, isOpen]);
+  }, [whisperTarget, visibleMessages, isOpen, localPresenceUser?.id, sendReadReceipt, setLastReadTimes]);
 
   if (!isOpen) return null;
 
@@ -129,12 +232,65 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
           onTouchEnd={handleTouchEnd}
         >
           <div className="absolute top-2 left-1/2 -translate-x-1/2 w-10 h-1 bg-surface-container-highest rounded-full sm:hidden" />
-          <button type="button" onClick={triggerClose} className="absolute left-4 w-8 h-8 rounded-full bg-surface-container-highest text-on-surface flex items-center justify-center hover:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30">
-            <span className="material-symbols-outlined !text-[18px]">close</span>
+          <button type="button" onClick={showInviteList ? () => setShowInviteList(false) : triggerClose} className="absolute left-4 w-8 h-8 rounded-full bg-surface-container-highest text-on-surface flex items-center justify-center hover:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30" aria-label={showInviteList ? "Back to lobby" : "Close lobby"}>
+            <span className="material-symbols-outlined !text-[18px]">{showInviteList ? "arrow_back" : "close"}</span>
           </button>
-          <h2 className="!text-[18px] font-extrabold text-on-surface tracking-tight">Active Lobby</h2>
+          <h2 className="!text-[18px] font-extrabold text-on-surface tracking-tight">{showInviteList ? "Invite to Setlist" : "Active Lobby"}</h2>
+          {!showInviteList ? (
+            <button type="button" onClick={() => setShowInviteList(true)} className="absolute right-4 flex items-center gap-1 rounded-lg bg-primary px-3 py-2 text-[10px] font-black uppercase tracking-wider text-on-primary transition hover:bg-primary/80">
+              <span className="material-symbols-outlined !text-[16px]">person_add</span> Invite
+            </button>
+          ) : <span className="absolute right-4 w-8" />}
         </div>
 
+        {showInviteList ? (
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
+            <p className="text-[11px] font-medium leading-relaxed text-on-surface-variant">Invite a teammate to <span className="font-bold text-on-surface">{eventName} — {setlistName}</span>. Invitations expire after 10 seconds.</p>
+            <input value={inviteSearch} onChange={(event) => setInviteSearch(event.target.value)} placeholder="Search team members..." className="w-full rounded-xl border border-outline-variant/30 bg-surface-container px-3 py-2.5 text-sm text-on-surface outline-none placeholder:text-outline focus:border-primary" />
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Team members</span>
+              <button type="button" onClick={() => setOnlineOnly((value) => !value)} className={`rounded-full border px-3 py-1.5 text-[10px] font-bold transition ${onlineOnly ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" : "border-outline-variant/30 bg-surface-container-high text-on-surface-variant"}`}>
+                {onlineOnly ? "Online only" : "All members"}
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto custom-scrollbar">
+              {rosterLoading ? (
+                <div className="py-8 text-center text-xs font-semibold text-on-surface-variant">Loading team members…</div>
+              ) : inviteCandidates.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-outline-variant/30 px-4 py-8 text-center text-xs font-semibold text-on-surface-variant">
+                  {onlineOnly ? "No teammates are online right now." : "No matching team members found."}
+                </div>
+              ) : inviteCandidates.map(({ profile, presence }) => {
+                const roles = profile.ministries?.length ? profile.ministries.join(" · ") : (profile.role || "Team member");
+                const isBusyElsewhere = Boolean(presence?.activeSetlistId && presence.activeSetlistId !== setlistId);
+                const isAlreadyInSetlist = presence?.activeSetlistId === setlistId;
+                const cooldown = cooldownSeconds(profile.id);
+                const isSent = sentInvites[profile.id];
+                const disabled = !presence || isBusyElsewhere || isAlreadyInSetlist || isSent || cooldown > 0;
+                return (
+                  <div key={profile.id} className="flex items-center justify-between gap-3 rounded-xl border border-outline-variant/20 bg-surface-container p-3">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-primary/20 text-xs font-black text-primary">
+                        {profile.avatar_url ? <img src={profile.avatar_url} alt="" className="h-full w-full object-cover" /> : (profile.full_name || "?").split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}
+                        <span className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-surface-container ${presence ? "bg-emerald-400" : "bg-zinc-500"}`} />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="truncate text-[13px] font-bold text-on-surface">{profile.full_name || "Team member"}</p>
+                        <p className="truncate text-[10px] font-medium text-on-surface-variant">{roles}{isBusyElsewhere ? " · In another setlist" : ""}{isAlreadyInSetlist ? " · Already here" : ""}</p>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-center gap-0.5">
+                      <button type="button" disabled={disabled} onClick={() => void handleInvite(profile.id)} aria-label={cooldown > 0 ? `Invite cooldown: ${cooldown} seconds` : `Invite ${profile.full_name || "team member"}`} className={`flex h-9 min-w-9 items-center justify-center rounded-full px-2 text-on-primary transition disabled:cursor-not-allowed ${cooldown > 0 ? "bg-rose-500/15 text-rose-400" : "bg-primary hover:bg-primary/80 disabled:bg-surface-container-high disabled:text-on-surface-variant"}`}>
+                        {cooldown > 0 ? <span className="material-symbols-outlined !text-[18px]">close</span> : isSent ? <span className="material-symbols-outlined !text-[18px]">check</span> : isBusyElsewhere || isAlreadyInSetlist || !presence ? <span className="material-symbols-outlined !text-[16px]">block</span> : <span className="material-symbols-outlined !text-[20px]">add</span>}
+                      </button>
+                      {cooldown > 0 && <span className="text-[9px] font-black text-rose-400">{cooldown}s</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
         <div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
           
           {/* USER ROSTER (Top Half) */}
@@ -238,7 +394,7 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
                       {/* ✅ SURGICAL ADDITION: Network Read Receipt Avatars */}
                       {msg.seenBy && msg.seenBy.length > 0 && (
                         <div className={`flex items-center gap-1 mt-1 px-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
-                          {msg.seenBy.map((reader: any, i: number) => (
+                          {msg.seenBy.map((reader, i) => (
                             <div key={i} className="w-3.5 h-3.5 rounded-full overflow-hidden bg-surface-container-highest border border-surface shadow-sm" title={`Seen by ${reader.name}`}>
                               {reader.avatar ? (
                                 <img src={reader.avatar} alt={reader.name} className="w-full h-full object-cover" />
@@ -331,6 +487,7 @@ export function UserLobby({ isOpen, onClose, onlineUsers, localPresenceUser, lob
 
           </div>
         </div>
+        )}
       </div>
     </div>
   );

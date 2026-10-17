@@ -1,6 +1,6 @@
 import { EngineProvider } from "./context/EngineContext";
-import ClientLayoutWrapper from "../components/ClientLayoutWrapper";
-import IOSInstallPrompt from "../components/IOSInstallPrompt"; 
+import ClientLayoutWrapper from "../components/ClientLayoutWrapper"; 
+import { SetlistInviteProvider } from "../components/SetlistInviteProvider";
 import "./globals.css";
 import type { Metadata, Viewport } from "next";
 import Script from 'next/script';
@@ -79,14 +79,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
 
         <EngineProvider>
-          <ClientLayoutWrapper>
-            {children}
-            <SpeedInsights />
-            <Analytics />
-          </ClientLayoutWrapper>
+          <SetlistInviteProvider>
+            <ClientLayoutWrapper>
+              {children}
+              <SpeedInsights />
+              <Analytics />
+            </ClientLayoutWrapper>
+          </SetlistInviteProvider>
         </EngineProvider>
-
-        <IOSInstallPrompt />
       </body>
     </html>
   );

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
-import GlobalLoader from '../../../components/GlobalLoader';
+import PageSkeleton from '../../../components/PageSkeleton';
 import { 
   getAllSongs 
 } from "../../../utils/supabase/actions";
@@ -759,7 +759,7 @@ export default function EventCockpitPage() {
 
   if (!hasMounted) return null;
   if (loading) {
-    return <GlobalLoader message="LOADING EVENT DETAILS" />;
+    return <PageSkeleton message="LOADING EVENT DETAILS" variant="event-detail" />;
   }
 
   return (

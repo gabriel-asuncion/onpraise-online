@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
-import GlobalLoader from "../../../components/GlobalLoader";
+import PageSkeleton from "../../../components/PageSkeleton";
 import { getSongContentType, SongContentType } from "../../setlists/[id]/live/utils/setlist-helpers";
 
 interface PendingSong {
@@ -136,7 +136,7 @@ export default function ApprovalsDashboardPage() {
     setProcessingId(null);
   };
 
-  if (loading) return <GlobalLoader message="FETCHING PENDING APPROVALS..." />;
+  if (loading) return <PageSkeleton message="FETCHING PENDING APPROVALS..." variant="song-review" />;
 
   return (
     <div className="h-full w-full bg-surface text-on-surface flex flex-col overflow-hidden animate-in fade-in duration-300">

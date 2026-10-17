@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
-import GlobalLoader from '../../../components/GlobalLoader';
+import PageSkeleton from '../../../components/PageSkeleton';
 
 import { getSongContentType, SongContentType } from "../../setlists/[id]/live/utils/setlist-helpers";
 
@@ -108,7 +108,7 @@ export default function SongDashboardPage() {
   const approvedCount = mySongs.filter(s => s.approval_status === "approved").length;
   const rejectedCount = mySongs.filter(s => s.approval_status === "rejected").length;
 
-  if (loading) return <GlobalLoader message="LOADING YOUR DASHBOARD..." />;
+  if (loading) return <PageSkeleton message="LOADING YOUR DASHBOARD..." variant="song-review" />;
 
   return (
     <div className="h-[100dvh] w-full overflow-hidden flex flex-col relative bg-surface font-sans text-on-surface">

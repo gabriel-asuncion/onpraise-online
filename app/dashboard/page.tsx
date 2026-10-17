@@ -5,7 +5,7 @@ import { createPortal } from "react-dom"; // ✅ Added for Sidebar portaling
 import { useRouter } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
 import { useEngine } from "../context/EngineContext";
-import GlobalLoader from '../../components/GlobalLoader';
+import PageSkeleton from '../../components/PageSkeleton';
 
 // Helper to extract YouTube ID
 function extractYouTubeID(url: string) {
@@ -554,7 +554,7 @@ export default function DashboardPage() {
   const activeBpm = activePracticeSong?.tempo ? activePracticeSong.tempo : "--";
   const seekPercentage = ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0;
 
-  if (loading) return <GlobalLoader message="LOADING DASHBOARD..." />;
+  if (loading) return <PageSkeleton message="LOADING DASHBOARD..." variant="dashboard" />;
 
   return (
     <div className="bg-surface text-on-surface font-body-lead text-body-lead flex flex-col h-full w-full overflow-hidden">

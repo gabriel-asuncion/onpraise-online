@@ -6,7 +6,7 @@ import { createClient } from "../../utils/supabase/client";
 import Link from "next/link"; 
 import { useEngine } from "../context/EngineContext";
 import { getUserTeam, getAllProfiles } from "../../utils/supabase/actions";
-import GlobalLoader from '../../components/GlobalLoader';
+import PageSkeleton from '../../components/PageSkeleton';
 
 interface EventItem { 
   id: string; 
@@ -217,7 +217,7 @@ export default function EventsManagerPage() {
 
 
   if (loading) {
-  return <GlobalLoader message="LOADING EVENTS LIST..." />;
+  return <PageSkeleton message="LOADING EVENTS LIST..." variant="events" />;
 }
 
   return (
