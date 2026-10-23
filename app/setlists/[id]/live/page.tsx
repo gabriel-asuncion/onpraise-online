@@ -77,7 +77,7 @@ export default function SetlistPerformanceRoomPage() {
   useWakeLock();
   
   // ✅ SURGICAL FIX: Bring back fetchAndDecodeAudio
-  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio } = useWebAudioEngine();
+  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio, setAudioPanRight } = useWebAudioEngine();
 
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
@@ -86,8 +86,13 @@ export default function SetlistPerformanceRoomPage() {
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
-    isYoutubeSyncEnabled, setIsYoutubeSyncEnabled
+    isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
+    isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   } = useLocalPreferences();
+
+  useEffect(() => {
+    setAudioPanRight(isClickGuideHardPannedRight);
+  }, [isClickGuideHardPannedRight, setAudioPanRight]);
 
   const {
     loading, loadingStatus, setlistName, setlistEventName, setlistTeamId, setlistTrackTitles, tracksList, setTracksList, tracksListRef,
@@ -1486,6 +1491,8 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         isYoutubeSyncEnabled={isYoutubeSyncEnabled} 
         setIsYoutubeSyncEnabled={handleSetYoutubeSync} // ✅ Pass the syncing wrapper
         youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}
+        isClickGuideHardPannedRight={isClickGuideHardPannedRight}
+        setIsClickGuideHardPannedRight={setIsClickGuideHardPannedRight}
         canEditSong={canEditSong}
         isRecording={isRecording} setIsRecordModalOpen={setIsRecordModalOpen} 
         recordingStartTime={recordingStartTime}

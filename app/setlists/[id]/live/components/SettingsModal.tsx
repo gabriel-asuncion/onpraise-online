@@ -39,6 +39,8 @@ interface SettingsModalProps {
   setIsYoutubeSyncEnabled: (val: boolean) => void;
   youtubeVolume: number;
   setYoutubeVolume: (val: number) => void;
+  isClickGuideHardPannedRight: boolean;
+  setIsClickGuideHardPannedRight: (val: boolean) => void;
   canEditSong: boolean;
   isPlayingFlow: boolean;
   router: AppRouterInstance;
@@ -401,6 +403,8 @@ export function SettingsModal(props: SettingsModalProps) {
         setLocalClickVolume={setLocalClickVolume}
         youtubeVolume={youtubeVolume} 
         setYoutubeVolume={setYoutubeVolume}
+        isClickGuideHardPannedRight={props.isClickGuideHardPannedRight}
+        setIsClickGuideHardPannedRight={props.setIsClickGuideHardPannedRight}
         metronomeSoundType={metronomeSoundType}
         setMetronomeSoundType={setMetronomeSoundType}
       />

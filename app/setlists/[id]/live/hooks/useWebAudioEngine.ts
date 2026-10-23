@@ -3,9 +3,18 @@ import { normalizeSectionNameToAudioFile } from "../utils/setlist-helpers";
 // Bypasses React state completely for zero-latency hardware access
 let globalAudioContext: AudioContext | null = null;
 const audioBufferCache: Record<string, AudioBuffer> = {};
+let isHardPanRightEnabled = false;
+const activePanners = new Set<StereoPannerNode>();
 
 // ✅ SURGICAL FIX: Track scheduled nodes so we can kill ghost beats on jumps
 let scheduledNodes: { source: AudioBufferSourceNode; time: number }[] = [];
+
+export const setAudioPanRight = (enabled: boolean) => {
+  isHardPanRightEnabled = enabled;
+  activePanners.forEach((panner) => {
+    panner.pan.value = enabled ? 1 : 0;
+  });
+};
 
 export const initAudioContext = () => {
   if (typeof window !== "undefined" && !globalAudioContext) {
@@ -43,9 +52,14 @@ export const playZeroLatencyAudio = (key: string, volume: number = 1.0, time: nu
 
     const gainNode = ctx.createGain();
     gainNode.gain.value = volume;
+    const pannerNode = ctx.createStereoPanner();
+    pannerNode.pan.value = isHardPanRightEnabled ? 1 : 0;
+    activePanners.add(pannerNode);
+    source.onended = () => activePanners.delete(pannerNode);
 
     source.connect(gainNode);
-    gainNode.connect(ctx.destination);
+    gainNode.connect(pannerNode);
+    pannerNode.connect(ctx.destination);
 
     // ✅ SURGICAL FIX: Clamp time to 0 to prevent RangeError crashes on deep section jumps
     const safeTime = Math.max(0, time);
@@ -89,6 +103,7 @@ export function useWebAudioEngine() {
     playZeroLatencyAudio, 
     playGuideCue, 
     getAudioContext,
+    setAudioPanRight,
     cancelFutureAudio // ✅ Exported for the Live Page to use
   };
 }

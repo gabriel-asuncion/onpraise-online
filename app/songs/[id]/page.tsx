@@ -66,7 +66,7 @@ export default function SoloPracticeRoomPage() {
   const { activeRole } = useEngine(); 
   useWakeLock();
   
-  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext } = useWebAudioEngine();
+  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext, setAudioPanRight } = useWebAudioEngine();
   
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
@@ -75,8 +75,13 @@ export default function SoloPracticeRoomPage() {
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
-    isYoutubeSyncEnabled, setIsYoutubeSyncEnabled
+    isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
+    isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   } = useLocalPreferences();
+
+  useEffect(() => {
+    setAudioPanRight(isClickGuideHardPannedRight);
+  }, [isClickGuideHardPannedRight, setAudioPanRight]);
 
   const [loading, setLoading] = useState(true);
   const [activeSong, setActiveSong] = useState<SongRecord | null>(null);
@@ -754,6 +759,7 @@ export default function SoloPracticeRoomPage() {
         localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume} audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
         isYoutubeSyncEnabled={isYoutubeSyncEnabled} setIsYoutubeSyncEnabled={setIsYoutubeSyncEnabled} youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}
+        isClickGuideHardPannedRight={isClickGuideHardPannedRight} setIsClickGuideHardPannedRight={setIsClickGuideHardPannedRight}
         canEditSong={["admin", "moderator", "musician"].includes(activeRole)} 
         isRecording={false}
         setIsRecordModalOpen={() => {}} 

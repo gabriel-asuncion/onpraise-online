@@ -9,6 +9,8 @@ interface VolumeMixerModalProps {
   setLocalClickVolume: (val: number) => void;
   youtubeVolume: number;
   setYoutubeVolume: (val: number) => void;
+  isClickGuideHardPannedRight: boolean;
+  setIsClickGuideHardPannedRight: (val: boolean) => void;
   // ✅ SURGICAL FIX: Match the strict types here too
   metronomeSoundType: "blip" | "bell" | "block" | "glass";
   setMetronomeSoundType: (val: "blip" | "bell" | "block" | "glass") => void;
@@ -109,7 +111,8 @@ const FaderChannel = ({
 
 export function VolumeMixerModal({
   isOpen, onClose, localClickVolume, setLocalClickVolume,
-  youtubeVolume, setYoutubeVolume, metronomeSoundType, setMetronomeSoundType // ✅ Destructured new props
+  youtubeVolume, setYoutubeVolume, isClickGuideHardPannedRight, setIsClickGuideHardPannedRight,
+  metronomeSoundType, setMetronomeSoundType
 }: VolumeMixerModalProps) {
   
   // --- FLUID DISMISS ENGINE ---
@@ -205,6 +208,32 @@ export function VolumeMixerModal({
             isMuted={mutes.yt} isSoloed={solos.yt} anySoloActive={anySoloActive}
             toggleMute={() => setMutes(p => ({...p, yt: !p.yt}))} toggleSolo={() => setSolos(p => ({...p, yt: !p.yt}))}
           />
+        </div>
+        <div className="mx-4 mb-4 flex items-center justify-between gap-4 rounded-xl border border-[#3a3a3f] bg-[#29292d] px-4 py-3">
+          <div className="min-w-0">
+            <div className="text-[10px] font-black uppercase tracking-widest text-zinc-200">Click &amp; guide pan</div>
+            <div className="mt-1 text-[9px] font-bold uppercase tracking-wider text-zinc-500">
+              {isClickGuideHardPannedRight ? "Hard right" : "Center"}
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={isClickGuideHardPannedRight}
+            aria-label="Hard pan click and guide right"
+            onClick={() => setIsClickGuideHardPannedRight(!isClickGuideHardPannedRight)}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors ${
+              isClickGuideHardPannedRight
+                ? "border-blue-500 bg-blue-600 shadow-[0_0_12px_rgba(59,130,246,0.25)]"
+                : "border-[#4a4a50] bg-[#1a1a1e]"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                isClickGuideHardPannedRight ? "translate-x-5" : "translate-x-1"
+              }`}
+            />
+          </button>
         </div>
       </div>
     </div>

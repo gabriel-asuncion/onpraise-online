@@ -5,6 +5,7 @@ import { useRouter, useParams } from "next/navigation";
 import { createPortal } from "react-dom";
 import { createClient } from "../../../utils/supabase/client";
 import { useWebAudioEngine } from "../../setlists/[id]/live/hooks/useWebAudioEngine";
+import { useHardPanRightPreference } from "../../setlists/[id]/live/hooks/useLocalPreferences";
 
 // ============================================================================
 // AUDIO ASSETS & CONSTANTS
@@ -85,7 +86,7 @@ export default function MDLiveStudioPage() {
   const projectId = params?.id as string;
   
   const supabase = createClient();
-  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, getAudioContext } = useWebAudioEngine();
+  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, getAudioContext, setAudioPanRight } = useWebAudioEngine();
 
   // ============================================================================
   // STATE MANAGEMENT
@@ -115,6 +116,7 @@ export default function MDLiveStudioPage() {
   const [isMixerOpen, setIsMixerOpen] = useState(false);
   const [clickVolume, setClickVolume] = useState(1.0);
   const [guideVolume, setGuideVolume] = useState(1.0);
+  const [isHardPanRight, setIsHardPanRight] = useHardPanRightPreference();
   const [clickSound, setClickSound] = useState<"blip" | "bell" | "block" | "glass">("blip");
   const [isHolding, setIsHolding] = useState(false);
   
@@ -306,6 +308,9 @@ export default function MDLiveStudioPage() {
   // ============================================================================
   useEffect(() => { clickVolumeRef.current = clickVolume; }, [clickVolume]);
   useEffect(() => { guideVolumeRef.current = guideVolume; }, [guideVolume]);
+  useEffect(() => {
+    setAudioPanRight(isHardPanRight);
+  }, [isHardPanRight, setAudioPanRight]);
   useEffect(() => { clickSoundRef.current = clickSound; }, [clickSound]);
   useEffect(() => { isHoldingRef.current = isHolding; }, [isHolding]);
   useEffect(() => { queuedGuideIdRef.current = queuedGuideId; }, [queuedGuideId]);
@@ -1453,6 +1458,33 @@ export default function MDLiveStudioPage() {
                   value={guideVolume} onChange={e => setGuideVolume(parseFloat(e.target.value))} 
                   className="w-full accent-emerald-500"
                 />
+              </div>
+
+              <div className="flex items-center justify-between gap-4 border-t border-white/5 pt-4">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-black uppercase tracking-widest text-zinc-300">Click pan</div>
+                  <div className="mt-1 text-[9px] font-bold uppercase tracking-wider text-zinc-500">
+                    {isHardPanRight ? "Hard right" : "Center"}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isHardPanRight}
+                  aria-label="Hard pan click audio right"
+                  onClick={() => setIsHardPanRight(!isHardPanRight)}
+                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors ${
+                    isHardPanRight
+                      ? "border-blue-500 bg-blue-600 shadow-[0_0_12px_rgba(59,130,246,0.25)]"
+                      : "border-white/15 bg-[#24242c]"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                      isHardPanRight ? "translate-x-5" : "translate-x-1"
+                    }`}
+                  />
+                </button>
               </div>
 
               <div className="flex flex-col gap-3 pt-2 border-t border-white/5">

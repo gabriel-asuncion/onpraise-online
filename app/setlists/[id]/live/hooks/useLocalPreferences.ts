@@ -1,4 +1,38 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
+
+export const HARD_PAN_RIGHT_PREFERENCE_KEY = "wm_prefs_hardPanRight";
+const HARD_PAN_RIGHT_CHANGE_EVENT = "onpraise:hard-pan-right-change";
+
+function subscribeToHardPanRightPreference(onChange: () => void) {
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === HARD_PAN_RIGHT_PREFERENCE_KEY) onChange();
+  };
+  window.addEventListener("storage", handleStorage);
+  window.addEventListener(HARD_PAN_RIGHT_CHANGE_EVENT, onChange);
+
+  return () => {
+    window.removeEventListener("storage", handleStorage);
+    window.removeEventListener(HARD_PAN_RIGHT_CHANGE_EVENT, onChange);
+  };
+}
+
+function getHardPanRightPreferenceSnapshot() {
+  return typeof window !== "undefined" && localStorage.getItem(HARD_PAN_RIGHT_PREFERENCE_KEY) === "true";
+}
+
+export function useHardPanRightPreference() {
+  const isHardPanRight = useSyncExternalStore(
+    subscribeToHardPanRightPreference,
+    getHardPanRightPreferenceSnapshot,
+    () => false
+  );
+  const setIsHardPanRight = useCallback((enabled: boolean) => {
+    localStorage.setItem(HARD_PAN_RIGHT_PREFERENCE_KEY, enabled.toString());
+    window.dispatchEvent(new Event(HARD_PAN_RIGHT_CHANGE_EVENT));
+  }, []);
+
+  return [isHardPanRight, setIsHardPanRight] as const;
+}
 
 export function useLocalPreferences() {
   const [lyricsFontSize, setLyricsFontSize] = useState<number>(16);
@@ -20,6 +54,7 @@ export function useLocalPreferences() {
   const youtubeVolumeRef = useRef<number>(0.8);
 
   const [isYoutubeSyncEnabled, setIsYoutubeSyncEnabled] = useState<boolean>(false); // ✅ Added
+  const [isClickGuideHardPannedRight, setIsClickGuideHardPannedRight] = useHardPanRightPreference();
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -76,6 +111,7 @@ export function useLocalPreferences() {
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
-    isYoutubeSyncEnabled, setIsYoutubeSyncEnabled // ✅ Exported
+    isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
+    isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   };
 }
