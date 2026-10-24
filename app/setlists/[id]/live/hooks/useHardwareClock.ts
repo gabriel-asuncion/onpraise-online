@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { SongRecord, ArrangementSection, CompiledBeatMap, CompiledSectionToken } from "../types/setlist";
+import { getTimelineDurationBeats } from "../utils/timeline";
 
 export interface HardwareClockConfig {
   isPlayingFlow: boolean;
@@ -92,7 +93,13 @@ export function useHardwareClock(config: HardwareClockConfig) {
       if (!currentSection) { c.handleAdvanceToNextSetlistTrack(); return; }
 
       const beatSpeedMsCurrent = (60 / (song.tempo || 75)) * 1000;
-      const timings = song.section_timings?.[currentSection.section_name] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
+      const isSpacer = currentSection.section_name.toLowerCase().startsWith("spacer");
+      const spacerDurationBeats = isSpacer
+        ? getTimelineDurationBeats(song.section_timings, idx, currentSection.id, song.default_structure) ?? 0.5
+        : 0;
+      const timings = isSpacer
+        ? { measures: 0, beats: spacerDurationBeats, repeats: 0, head_m: 0, tail_m: 0 }
+        : song.section_timings?.[currentSection.section_name] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
       const sectionMultiplier = (timings.repeats || 0) + 1; 
       const headBeats = (timings.head_m || 0) * 4;
       const tailBeats = (timings.tail_m || 0) * 4;
@@ -208,14 +215,22 @@ export function useHardwareClock(config: HardwareClockConfig) {
           }
           
           // ✅ SURGICAL FIX: Infinite Audio Metronome Extension
-          let isDownbeat = false;
-          if (absoluteBeatIndex < mapNodes.length) {
-            isDownbeat = mapNodes[absoluteBeatIndex].isDownbeat;
-          } else {
-            const overage = absoluteBeatIndex - mapNodes.length;
-            const lastMeasureLength = mapNodes.length > 0 ? mapNodes[mapNodes.length - 1].measureLength : 4;
-            isDownbeat = (overage % lastMeasureLength) === 0;
+          let referenceNode: typeof mapNodes[number] | undefined;
+          let exactNode: typeof mapNodes[number] | undefined;
+          for (const node of mapNodes) {
+            if (node.absoluteBeatIndex > absoluteBeatIndex + 0.0001) break;
+            referenceNode = node;
+            if (Math.abs(node.absoluteBeatIndex - absoluteBeatIndex) < 0.0001) exactNode = node;
           }
+          const beatNode = exactNode ?? referenceNode;
+          const beatsAfterReference = beatNode && !exactNode
+            ? Math.floor(absoluteBeatIndex - beatNode.absoluteBeatIndex + 0.0001)
+            : 0;
+          const isDownbeat = beatNode
+            ? exactNode
+              ? exactNode.isDownbeat
+              : ((beatNode.measureBeatIndex - 1 + beatsAfterReference) % beatNode.measureLength) === 0
+            : true;
 
           if (c.triggerMetronomeSound) {
             c.triggerMetronomeSound(isDownbeat ? 1 : 2, nextBeatTime + audioOffsetSecs);
@@ -248,21 +263,22 @@ export function useHardwareClock(config: HardwareClockConfig) {
 
       const localSectionElapsedBeats = visualElapsedMs / beatSpeedMsCurrent;
       const absoluteVisualBeatFloat = (c.beatMapRef.current.sectionStartBeats[idx] || 0) + localSectionElapsedBeats;
-      const absoluteVisualBeatIndex = Math.floor(absoluteVisualBeatFloat);
-
       // ✅ SURGICAL FIX: Infinite Visual Metronome Extension
       let currentVisualBeatPulse = 1;
       let activeMeasureLength = 4;
       const mapNodes = c.beatMapRef.current.nodes;
-
-      if (absoluteVisualBeatIndex < mapNodes.length) {
-        const beatNode = mapNodes[absoluteVisualBeatIndex];
-        currentVisualBeatPulse = beatNode.measureBeatIndex;
-        activeMeasureLength = beatNode.measureLength;
-      } else {
-        activeMeasureLength = mapNodes.length > 0 ? mapNodes[mapNodes.length - 1].measureLength : 4;
-        const beatsPastEnd = absoluteVisualBeatIndex - mapNodes.length;
-        currentVisualBeatPulse = (beatsPastEnd % activeMeasureLength) + 1;
+      let visualReferenceNode: typeof mapNodes[number] | undefined;
+      for (const node of mapNodes) {
+        if (node.absoluteBeatIndex > absoluteVisualBeatFloat + 0.0001) break;
+        visualReferenceNode = node;
+      }
+      if (visualReferenceNode) {
+        activeMeasureLength = visualReferenceNode.measureLength;
+        const beatsAfterReference = Math.floor(absoluteVisualBeatFloat - visualReferenceNode.absoluteBeatIndex + 0.0001);
+        currentVisualBeatPulse = ((visualReferenceNode.measureBeatIndex - 1 + beatsAfterReference) % activeMeasureLength) + 1;
+      } else if (mapNodes.length > 0) {
+        activeMeasureLength = mapNodes[0].measureLength;
+        currentVisualBeatPulse = mapNodes[0].measureBeatIndex;
       }
 
       if (activeMeasureLength !== c.lastVisualMeasureLengthRef.current) {

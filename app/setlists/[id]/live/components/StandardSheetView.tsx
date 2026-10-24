@@ -48,6 +48,8 @@ export function StandardSheetView(props: StandardSheetViewProps) {
     >
       <div className="max-w-5xl w-full mx-auto space-y-6 md:space-y-7 pt-2">
         {memoizedSongAstTree.map((section, idx) => {
+          if (section.section_name.toLowerCase().startsWith("spacer")) return null;
+
           const isThisSectionActivePlayback = isPlayingFlow && playingTrackIndex === currentTrackIndex && currentSectionIndex === idx;
           const isThisSectionQueuedNext = queuedTrackIndex === currentTrackIndex && queuedSectionIndex === idx;
           const isStagedUnstartedTarget = !isPlayingFlow && currentSectionIndex === idx;

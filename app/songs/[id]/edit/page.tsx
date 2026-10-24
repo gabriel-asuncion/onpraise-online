@@ -7,6 +7,7 @@ import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
+import TimelineArrangement, { type TimelineSection, type TimelineLyricPreview, type TimelineSnap } from "./TimelineArrangement";
 
 // =======================================================
 // --- TRANSPOSTITION & DIATONIC CONSTANT BLUEPRINTS -----
@@ -43,13 +44,7 @@ const Blob = ({
   </div>
 );
 
-interface SongSectionBlock {
-  id: string;
-  type: string;     
-  label: string;    
-  content: string;  
-  repetitions: number;
-}
+type SongSectionBlock = TimelineSection;
 
 interface SectionTimingMap {
   [sectionType: string]: {
@@ -59,6 +54,21 @@ interface SectionTimingMap {
     head_m?: number;
     tail_m?: number;
   };
+}
+
+interface TimelineUndoSnapshot {
+  sections: SongSectionBlock[];
+  durations: Record<string, number>;
+  gaps: Record<string, number>;
+  meterNumerator: number;
+  meterDenominator: number;
+  snap: TimelineSnap;
+  downbeatOffsetMs: number;
+}
+
+interface TimelineClipboardItem {
+  section: SongSectionBlock;
+  durationBeats: number;
 }
 
 // ✅ SURGICAL FIX: Dark-mode ready section palette colors matching the dashboard aesthetic
@@ -271,7 +281,7 @@ export default function SongEditPage() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isConfirmExitModalOpen, setIsConfirmExitModalOpen] = useState(false);
   const [pendingNavigationUrl, setPendingNavigationUrl] = useState<string | null>(null); 
-  const [editorActiveTab, setEditorActiveTab] = useState<"details" | "content" | "track" | "structure">("details");
+  const [editorActiveTab, setEditorActiveTab] = useState<"details" | "content" | "track" | "structure" | "timeline">("details");
 
   const [formTitle, setFormTitle] = useState("");
   const [formTempo, setFormTempo] = useState("");
@@ -285,6 +295,14 @@ export default function SongEditPage() {
   const [formSections, setFormSections] = useState<SongSectionBlock[]>([]);
   const [sectionTimings, setSectionTimings] = useState<SectionTimingMap>({});
   const [lineOverrides, setLineOverrides] = useState<Record<string, Record<number, { measures: number; beats: number }>> | null>(null);
+  const [timelineMeterNumerator, setTimelineMeterNumerator] = useState(4);
+  const [timelineMeterDenominator, setTimelineMeterDenominator] = useState(4);
+  const [timelineSnap, setTimelineSnap] = useState<TimelineSnap>("eighth");
+  const [timelineDurationOverrides, setTimelineDurationOverrides] = useState<Record<string, number>>({});
+  const [timelineGapOverrides, setTimelineGapOverrides] = useState<Record<string, number>>({});
+  const [timelineClipboard, setTimelineClipboard] = useState<TimelineClipboardItem | null>(null);
+  const timelineUndoStackRef = useRef<TimelineUndoSnapshot[]>([]);
+  const [timelineUndoCount, setTimelineUndoCount] = useState(0);
 
   // ✅ SURGICAL ADDITION: Track Markers Engine
   interface TrackMarker { id: string; sectionId: string; time: number; type: string; label: string; color: string; }
@@ -339,15 +357,19 @@ export default function SongEditPage() {
     const syncedMarkers: TrackMarker[] = [];
     const consumedMarkerIds = new Set<string>();
     
-    formSections.forEach((sec, idx) => {
+    formSections.forEach((sec) => {
        let existingMarker = trackMarkersRef.current.find(m => m.sectionId === sec.id && !consumedMarkerIds.has(m.id));
        if (!existingMarker) existingMarker = trackMarkersRef.current.find(m => m.type === sec.type && !consumedMarkerIds.has(m.id));
 
+       const isSpacer = sec.type.toLowerCase().startsWith("spacer");
        const timings = sectionTimings[sec.type] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
-       const sectionMultiplier = (Number(timings.repeats) || 0) + 1; 
+       const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
        const basePassBeats = ((Number(timings.measures) || 4) * 4) + (Number(timings.beats) || 0);
        const totalBeats = (basePassBeats * sectionMultiplier) + ((Number(timings.head_m) || 0) * 4) + ((Number(timings.tail_m) || 0) * 4);
-       const durationSecs = (totalBeats > 0 ? totalBeats : 16) * secPerBeat;
+       const durationBeats = isSpacer
+         ? timelineDurationOverrides[sec.id] ?? getDefaultTimelineDuration(sec.type)
+         : (totalBeats > 0 ? totalBeats : 16);
+       const durationSecs = durationBeats * secPerBeat;
 
        const catalogItem = SECTION_BASE_CATALOG.find(c => sec.type.toLowerCase().startsWith(c.display.toLowerCase())) || SECTION_BASE_CATALOG[0];
 
@@ -368,7 +390,7 @@ export default function SongEditPage() {
     
     setTrackMarkers(syncedMarkers);
     if (syncedMarkers.length > 0) prevOffsetVal.current = Math.round(syncedMarkers[0].time * 1000);
-  }, [formSections, sectionTimings, formTempo, formYoutubeSyncOffset]);
+  }, [formSections, sectionTimings, timelineDurationOverrides, formTempo, formYoutubeSyncOffset]);
 
   // ✅ Auto-Commit Engine: Locks in the Exact Float timestamps without snapping back
   const commitSequence = (markersArray: TrackMarker[]) => {
@@ -794,6 +816,7 @@ export default function SongEditPage() {
   const [ytPlaying, setYtPlaying] = useState(false);
   const [ytCurrentTime, setYtCurrentTime] = useState(0);
   const [ytDuration, setYtDuration] = useState(0);
+  const [isTimelineChaptersOpen, setIsTimelineChaptersOpen] = useState(false);
   const ytTimeTrackerRef = useRef<number | null>(null);
 
   // ✅ SURGICAL ADDITION: Real-time Metronome Mute state
@@ -1180,6 +1203,11 @@ function formatTimeWithMs(seconds: number) {
     if (!tmpl) return;
 
     if (sectionModalConfig.mode === "add") {
+      if (editorActiveTab === "timeline") {
+        handleAddTimelineSection(tmpl.computedDisplay, formSections.length);
+        setSectionModalConfig({ isOpen: false, mode: "add" });
+        return;
+      }
       setHasUnsavedChanges(true);
       setFormSections([...formSections, { 
         id: `sec-add-${Date.now()}-${Math.random()}`, 
@@ -1264,17 +1292,52 @@ function formatTimeWithMs(seconds: number) {
           try { dbTimings = JSON.parse(dbTimings); } catch(e) { dbTimings = {}; }
         }
         setSectionTimings(dbTimings);
+        let savedTimeline = dbTimings.__timeline || {};
+        if (typeof savedTimeline === "string") {
+          try { savedTimeline = JSON.parse(savedTimeline); } catch { savedTimeline = {}; }
+        }
+        const savedNumerator = Number(savedTimeline.meterNumerator);
+        const savedDenominator = Number(savedTimeline.meterDenominator);
+        setTimelineMeterNumerator([2, 3, 4, 5, 6, 7, 9, 12].includes(savedNumerator) ? savedNumerator : 4);
+        setTimelineMeterDenominator([2, 4, 8, 16].includes(savedDenominator) ? savedDenominator : 4);
+        setTimelineSnap(
+          savedTimeline.snap === "sixteenth" || savedTimeline.snap === "thirtysecond"
+            ? savedTimeline.snap
+            : "eighth"
+        );
+        const savedTimelineDurations = Array.isArray(savedTimeline.durationBeats)
+          ? savedTimeline.durationBeats.map((duration: unknown) => Number(duration))
+          : [];
+        const savedTimelineGaps = Array.isArray(savedTimeline.gapBeforeBeats)
+          ? savedTimeline.gapBeforeBeats.map((gap: unknown) => Number(gap))
+          : [];
 
         const sectionsRaw = await getSongChordChart(editingSongId);
         if (sectionsRaw && sectionsRaw.length > 0) {
-          const loadedBlocks = sectionsRaw.map((s: any, idx: number) => ({ 
-            id: s.id || `sec-${idx}-${Math.random()}`, 
-            type: s.section_name || "Verse 1", 
-            label: s.section_name || "Verse 1", 
-            content: s.content || "", 
-            repetitions: 1
-          }));
+          const loadedBlocks: SongSectionBlock[] = [];
+          const loadedDurations: Record<string, number> = {};
+          sectionsRaw.forEach((s: any, idx: number) => {
+            const legacyGap = savedTimelineGaps[idx];
+            const isPersistedSpacer = String(s.section_name || "").toLowerCase().startsWith("spacer");
+            if (!isPersistedSpacer && Number.isFinite(legacyGap) && legacyGap > 0) {
+              const spacerId = `spacer-${s.id || idx}-${Math.random()}`;
+              loadedBlocks.push({ id: spacerId, type: "Spacer", label: "Spacer", content: "", repetitions: 1 });
+              loadedDurations[spacerId] = legacyGap;
+            }
+            const sectionId = s.id || `sec-${idx}-${Math.random()}`;
+            loadedBlocks.push({
+              id: sectionId,
+              type: s.section_name || "Verse 1",
+              label: s.section_name || "Verse 1",
+              content: s.content || "",
+              repetitions: 1,
+            });
+            const savedDuration = savedTimelineDurations[idx];
+            if (Number.isFinite(savedDuration) && savedDuration > 0) loadedDurations[sectionId] = savedDuration;
+          });
           setFormSections(loadedBlocks);
+          setTimelineDurationOverrides(loadedDurations);
+          setTimelineGapOverrides({});
 
           const hydratedOverrides: Record<string, any> = {};
           loadedBlocks.forEach((sec) => {
@@ -1286,6 +1349,8 @@ function formatTimeWithMs(seconds: number) {
           setLineOverrides(hydratedOverrides);
         } else {
           setFormSections([{ id: "sec-1", type: "Verse 1", label: "Verse 1", content: "", repetitions: 1 }]);
+          setTimelineDurationOverrides({});
+          setTimelineGapOverrides({});
         }
       } catch (err) {
         console.error("Tracking hydration synced drop failure:", err);
@@ -1571,6 +1636,171 @@ function formatTimeWithMs(seconds: number) {
       const currentTuple = prev[sectionType] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
       return { ...prev, [sectionType]: { ...currentTuple, [field]: value } };
     });
+  };
+
+  const getDefaultTimelineDuration = (sectionType: string) => {
+    if (sectionType.startsWith("Spacer")) return 1;
+    const metrics = sectionTimings[sectionType] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
+    const quarterBeatsPerMeasure = timelineMeterNumerator * (4 / timelineMeterDenominator);
+    const measures = Math.max(0, Number(metrics.measures ?? 4));
+    const beats = Math.max(0, Number(metrics.beats ?? 0));
+    const repeats = Math.max(0, Number(metrics.repeats ?? 0));
+    const paddingMeasures = Math.max(0, Number(metrics.head_m ?? 0)) + Math.max(0, Number(metrics.tail_m ?? 0));
+    const coreDuration = measures * quarterBeatsPerMeasure + beats;
+    return Math.max(0.125, coreDuration * (repeats + 1) + paddingMeasures * quarterBeatsPerMeasure);
+  };
+
+  const recordTimelineUndo = () => {
+    const snapshot: TimelineUndoSnapshot = {
+      sections: formSections.map((section) => ({ ...section })),
+      durations: { ...timelineDurationOverrides },
+      gaps: { ...timelineGapOverrides },
+      meterNumerator: timelineMeterNumerator,
+      meterDenominator: timelineMeterDenominator,
+      snap: timelineSnap,
+      downbeatOffsetMs: formYoutubeSyncOffset,
+    };
+    timelineUndoStackRef.current = [...timelineUndoStackRef.current.slice(-49), snapshot];
+    setTimelineUndoCount(timelineUndoStackRef.current.length);
+  };
+
+  const handleTimelineUndo = () => {
+    const previous = timelineUndoStackRef.current[timelineUndoStackRef.current.length - 1];
+    if (!previous) return;
+    timelineUndoStackRef.current = timelineUndoStackRef.current.slice(0, -1);
+    setTimelineUndoCount(timelineUndoStackRef.current.length);
+    setFormSections(previous.sections);
+    setTimelineDurationOverrides(previous.durations);
+    setTimelineGapOverrides(previous.gaps);
+    setTimelineMeterNumerator(previous.meterNumerator);
+    setTimelineMeterDenominator(previous.meterDenominator);
+    setTimelineSnap(previous.snap);
+    prevOffsetVal.current = previous.downbeatOffsetMs;
+    setFormYoutubeSyncOffset(previous.downbeatOffsetMs);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleAddTimelineSection = (sectionType: string, insertionIndex: number) => {
+    recordTimelineUndo();
+    const existingSection = formSections.find((section) => section.type === sectionType);
+    const newSection: SongSectionBlock = existingSection
+      ? { ...existingSection, id: `sec-${Date.now()}-${Math.random()}` }
+      : { id: `sec-${Date.now()}-${Math.random()}`, type: sectionType, label: sectionType, content: "", repetitions: 1 };
+    setFormSections((previous) => {
+      const next = [...previous];
+      next.splice(Math.max(0, Math.min(insertionIndex, next.length)), 0, newSection);
+      return next;
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineReorder = (sectionId: string, insertionIndex: number, gapBeforeBeats: number, consumedSpacerId?: string) => {
+    const currentIndex = formSections.findIndex((section) => section.id === sectionId);
+    if (currentIndex < 0) return;
+    if (currentIndex === insertionIndex && gapBeforeBeats <= 0 && !consumedSpacerId) return;
+    recordTimelineUndo();
+    const spacerId = gapBeforeBeats > 0 ? `spacer-${Date.now()}-${Math.random()}` : null;
+    const spacerSection: SongSectionBlock | null = spacerId
+      ? { id: spacerId, type: "Spacer", label: "Spacer", content: "", repetitions: 1 }
+      : null;
+    setFormSections((previous) => {
+      const currentIndex = previous.findIndex((section) => section.id === sectionId);
+      if (currentIndex < 0) return previous;
+      const next = [...previous];
+      const [section] = next.splice(currentIndex, 1);
+      if (consumedSpacerId) {
+        const spacerIndex = next.findIndex((item) => item.id === consumedSpacerId);
+        if (spacerIndex >= 0) next.splice(spacerIndex, 1);
+      }
+      const targetIndex = Math.max(0, Math.min(insertionIndex, next.length));
+      if (spacerSection) next.splice(targetIndex, 0, spacerSection, section);
+      else next.splice(targetIndex, 0, section);
+      return next;
+    });
+    setTimelineDurationOverrides((previous) => {
+      const next = { ...previous };
+      if (consumedSpacerId) delete next[consumedSpacerId];
+      if (spacerId) next[spacerId] = gapBeforeBeats;
+      return next;
+    });
+    setTimelineGapOverrides({});
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineCut = (sectionId: string) => {
+    const section = formSections.find((item) => item.id === sectionId);
+    if (!section) return;
+    recordTimelineUndo();
+    setTimelineClipboard({
+      section: { ...section },
+      durationBeats: timelineDurationOverrides[sectionId] ?? getDefaultTimelineDuration(section.type),
+    });
+    setFormSections((previous) => previous.filter((item) => item.id !== sectionId));
+    setTimelineDurationOverrides((previous) => {
+      const next = { ...previous };
+      delete next[sectionId];
+      return next;
+    });
+    setTimelineGapOverrides((previous) => {
+      const next = { ...previous };
+      delete next[sectionId];
+      return next;
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelinePaste = () => {
+    if (!timelineClipboard) return;
+    recordTimelineUndo();
+    const section = { ...timelineClipboard.section, id: `sec-${Date.now()}-${Math.random()}` };
+    setFormSections((previous) => [...previous, section]);
+    setTimelineDurationOverrides((previous) => ({ ...previous, [section.id]: timelineClipboard.durationBeats }));
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineResize = (sectionId: string, durationBeats: number) => {
+    recordTimelineUndo();
+    setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: durationBeats }));
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineRemove = (sectionId: string) => {
+    recordTimelineUndo();
+    setFormSections((previous) => previous.filter((section) => section.id !== sectionId));
+    setTimelineDurationOverrides((previous) => {
+      const next = { ...previous };
+      delete next[sectionId];
+      return next;
+    });
+    setTimelineGapOverrides((previous) => {
+      const next = { ...previous };
+      delete next[sectionId];
+      return next;
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineMeterChange = (numerator: number, denominator: number) => {
+    if (numerator === timelineMeterNumerator && denominator === timelineMeterDenominator) return;
+    recordTimelineUndo();
+    setTimelineMeterNumerator(numerator);
+    setTimelineMeterDenominator(denominator);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineSnapChange = (snap: TimelineSnap) => {
+    if (snap === timelineSnap) return;
+    recordTimelineUndo();
+    setTimelineSnap(snap);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineDownbeatOffsetChange = (offset: number) => {
+    if (offset === formYoutubeSyncOffset) return;
+    recordTimelineUndo();
+    prevOffsetVal.current = offset;
+    setFormYoutubeSyncOffset(offset);
+    setHasUnsavedChanges(true);
   };
 
   const handleAddSectionBelow = (tmpl: any) => {
@@ -1917,6 +2147,7 @@ function formatTimeWithMs(seconds: number) {
       const updatedSectionTimings: Record<string, any> = {};
       
       formSections.forEach((sec) => {
+        if (sec.type.toLowerCase().startsWith("spacer")) return;
         const metricsTuple = getCentralizedMetricsTuple(sec.type);
         let specificRowOverrides = lineOverrides?.[sec.type] || null;
 
@@ -1949,8 +2180,20 @@ function formatTimeWithMs(seconds: number) {
           youtube_sync_offset_ms: formYoutubeSyncOffset
         };
       });
+      updatedSectionTimings.__timeline = {
+        version: 1,
+        sectionIds: formSections.map((section) => section.id),
+        meterNumerator: timelineMeterNumerator,
+        meterDenominator: timelineMeterDenominator,
+        snap: timelineSnap,
+        durationBeats: formSections.map((section) =>
+          timelineDurationOverrides[section.id] ?? getDefaultTimelineDuration(section.type)
+        ),
+        gapBeforeBeats: formSections.map((section) => timelineGapOverrides[section.id] ?? 0),
+      };
 
       const compiledChordPro = formSections
+        .filter((sec) => !sec.type.toLowerCase().startsWith("spacer"))
         .map((sec) => `[${sec.type}]\n${sec.content || ""}`)
         .join("\n\n");
 
@@ -1971,6 +2214,11 @@ function formatTimeWithMs(seconds: number) {
           tempo: parseInt(formTempo, 10) || 75,
           original_key: formKey,
           themes: formThemes.join(", "),
+          default_structure: formSections.map((section) => ({
+            id: section.id,
+            section_name: section.type,
+            content: section.content || "",
+          })),
           section_timings: updatedSectionTimings,
           chordpro_content: compiledChordPro,
           youtube_url: formYoutubeUrl.trim(),
@@ -1993,6 +2241,11 @@ function formatTimeWithMs(seconds: number) {
             tempo: parseInt(formTempo, 10) || 75,
             original_key: formKey,
             themes: formThemes.join(", "),
+            default_structure: formSections.map((section) => ({
+              id: section.id,
+              section_name: section.type,
+              content: section.content || "",
+            })),
             section_timings: updatedSectionTimings,
             chordpro_content: compiledChordPro,
             youtube_url: formYoutubeUrl.trim(),
@@ -2038,6 +2291,103 @@ function formatTimeWithMs(seconds: number) {
   };
 
   const uniqueContentSectionsList = formSections.reduce((acc: SongSectionBlock[], curr) => { if (!acc.some(item => item.type === curr.type)) acc.push(curr); return acc; }, []);
+  const timelineLineDurationsBySectionId = Object.fromEntries(formSections.map((section) => {
+    const lines = section.content.split("\n");
+    const lineCount = Math.max(1, lines.length);
+    const timing = sectionTimings[section.type] ?? { measures: 4, beats: 0 };
+    const measureCount = Math.max(0, Number(timing.measures) || 0);
+    const beatCount = Math.max(0, Number(timing.beats) || 0);
+    const autoMeasures = Math.floor(measureCount / lineCount);
+    const remainderMeasures = measureCount % lineCount;
+    const autoBeats = Math.floor(beatCount / lineCount);
+    const remainderBeats = beatCount % lineCount;
+    const sectionOverrides = lineOverrides?.[section.type];
+    const durations = lines.map((line, lineIndex) => {
+      const saved = sectionOverrides?.[lineIndex];
+      const lineMeasures = Number(saved?.measures ?? autoMeasures + (lineIndex < remainderMeasures ? 1 : 0));
+      const lineBeats = Number(saved?.beats ?? autoBeats + (lineIndex < remainderBeats ? 1 : 0));
+      return { line: line.trim(), duration: Math.max(0, lineMeasures * 4 + lineBeats) };
+    }).filter((line) => line.line.length > 0).map((line) => line.duration);
+    return [section.id, durations.some((duration) => duration > 0) ? durations : durations.map(() => 1)];
+  }));
+  const timelineChapters = (() => {
+    const bpm = parseInt(formTempo, 10) || 75;
+    return formSections.reduce((result, section) => {
+      const start = Math.max(0, formYoutubeSyncOffset / 1000 + result.cursorBeats * 60 / bpm);
+      const duration = timelineDurationOverrides[section.id] ?? getDefaultTimelineDuration(section.type);
+      return {
+        cursorBeats: result.cursorBeats + (timelineGapOverrides[section.id] ?? 0) + duration,
+        chapters: section.type.startsWith("Spacer")
+          ? result.chapters
+          : [...result.chapters, { ...section, start, end: start + duration * 60 / bpm }],
+      };
+    }, { cursorBeats: 0, chapters: [] as Array<(typeof formSections)[number] & { start: number; end: number }> }).chapters;
+  })();
+  const currentTimelineChapter = timelineChapters.find(
+    (chapter) => ytCurrentTime >= chapter.start && ytCurrentTime < chapter.end,
+  );
+  const timelineLyricPreview: TimelineLyricPreview | null = (() => {
+    const bpm = parseInt(formTempo, 10) || 75;
+    const currentBeat = ((ytCurrentTime - formYoutubeSyncOffset / 1000) * bpm) / 60;
+    let cursorBeat = 0;
+    for (const section of formSections) {
+      cursorBeat += timelineGapOverrides[section.id] ?? 0;
+      const duration = timelineDurationOverrides[section.id] ?? getDefaultTimelineDuration(section.type);
+      const sectionStart = cursorBeat;
+      cursorBeat += duration;
+      if (section.type.startsWith("Spacer") || currentBeat < sectionStart || currentBeat >= cursorBeat) continue;
+
+      const lines = section.content.split("\n");
+      const timing = sectionTimings[section.type] ?? { measures: 4, beats: 0, repeats: 0 };
+      const measureCount = Math.max(0, Number(timing.measures) || 0);
+      const beatCount = Math.max(0, Number(timing.beats) || 0);
+      const autoMeasures = lines.length > 0 ? Math.floor(measureCount / lines.length) : 0;
+      const remainderMeasures = lines.length > 0 ? measureCount % lines.length : 0;
+      const autoBeats = lines.length > 0 ? Math.floor(beatCount / lines.length) : 0;
+      const remainderBeats = lines.length > 0 ? beatCount % lines.length : 0;
+      const sectionOverrides = lineOverrides?.[section.type];
+      const lineEntries = lines.map((rawText, lineIndex) => {
+        const saved = sectionOverrides?.[lineIndex];
+        const lineMeasures = Number(saved?.measures ?? autoMeasures + (lineIndex < remainderMeasures ? 1 : 0));
+        const lineBeats = Number(saved?.beats ?? autoBeats + (lineIndex < remainderBeats ? 1 : 0));
+        return { rawText, lineIndex, beats: Math.max(0, lineMeasures * 4 + lineBeats) };
+      }).filter((line) => line.rawText.trim().length > 0);
+      if (lineEntries.length === 0) return null;
+
+      const repeats = Math.max(0, Number(timing.repeats) || 0);
+      const passes = repeats + 1;
+      const lineBeatsTotal = lineEntries.reduce((total, line) => total + line.beats, 0) * passes;
+      const fallbackLineBeats = duration / (lineEntries.length * passes);
+      const lineScale = lineBeatsTotal > 0 ? duration / lineBeatsTotal : 0;
+      let lineCursor = sectionStart;
+      for (let pass = 0; pass < passes; pass += 1) {
+        for (const line of lineEntries) {
+          const lineDuration = lineBeatsTotal > 0 ? line.beats * lineScale : fallbackLineBeats;
+          if (currentBeat >= lineCursor && currentBeat < lineCursor + lineDuration) {
+            return {
+              sectionType: section.type,
+              sectionLabel: section.label,
+              rawText: line.rawText,
+              lineIndex: line.lineIndex,
+              lineCount: lines.filter((lineText) => lineText.trim().length > 0).length,
+            };
+          }
+          lineCursor += lineDuration;
+        }
+      }
+      return null;
+    }
+    return null;
+  })();
+  const seekToTimelineChapter = (time: number) => {
+    const seekTime = Math.max(0, Math.min(ytDuration || time, time));
+    setYtCurrentTime(seekTime);
+    if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === "function") {
+      ytPlayerRef.current.seekTo(seekTime, true);
+      if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+    }
+    setIsTimelineChaptersOpen(false);
+  };
   const filteredThemeCatalogSuggestions = CHRISTIAN_THEMES_PRESETS.filter(th => th.toLowerCase().includes(themeInputSearchValue.toLowerCase()) && !formThemes.includes(th));
   const isCommentInputBlank = customCommentInputValue.trim() === "";
 
@@ -2159,8 +2509,7 @@ function formatTimeWithMs(seconds: number) {
         <nav className="flex flex-col select-none w-full border-t border-outline-variant/30">
           <div className="px-4 md:px-8 flex justify-between items-center bg-surface-container-lowest/30">
             <div className="flex gap-4 text-xs font-bold">
-              {/* ✅ SURGICAL FIX: Added the "track" tab */}
-              {(["details", "content", "track", "structure"] as const).map(tab => (
+              {(["details", "content", "timeline"] as const).map(tab => (
                 <button key={tab} type="button" onClick={() => handleEditorTabChange(tab)} className={`py-3 capitalize tracking-wide transition-all border-b-2 font-black ${editorActiveTab === tab ? 'border-primary text-primary' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}>{tab}</button>
               ))}
             </div>
@@ -2203,7 +2552,7 @@ function formatTimeWithMs(seconds: number) {
 
       {/* FULL-BLEED WORKSPACE CANVAS */}
       <div 
-        className={`flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full pb-[64px] ${youtubeVideoId ? 'pb-[80px]' : ''}`} 
+        className={`flex-1 min-w-0 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full pb-[64px] ${youtubeVideoId ? 'pb-[80px]' : ''}`}
         onScroll={handleCanvasScroll}
       >
         {editorActiveTab === "details" && (
@@ -2392,7 +2741,18 @@ function formatTimeWithMs(seconds: number) {
           <div className="w-full space-y-3 pb-6 animate-in fade-in">
             <div className="space-y-3">
               {formSections.map((sec) => {
-                const timingTuple = getCentralizedMetricsTuple(sec.type);
+                const isSpacerSection = sec.type.toLowerCase().startsWith("spacer");
+                const spacerDurationBeats = timelineDurationOverrides[sec.id] ?? getDefaultTimelineDuration(sec.type);
+                const quarterBeatsPerBar = timelineMeterNumerator * (4 / timelineMeterDenominator);
+                const timingTuple = isSpacerSection
+                  ? {
+                      measures: Math.floor(spacerDurationBeats / 4),
+                      beats: Number((spacerDurationBeats % 4).toFixed(3)),
+                      repeats: 0,
+                      head_m: 0,
+                      tail_m: 0,
+                    }
+                  : getCentralizedMetricsTuple(sec.type);
                 const linesRaw = sec.content === "" ? [""] : sec.content.split("\n");
                 const processedLines = linesRaw.map((line) => {
                   return {
@@ -2501,6 +2861,13 @@ function formatTimeWithMs(seconds: number) {
                           })()}
                         </div>
 
+                        {isSpacerSection ? (
+                          <div className="flex items-center gap-1 rounded-lg border border-outline-variant/30 bg-surface-container px-2 py-1 text-[10px] font-bold text-on-surface-variant shadow-inner">
+                            <span className="text-[8px] font-black uppercase opacity-60">Duration:</span>
+                            <span className="font-mono text-on-surface">{Number(spacerDurationBeats.toFixed(3))} beats</span>
+                            <span className="opacity-70">({(spacerDurationBeats / quarterBeatsPerBar).toFixed(2)} bars)</span>
+                          </div>
+                        ) : (
                         <div className={`flex-wrap items-center gap-1.5 ${isRealtimePreviewActive ? "hidden lg:flex" : "flex"}`}>
                           <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
                             <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">M:</span>
@@ -2523,6 +2890,7 @@ function formatTimeWithMs(seconds: number) {
                             <input type="number" min={0} value={timingTuple.tail_m} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "tail_m", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
                           </div>
                         </div>
+                        )}
 
                         {activeRole === "admin" && !isRealtimePreviewActive && (
                           <button type="button" className="w-6 h-6 rounded-lg bg-surface-container hover:bg-error/20 text-on-surface-variant hover:text-error text-xs border border-outline-variant/30 flex items-center justify-center ml-auto sm:ml-2 transition-colors cursor-pointer" onClick={() => { setHasUnsavedChanges(true); setFormSections(prev => prev.filter(x => x.id !== sec.id)); }}>
@@ -2532,7 +2900,11 @@ function formatTimeWithMs(seconds: number) {
                       </div>
                     </div>
 
-                    {isRealtimePreviewActive ? (
+                    {isSpacerSection ? (
+                      <div className="w-full border border-dashed border-outline-variant/30 rounded-xl p-4 bg-surface-container/50 text-center text-on-surface-variant text-[11px] font-bold uppercase tracking-widest">
+                        Spacer Block (Non-editable)
+                      </div>
+                    ) : isRealtimePreviewActive ? (
                       <div className="border border-dashed border-outline-variant/30 rounded-xl p-4 bg-surface-container/30 space-y-4">
                         {isSectionMismatched && (
                           <div className="text-[10px] font-black text-amber-400 bg-amber-500/10 border border-amber-500/30 p-2 rounded-lg leading-snug">
@@ -2670,10 +3042,6 @@ function formatTimeWithMs(seconds: number) {
                           })}
                         </div>
                       </div>
-                    ) : sec.type.startsWith("Spacer") ? (
-                      <div className="w-full border border-dashed border-outline-variant/30 rounded-xl p-4 bg-surface-container/50 text-center text-on-surface-variant text-[11px] font-bold uppercase tracking-widest">
-                        Spacer Block (Non-editable)
-                      </div>
                     ) : (
                       <div>
                         <textarea rows={Math.max(4, sec.content.split("\n").length)} value={sec.content} className="w-full border border-outline-variant/30 rounded-xl p-2.5 font-mono text-xs resize-none outline-none focus:border-primary bg-surface-container/50 overflow-hidden text-on-surface transition-colors" onChange={(e) => { setHasUnsavedChanges(true); setFormSections(formSections.map(x => x.type === sec.type ? { ...x, content: e.target.value } : x)); }} />
@@ -2691,7 +3059,44 @@ function formatTimeWithMs(seconds: number) {
           </div>
         )}
 
-        {/* ✅ SURGICAL ADDITION: New Track Audio Sync & Marker Mapping Tab */}
+        {editorActiveTab === "timeline" && (
+          <TimelineArrangement
+            key={editingSongId}
+            sections={formSections}
+            lineDurationsBySectionId={timelineLineDurationsBySectionId}
+            storageKey={editingSongId}
+            durationOverrides={timelineDurationOverrides}
+            gapOverrides={timelineGapOverrides}
+            defaultDurationForType={getDefaultTimelineDuration}
+            meterNumerator={timelineMeterNumerator}
+            meterDenominator={timelineMeterDenominator}
+            snap={timelineSnap}
+            tempo={parseInt(formTempo, 10) || 75}
+            downbeatOffsetMs={formYoutubeSyncOffset}
+            playheadTime={ytCurrentTime}
+            isPlaying={ytPlaying}
+            lyricPreview={timelineLyricPreview}
+            onSeekTime={seekToTimelineChapter}
+            onAddSection={handleAddTimelineSection}
+            onOpenAddSectionModal={() => {
+              setSectionModalSearch("");
+              setSectionModalSelected(null);
+              setSectionModalConfig({ isOpen: true, mode: "add" });
+            }}
+            onReorder={handleTimelineReorder}
+            hasCutSection={timelineClipboard !== null}
+            onCut={handleTimelineCut}
+            onPaste={handleTimelinePaste}
+            onResize={handleTimelineResize}
+            onRemove={handleTimelineRemove}
+            onMeterChange={handleTimelineMeterChange}
+            onSnapChange={handleTimelineSnapChange}
+            onDownbeatOffsetChange={handleTimelineDownbeatOffsetChange}
+            canUndo={timelineUndoCount > 0}
+            onUndo={handleTimelineUndo}
+          />
+        )}
+
         {editorActiveTab === "track" && (
           <div className="w-full pb-6 animate-in fade-in space-y-4">
             {!youtubeVideoId ? (
@@ -3846,6 +4251,14 @@ function formatTimeWithMs(seconds: number) {
                 </div>
               </div>
               <div className="flex items-center gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  aria-label="Song chapters"
+                  onClick={(e) => { e.stopPropagation(); setIsTimelineChaptersOpen(true); }}
+                  className="flex h-10 w-10 items-center justify-center rounded-full text-zinc-300 hover:bg-white/10"
+                >
+                  <span className="material-symbols-outlined">format_list_numbered</span>
+                </button>
                 <button 
                   onClick={(e) => {
                     e.stopPropagation(); 
@@ -3877,7 +4290,9 @@ function formatTimeWithMs(seconds: number) {
                    <span className="material-symbols-outlined text-[20px]">keyboard_arrow_down</span>
                  </button>
                  <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Now Playing</span>
-                 <div className="w-10"></div> 
+                 <button type="button" aria-label="Song chapters" onClick={() => setIsTimelineChaptersOpen(true)} className="w-10 h-10 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface">
+                   <span className="material-symbols-outlined">format_list_numbered</span>
+                 </button>
                </div>
 
                <div className="flex flex-col items-center justify-center flex-1 px-8">
@@ -3953,6 +4368,9 @@ function formatTimeWithMs(seconds: number) {
                     {formArtist || "Unknown Artist"}
                   </span>
                 </div>
+                <button type="button" aria-label="Song chapters" onClick={() => setIsTimelineChaptersOpen(true)} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-zinc-300 hover:bg-white/10">
+                  <span className="material-symbols-outlined">format_list_numbered</span>
+                </button>
               </div>
 
               {/* CENTER: Playback Controls */}
@@ -4007,6 +4425,32 @@ function formatTimeWithMs(seconds: number) {
                 />
                 <span className="text-[10px] font-mono font-bold text-zinc-400 shrink-0 w-8">-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
               </div>
+            </div>
+          )}
+
+          {isTimelineChaptersOpen && (
+            <div className="fixed inset-0 z-[300000] flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-center md:p-4" onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setIsTimelineChaptersOpen(false);
+            }}>
+              <section role="dialog" aria-modal="true" aria-labelledby="timeline-chapters-title" className="flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-t-3xl border border-outline-variant/30 bg-surface-container shadow-2xl animate-in slide-in-from-bottom-full duration-300 md:rounded-3xl">
+                <div className="flex items-center justify-between border-b border-outline-variant/20 px-5 py-4">
+                  <h2 id="timeline-chapters-title" className="text-sm font-black uppercase tracking-widest text-on-surface">Song Chapters</h2>
+                  <button type="button" aria-label="Close chapters" onClick={() => setIsTimelineChaptersOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant hover:bg-surface-container-high">
+                    <span className="material-symbols-outlined">close</span>
+                  </button>
+                </div>
+                <div className="overflow-y-auto p-2">
+                  {timelineChapters.length === 0 ? (
+                    <p className="px-4 py-8 text-center text-sm text-on-surface-variant">Add sections to create song chapters.</p>
+                  ) : timelineChapters.map((chapter) => (
+                    <button key={chapter.id} type="button" onClick={() => seekToTimelineChapter(chapter.start)} className={`flex w-full items-center gap-3 rounded-xl border px-3 py-3 text-left transition-colors ${currentTimelineChapter?.id === chapter.id ? "border-primary/50 bg-primary/15" : "border-transparent hover:bg-surface-container-high"}`}>
+                      <span className={`w-12 shrink-0 text-right font-mono text-xs font-bold ${currentTimelineChapter?.id === chapter.id ? "text-primary" : "text-on-surface-variant"}`}>{formatTime(chapter.start)}</span>
+                      <span className={`min-w-0 flex-1 truncate text-sm font-bold ${currentTimelineChapter?.id === chapter.id ? "text-primary" : "text-on-surface"}`}>{chapter.type}</span>
+                      <span className={`material-symbols-outlined text-[18px] ${currentTimelineChapter?.id === chapter.id ? "text-primary" : "text-on-surface-variant"}`}>{currentTimelineChapter?.id === chapter.id ? "graphic_eq" : "play_arrow"}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
             </div>
           )}
         </>

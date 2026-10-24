@@ -155,6 +155,8 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
                
                <div className="flex flex-col gap-6 md:gap-7 px-4 md:px-8">
                  {song.ast.map((sec: any, secIdx: number) => {
+                   if (sec.section_name.toLowerCase().startsWith("spacer")) return null;
+
                    const isActive = isCurrentSong && currentSectionIndex === secIdx;
                    const isQueued = queuedTrackIndex === song.trackIndex && queuedSectionIndex === secIdx;
                    

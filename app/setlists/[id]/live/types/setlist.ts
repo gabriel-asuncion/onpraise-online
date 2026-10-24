@@ -8,6 +8,7 @@ export interface SongRecord {
   tempo: number;
   youtube_url?: string;
   youtube_sync_offset_ms?: number;
+  default_structure?: ArrangementSection[] | null;
   section_timings: {
     [sectionName: string]: { 
       measures: number; 

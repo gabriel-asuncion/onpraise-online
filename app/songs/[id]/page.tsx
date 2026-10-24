@@ -86,6 +86,7 @@ export default function SoloPracticeRoomPage() {
   const [loading, setLoading] = useState(true);
   const [activeSong, setActiveSong] = useState<SongRecord | null>(null);
   const [sections, setSections] = useState<ArrangementSection[]>([]);
+  const [timelineDurationsBySectionId, setTimelineDurationsBySectionId] = useState<Record<string, number>>({});
   const [activeDisplayKey, setActiveDisplayKey] = useState<string>("C");
   
   const activeSongRef = useRef<SongRecord | null>(null);
@@ -146,6 +147,9 @@ export default function SoloPracticeRoomPage() {
   const currentTrackIndexRef = useRef(0);
   const [playingTrackIndex, setPlayingTrackIndex] = useState<number>(0);
   const [queuedSectionIndex, setQueuedSectionIndex] = useState<number | null>(null);
+  const [chapterDragIndex, setChapterDragIndex] = useState<number | null>(null);
+  const [chapterDropIndex, setChapterDropIndex] = useState<number | null>(null);
+  const chapterDragRef = useRef<{ pointerId: number; fromIndex: number; toIndex: number; startY: number; active: boolean } | null>(null);
 
   const lastAudioBeatRef = useRef<number>(1);
   const lastVisualBeatRef = useRef<number>(1);
@@ -204,11 +208,36 @@ export default function SoloPracticeRoomPage() {
         activeSongRef.current = song;
 
         let parsedSections: any[] = [];
+        let timelineMetadata: unknown = song.section_timings?.["__timeline"];
+        if (typeof timelineMetadata === "string") {
+          try {
+            timelineMetadata = JSON.parse(timelineMetadata);
+          } catch {
+            timelineMetadata = null;
+          }
+        }
+        const savedDurations = timelineMetadata && typeof timelineMetadata === "object"
+          ? (timelineMetadata as Record<string, unknown>).durationBeats
+          : null;
         
-        if (song.default_structure && Array.isArray(song.default_structure) && song.default_structure.length > 0) {
-           parsedSections = song.default_structure.map((ds: any) => {
+        if (Array.isArray(savedDurations) && song.song_sections?.length === savedDurations.length) {
+           const timelineSections = song.song_sections as Array<{
+             id: string;
+             section_name: string;
+             content: string | null;
+             sequence_order?: number;
+           }>;
+           parsedSections = [...timelineSections]
+             .sort((left, right) => (Number(left.sequence_order) || 0) - (Number(right.sequence_order) || 0))
+             .map((section) => ({
+               id: section.id,
+               section_name: section.section_name,
+               content: section.content || "",
+             }));
+        } else if (song.default_structure && Array.isArray(song.default_structure) && song.default_structure.length > 0) {
+           parsedSections = song.default_structure.map((ds: any, index: number) => {
               const matchedText = song.song_sections?.find((ss: any) => ss.section_name === ds.section_name);
-              return { ...ds, content: ds.content || matchedText?.content || "" };
+              return { ...ds, id: ds.id || matchedText?.id || `default-${index}`, content: ds.content || matchedText?.content || "" };
            });
         } else if (song.song_sections && song.song_sections.length > 0) {
            parsedSections = song.song_sections.map((ss: any) => ({
@@ -218,6 +247,14 @@ export default function SoloPracticeRoomPage() {
 
         setSections(parsedSections);
         sectionsRef.current = parsedSections;
+        setTimelineDurationsBySectionId(
+          Object.fromEntries(
+            parsedSections.flatMap((section, index) => {
+              const duration = Array.isArray(savedDurations) ? Number(savedDurations[index]) : NaN;
+              return Number.isFinite(duration) && duration > 0 ? [[section.id, duration]] : [];
+            }),
+          ),
+        );
 
         const uniqueFiles = new Set<string>();
         parsedSections.forEach((section: any) => {
@@ -490,14 +527,24 @@ export default function SoloPracticeRoomPage() {
     executeLocalResetSequence();
   }
 
+  function resolvePlayableSectionIndex(index: number) {
+    const currentSections = sectionsRef.current;
+    for (let candidate = Math.max(0, index); candidate < currentSections.length; candidate += 1) {
+      if (!currentSections[candidate].section_name.toLowerCase().startsWith("spacer")) return candidate;
+    }
+    return -1;
+  }
+
   function handleSectionInteractiveSelection(index: number) {
+    const playableIndex = resolvePlayableSectionIndex(index);
+    if (playableIndex < 0) return;
     if (!isPlayingFlow) {
-      const jumpTime = getGlobalTime() + 150; executeJumpNow(0, index, jumpTime);
+      const jumpTime = getGlobalTime() + 150; executeJumpNow(0, playableIndex, jumpTime);
       return;
     }
     if (clickTimeoutRef.current) {
       clearTimeout(clickTimeoutRef.current); clickTimeoutRef.current = null;
-      setQueuedSectionIndex(index); pendingQuantizedJumpRef.current = null;
+      setQueuedSectionIndex(playableIndex); pendingQuantizedJumpRef.current = null;
     } else {
       clickTimeoutRef.current = setTimeout(() => {
         clickTimeoutRef.current = null;
@@ -505,12 +552,12 @@ export default function SoloPracticeRoomPage() {
         if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
           const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
           jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
-          pendingQuantizedJumpRef.current = { trackIndex: 0, sectionIndex: index, jumpTime };
+          pendingQuantizedJumpRef.current = { trackIndex: 0, sectionIndex: playableIndex, jumpTime };
           const audioCtx = getAudioContext();
-          setQueuedSectionIndex(index);
-          if (sectionsRef.current[index]) playGuideCue(sectionsRef.current[index].section_name);
+          setQueuedSectionIndex(playableIndex);
+          if (sectionsRef.current[playableIndex]) playGuideCue(sectionsRef.current[playableIndex].section_name);
           hasPlayedCueRef.current = true; 
-        } else { executeJumpNow(0, index, jumpTime); }
+        } else { executeJumpNow(0, playableIndex, jumpTime); }
       }, 250);
     }
   }
@@ -549,6 +596,21 @@ export default function SoloPracticeRoomPage() {
 
     sections.forEach((section, sIdx) => {
       sectionStartBeats.push(currentAbsoluteBeat);
+      const stampBeats = (totalBeatsToStamp: number) => {
+          let remaining = totalBeatsToStamp;
+          while (remaining > 0) {
+            const mLen = remaining >= 4 ? 4 : remaining;
+            for (let b = 1; b <= mLen; b++) {
+              map.push({ absoluteBeatIndex: currentAbsoluteBeat, measureBeatIndex: b, measureLength: mLen, sectionIndex: sIdx, isDownbeat: b === 1 });
+              currentAbsoluteBeat++;
+            }
+            remaining -= mLen;
+          }
+      };
+      if (section.section_name.toLowerCase().startsWith("spacer")) {
+        currentAbsoluteBeat += timelineDurationsBySectionId[section.id] ?? 0.5;
+        return;
+      }
       const timings = activeSong.section_timings?.[section.section_name] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
       const sectionMultiplier = (timings.repeats || 0) + 1;
       const headBeats = (timings.head_m || 0) * 4;
@@ -573,15 +635,6 @@ export default function SoloPracticeRoomPage() {
         if (sumBaseLoopBeats > 0) { hasLineOverrides = true; baseLoopBeats = sumBaseLoopBeats; }
       }
 
-      const stampBeats = (totalBeatsToStamp: number) => {
-          let remaining = totalBeatsToStamp;
-          while (remaining > 0) { 
-            const mLen = remaining >= 4 ? 4 : remaining; 
-            for (let b = 1; b <= mLen; b++) { map.push({ absoluteBeatIndex: currentAbsoluteBeat, measureBeatIndex: b, measureLength: mLen, sectionIndex: sIdx, isDownbeat: b === 1 }); currentAbsoluteBeat++; }
-            remaining -= mLen; 
-          }
-      };
-
       stampBeats(headBeats);
       for (let r = 0; r < sectionMultiplier; r++) { 
         if (hasLineOverrides) { lineBeatsMap.forEach(b => stampBeats(b)); } 
@@ -591,7 +644,7 @@ export default function SoloPracticeRoomPage() {
     });
 
     return { totalBeats: currentAbsoluteBeat, nodes: map, sectionStartBeats };
-  }, [activeSong, sections, memoizedSongAstTree]);
+  }, [activeSong, sections, memoizedSongAstTree, timelineDurationsBySectionId]);
 
   useEffect(() => {
     beatMapRef.current = beatMap;
@@ -600,6 +653,82 @@ export default function SoloPracticeRoomPage() {
 
   // ✅ SURGICAL ADDITION: Chapters Modal State & Math Engine
   const [isChaptersModalOpen, setIsChaptersModalOpen] = useState(false);
+  const reorderChapterSections = (fromIndex: number, toIndex: number) => {
+    const currentSections = sectionsRef.current;
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= currentSections.length || toIndex >= currentSections.length) return;
+
+    const currentSectionId = currentSections[currentSectionIndexRef.current]?.id;
+    const queuedSectionId = queuedSectionIndexRef.current === null
+      ? null
+      : currentSections[queuedSectionIndexRef.current]?.id;
+    const pendingSectionId = pendingQuantizedJumpRef.current
+      ? currentSections[pendingQuantizedJumpRef.current.sectionIndex]?.id
+      : null;
+    const nextSections = [...currentSections];
+    const [movedSection] = nextSections.splice(fromIndex, 1);
+    nextSections.splice(toIndex, 0, movedSection);
+
+    sectionsRef.current = nextSections;
+    playingSectionsRef.current = nextSections;
+    setSections(nextSections);
+
+    const nextCurrentIndex = currentSectionId
+      ? nextSections.findIndex((section) => section.id === currentSectionId)
+      : Math.min(currentSectionIndexRef.current, nextSections.length - 1);
+    currentSectionIndexRef.current = Math.max(0, nextCurrentIndex);
+    setCurrentSectionIndex(currentSectionIndexRef.current);
+
+    if (queuedSectionIndexRef.current !== null) {
+      const nextQueuedIndex = queuedSectionId
+        ? nextSections.findIndex((section) => section.id === queuedSectionId)
+        : -1;
+      queuedSectionIndexRef.current = nextQueuedIndex >= 0 ? nextQueuedIndex : null;
+      setQueuedSectionIndex(queuedSectionIndexRef.current);
+    }
+    if (pendingSectionId && pendingQuantizedJumpRef.current) {
+      const nextPendingIndex = nextSections.findIndex((section) => section.id === pendingSectionId);
+      if (nextPendingIndex >= 0) pendingQuantizedJumpRef.current.sectionIndex = nextPendingIndex;
+    }
+  };
+
+  const handleChapterDragStart = (event: React.PointerEvent<HTMLButtonElement>, index: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    chapterDragRef.current = {
+      pointerId: event.pointerId,
+      fromIndex: index,
+      toIndex: index,
+      startY: event.clientY,
+      active: false,
+    };
+  };
+
+  const handleChapterDragMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = chapterDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.active && Math.abs(event.clientY - drag.startY) < 6) return;
+
+    event.preventDefault();
+    drag.active = true;
+    setChapterDragIndex(drag.fromIndex);
+    const hoveredChapter = document.elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>("[data-chapter-index]");
+    const nextIndex = Number(hoveredChapter?.dataset.chapterIndex);
+    if (Number.isInteger(nextIndex) && nextIndex >= 0 && nextIndex < sectionsRef.current.length) {
+      drag.toIndex = nextIndex;
+      setChapterDropIndex(nextIndex);
+    }
+  };
+
+  const handleChapterDragEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = chapterDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.active) reorderChapterSections(drag.fromIndex, drag.toIndex);
+    chapterDragRef.current = null;
+    setChapterDragIndex(null);
+    setChapterDropIndex(null);
+  };
 
   const songSegments = useMemo(() => {
     const segments: SongSegment[] = [];
@@ -616,6 +745,8 @@ export default function SoloPracticeRoomPage() {
       if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
       const timings = rawTimings || {};
       
+      const isSpacer = sec.section_name.toLowerCase().startsWith("spacer");
+      const savedSpacerDuration = timelineDurationsBySectionId[sec.id] ?? 0.5;
       const beatsPerMeasure = 4; // Standardized for live
       const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
       const basePassBeats = ((Number(timings.measures) || 4) * beatsPerMeasure) + (Number(timings.beats) || 0);
@@ -623,25 +754,36 @@ export default function SoloPracticeRoomPage() {
       const headBeats = (Number(timings.head_m) || 0) * beatsPerMeasure;
       const tailBeats = (Number(timings.tail_m) || 0) * beatsPerMeasure;
       
-      let totalBeats = totalCoreBeats + headBeats + tailBeats;
-      if (totalBeats <= 0) totalBeats = 16; 
+      let totalBeats = isSpacer ? savedSpacerDuration : totalCoreBeats + headBeats + tailBeats;
+      if (!isSpacer && totalBeats <= 0) totalBeats = 16;
       
       const durationSec = totalBeats * secPerBeat;
-      segments.push({ 
-        label: sec.section_name, 
-        start: currentStartTime, 
-        end: currentStartTime + durationSec, 
-        duration: durationSec, 
-        color: getSectionColor(sec.section_name),
-        sectionIndex: idx
-      });
+      if (!isSpacer) {
+        segments.push({
+          label: sec.section_name,
+          start: currentStartTime,
+          end: currentStartTime + durationSec,
+          duration: durationSec,
+          color: getSectionColor(sec.section_name),
+          sectionIndex: idx,
+        });
+      }
       currentStartTime += durationSec;
     });
     
     return segments;
-  }, [activeSong, sections]);
+  }, [activeSong, sections, timelineDurationsBySectionId]);
 
   const getSectionDurationString = (sectionName: string, sectionIdx?: number) => {
+    const section = sectionIdx === undefined
+      ? sections.find((item) => item.section_name === sectionName)
+      : sections[sectionIdx];
+    if (sectionName.toLowerCase().startsWith("spacer") && section) {
+      const spacerDurationSeconds = (timelineDurationsBySectionId[section.id] ?? 0.5) * 60 / (activeSong?.tempo || 75);
+      if (spacerDurationSeconds < 1) return `${spacerDurationSeconds.toFixed(2)}s`;
+      const spacerSeconds = Math.round(spacerDurationSeconds);
+      return `${Math.floor(spacerSeconds / 60)}:${(spacerSeconds % 60).toString().padStart(2, "0")}`;
+    }
     const timings = activeSong?.section_timings?.[sectionName] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
     const sectionMultiplier = (timings.repeats || 0) + 1;
     let totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
@@ -685,8 +827,10 @@ export default function SoloPracticeRoomPage() {
           activeSectionName={sectionsRef.current[currentSectionIndex]?.section_name || "---"}
           nextSectionName={
             (queuedSectionIndexRef.current !== null && queuedTrackIndexRef.current !== null)
-              ? "QUEUED" 
-              : sectionsRef.current[currentSectionIndex + 1]?.section_name || "END"
+              ? "QUEUED"
+              : (resolvePlayableSectionIndex(currentSectionIndex + 1) >= 0
+                ? sectionsRef.current[resolvePlayableSectionIndex(currentSectionIndex + 1)]?.section_name
+                : "END")
           }
           handleSyncBack={() => setShowSyncBack(false)}
           showSyncBack={showSyncBack} 
@@ -805,15 +949,37 @@ export default function SoloPracticeRoomPage() {
                   
                   return (
                     <div 
-                      key={`chap-${idx}`}
-                      className={`group flex items-center justify-between p-3 rounded-xl transition-colors border ${isActive ? 'bg-primary/10 border-primary/30' : isQueued ? 'bg-purple-500/10 border-purple-500/30' : 'bg-surface-container border-transparent hover:bg-surface-container-high'}`}
+                      key={`chap-${seg.sectionIndex}`}
+                      data-chapter-index={seg.sectionIndex}
+                      className={`group flex items-center justify-between p-3 rounded-xl transition-colors border ${chapterDropIndex === seg.sectionIndex && chapterDragIndex !== seg.sectionIndex ? "border-primary/60 bg-primary/10" : isActive ? 'bg-primary/10 border-primary/30' : isQueued ? 'bg-purple-500/10 border-purple-500/30' : 'bg-surface-container border-transparent hover:bg-surface-container-high'} ${chapterDragIndex === seg.sectionIndex ? "opacity-50" : ""}`}
                     >
-                      <div className="flex flex-col min-w-0 flex-1">
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                        <button
+                          type="button"
+                          aria-label={`Drag to rearrange ${seg.label}`}
+                          title="Drag to rearrange"
+                          onPointerDown={(event) => handleChapterDragStart(event, seg.sectionIndex)}
+                          onPointerMove={handleChapterDragMove}
+                          onPointerUp={handleChapterDragEnd}
+                          onPointerCancel={handleChapterDragEnd}
+                          onKeyDown={(event) => {
+                            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                            event.preventDefault();
+                            const visibleIndex = songSegments.findIndex((chapter) => chapter.sectionIndex === seg.sectionIndex);
+                            const nextChapter = songSegments[visibleIndex + (event.key === "ArrowUp" ? -1 : 1)];
+                            if (nextChapter) reorderChapterSections(seg.sectionIndex, nextChapter.sectionIndex);
+                          }}
+                          className="flex h-8 w-6 shrink-0 touch-none items-center justify-center rounded-md text-on-surface-variant/70 hover:bg-surface-container-high hover:text-on-surface"
+                        >
+                          <span className="material-symbols-outlined text-[18px]">drag_indicator</span>
+                        </button>
+                        <div className="flex min-w-0 flex-col">
                         <div className="flex items-center gap-2">
                           <span className={`font-bold text-[14px] truncate ${isActive ? 'text-primary' : isQueued ? 'text-purple-400' : 'text-on-surface'}`}>{seg.label}</span>
                           {isQueued && <span className="text-[8px] font-black bg-[#9333ea] text-white uppercase tracking-widest px-1.5 py-0.5 rounded shadow-sm border border-[#7e22ce]">⚡ QUEUED</span>}
                         </div>
                         <span className="font-mono text-[11px] text-on-surface-variant tracking-widest mt-0.5">{formatTime(seg.start)}</span>
+                        </div>
                       </div>
   
                       {!isActive ? (
@@ -837,19 +1003,21 @@ export default function SoloPracticeRoomPage() {
                           <button 
                             onClick={(e) => {
                                 e.stopPropagation();
+                                const playableIndex = resolvePlayableSectionIndex(seg.sectionIndex);
+                                if (playableIndex < 0) return;
                                 if (!isPlayingFlow) {
                                   const jumpTime = getGlobalTime() + 150; 
-                                  executeJumpNow(0, seg.sectionIndex, jumpTime);
+                                  executeJumpNow(0, playableIndex, jumpTime);
                                 } else {
                                   let jumpTime = getGlobalTime() + 150;
                                   if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
                                     const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
                                     jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
-                                    pendingQuantizedJumpRef.current = { trackIndex: 0, sectionIndex: seg.sectionIndex, jumpTime };
-                                    setQueuedSectionIndex(seg.sectionIndex);
-                                    if (sectionsRef.current[seg.sectionIndex]) playGuideCue(sectionsRef.current[seg.sectionIndex].section_name);
+                                    pendingQuantizedJumpRef.current = { trackIndex: 0, sectionIndex: playableIndex, jumpTime };
+                                    setQueuedSectionIndex(playableIndex);
+                                    if (sectionsRef.current[playableIndex]) playGuideCue(sectionsRef.current[playableIndex].section_name);
                                     hasPlayedCueRef.current = true;
-                                  } else { executeJumpNow(0, seg.sectionIndex, jumpTime); }
+                                  } else { executeJumpNow(0, playableIndex, jumpTime); }
                                 }
                             }}
                             className="w-8 h-8 rounded-full flex items-center justify-center bg-primary-container text-primary hover:text-white hover:bg-primary transition-colors border border-primary/20"

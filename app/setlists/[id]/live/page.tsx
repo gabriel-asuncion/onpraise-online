@@ -10,6 +10,7 @@ import { useTimesync } from '../../../../hooks/useTimesync';
 import { CompiledSectionToken, CompiledBeatMap, BeatNode, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "./types/setlist";
 import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote } from "./utils/music-math";
 import { normalizeSectionNameToAudioFile } from "./utils/setlist-helpers"; 
+import { getTimelineDurationBeats } from "./utils/timeline";
 
 import { useWakeLock } from "./hooks/useWakeLock";
 import { useWebAudioEngine } from "./hooks/useWebAudioEngine";
@@ -1160,6 +1161,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       let rawTimings = activeSong?.section_timings?.[sec.section_name];
       if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
       const timings = rawTimings || {};
+      const isSpacer = sec.section_name.toLowerCase().startsWith("spacer");
+      const spacerDurationBeats = isSpacer
+        ? getTimelineDurationBeats(activeSong?.section_timings, idx, sec.id, activeSong?.default_structure) ?? 0.5
+        : 0;
       
       const beatsPerMeasure = 4; // Standardized for live
       const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
@@ -1168,18 +1173,20 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       const headBeats = (Number(timings.head_m) || 0) * beatsPerMeasure;
       const tailBeats = (Number(timings.tail_m) || 0) * beatsPerMeasure;
       
-      let totalBeats = totalCoreBeats + headBeats + tailBeats;
-      if (totalBeats <= 0) totalBeats = 16; 
+      let totalBeats = isSpacer ? spacerDurationBeats : totalCoreBeats + headBeats + tailBeats;
+      if (!isSpacer && totalBeats <= 0) totalBeats = 16;
       
       const durationSec = totalBeats * secPerBeat;
-      segments.push({ 
-        label: sec.section_name, 
-        start: currentStartTime, 
-        end: currentStartTime + durationSec, 
-        duration: durationSec, 
-        color: getSectionColor(sec.section_name),
-        sectionIndex: idx
-      });
+      if (!sec.section_name.toLowerCase().startsWith("spacer")) {
+        segments.push({
+          label: sec.section_name,
+          start: currentStartTime,
+          end: currentStartTime + durationSec,
+          duration: durationSec,
+          color: getSectionColor(sec.section_name),
+          sectionIndex: idx,
+        });
+      }
       currentStartTime += durationSec;
     });
     
@@ -1250,6 +1257,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
     sections.forEach((section, sIdx) => {
       sectionStartBeats.push(currentAbsoluteBeat);
+      if (section.section_name.toLowerCase().startsWith("spacer")) {
+        currentAbsoluteBeat += getTimelineDurationBeats(activeSong.section_timings, sIdx, section.id, activeSong.default_structure) ?? 0.5;
+        return;
+      }
       
       let rawTimings = activeSong?.section_timings?.[section.section_name];
       if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
