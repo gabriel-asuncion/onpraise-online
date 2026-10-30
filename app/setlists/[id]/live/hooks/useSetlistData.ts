@@ -1,8 +1,21 @@
 import { useState, useEffect, useRef } from "react";
 import { SongRecord, SetlistTrackItem, ArrangementSection } from "../types/setlist";
+import { createClient } from "../../../../../utils/supabase/client";
 
-export function useSetlistData(setlistId: string, supabase: any) {
-  const [loading, setLoading] = useState(true);
+type SetlistSongRow = {
+  id: string;
+  sequence_order: number;
+  start_time: string;
+  custom_key: string | null;
+  custom_structure?: ArrangementSection[] | null;
+  songs: SongRecord | SongRecord[] | null;
+};
+
+type SetlistLoadState = "loading" | "ready" | "empty" | "error";
+
+export function useSetlistData(setlistId: string, supabase: ReturnType<typeof createClient>) {
+  const [loadState, setLoadState] = useState<SetlistLoadState>("loading");
+  const [retryCount, setRetryCount] = useState(0);
   const [loadedSetlistId, setLoadedSetlistId] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState("Initializing performance space...");
   const [setlistName, setNewSetlistName] = useState("Live Performance Setlist");
@@ -32,15 +45,28 @@ export function useSetlistData(setlistId: string, supabase: any) {
 
   useEffect(() => {
     let isCurrentActiveMount = true;
+    setLoadState("loading");
+    setLoadingStatus("Initializing performance space...");
+    setLoadedSetlistId(null);
+    setNewSetlistName("Live Performance Setlist");
+    setSetlistTeamId(null);
+    setSetlistEventName("Event");
+    setSetlistTrackTitles([]);
+    setTracksList([]);
+    tracksListRef.current = [];
+    setCurrentTrackIndex(0);
+    currentTrackIndexRef.current = 0;
+    setActiveSong(null);
+    activeSongRef.current = null;
+    setSections([]);
+    sectionsRef.current = [];
+    setActiveDisplayKey("G");
 
     async function initializeEnvironment() {
       if (!setlistId) {
         setLoadingStatus("Waiting for Next.js route parameters to hydrate...");
         return;
       }
-      setSetlistTeamId(null);
-      setSetlistEventName("Event");
-      setSetlistTrackTitles([]);
 
       try {
         const { data: setlistRow } = await supabase.from("setlists").select("name, event_id").eq("id", setlistId).maybeSingle();
@@ -60,34 +86,54 @@ export function useSetlistData(setlistId: string, supabase: any) {
           .eq("setlist_id", setlistId)
           .order("sequence_order", { ascending: true });
 
-        let rawQueryData: any[] | null = primaryResponse.data;
+        let rawQueryData = primaryResponse.data as SetlistSongRow[] | null;
         if (primaryResponse.error) {
           const fallbackResponse = await supabase
             .from("setlist_songs")
             .select("id, sequence_order, start_time, custom_key, group_name, group_color, songs (*)")
             .eq("setlist_id", setlistId)
             .order("sequence_order", { ascending: true });
-          rawQueryData = fallbackResponse.data;
+          if (fallbackResponse.error) throw fallbackResponse.error;
+          rawQueryData = fallbackResponse.data as SetlistSongRow[] | null;
         }
 
         if (rawQueryData && rawQueryData.length > 0) {
           const trackTitles = rawQueryData.flatMap((row) => {
             const song = Array.isArray(row.songs) ? row.songs[0] : row.songs;
-            return song?.title ? [song.title as string] : [];
+            return song?.title ? [song.title] : [];
           });
-          const formattedTracks = await Promise.all(rawQueryData.map(async (t: any) => {
+          const formattedTracks = await Promise.all(rawQueryData.map(async (t) => {
             const flattenedSongNode = Array.isArray(t.songs) ? t.songs[0] : t.songs;
             if (!flattenedSongNode) return null;
 
-            let loadedStructure = t.custom_structure ? (t.custom_structure as unknown as ArrangementSection[]) : null;
-            if (!loadedStructure) {
-              const { data: sectionsData } = await supabase
-                .from("song_sections")
-                .select("id, section_name, content")
-                .eq("song_id", flattenedSongNode.id)
-                .order("sequence_order", { ascending: true });
-              loadedStructure = sectionsData || [];
-            }
+            const { data: sectionsData, error: sectionsError } = await supabase
+              .from("song_sections")
+              .select("id, section_name, content")
+              .eq("song_id", flattenedSongNode.id)
+              .order("sequence_order", { ascending: true });
+            if (sectionsError) throw sectionsError;
+
+            const songSections = sectionsData || [];
+            const defaultStructure = Array.isArray(flattenedSongNode.default_structure)
+              ? flattenedSongNode.default_structure
+              : [];
+            const originalStructure = defaultStructure.length > 0
+              ? defaultStructure.map((section, index) => {
+                  const matchingSection = songSections.find(
+                    (item) => item.section_name === section.section_name
+                  );
+                  return {
+                    id: section.id || matchingSection?.id || `default-${index}`,
+                    section_name: section.section_name,
+                    content: section.content || matchingSection?.content || "",
+                  };
+                })
+              : songSections.map((section) => ({
+                  id: section.id,
+                  section_name: section.section_name,
+                  content: section.content || "",
+                }));
+            const loadedStructure = t.custom_structure ?? originalStructure;
 
             return {
               id: t.id,
@@ -95,6 +141,7 @@ export function useSetlistData(setlistId: string, supabase: any) {
               start_time: t.start_time,
               custom_key: t.custom_key || undefined,
               custom_structure: loadedStructure,
+              original_structure: originalStructure,
               songs: flattenedSongNode as unknown as SongRecord
             };
           }));
@@ -105,36 +152,43 @@ export function useSetlistData(setlistId: string, supabase: any) {
             setLoadedSetlistId(setlistId);
             setSetlistTrackTitles(trackTitles);
             setTracksList(cleanTracks);
-            if (cleanTracks.length > 0) {
-              const firstItem = cleanTracks[0];
-              if (firstItem && firstItem.songs) {
-                setActiveSong(firstItem.songs);
-                setCurrentTrackIndex(0);
-                setActiveDisplayKey(firstItem.custom_key || firstItem.songs.original_key || "G");
-                setSections(firstItem.custom_structure || []);
-              }
+            tracksListRef.current = cleanTracks;
+            const firstItem = cleanTracks[0];
+            const firstSong = firstItem?.songs;
+            if (firstItem && firstSong) {
+              setActiveSong(firstSong);
+              activeSongRef.current = firstSong;
+              setCurrentTrackIndex(0);
+              currentTrackIndexRef.current = 0;
+              setActiveDisplayKey(firstItem.custom_key || firstSong.original_key || "G");
+              const initialSections = firstItem.custom_structure || [];
+              setSections(initialSections);
+              sectionsRef.current = initialSections;
+              setLoadState("ready");
+            } else {
+              setLoadingStatus("No songs are available for this setlist.");
+              setLoadState("empty");
             }
-            setLoading(false);
           }
         } else {
           if (isCurrentActiveMount) {
-            setLoadingStatus("Handshake clean, but this setlist has no songs added to it yet.");
+            setLoadingStatus("This setlist has no songs yet.");
             setLoadedSetlistId(setlistId);
-            setLoading(false);
+            setLoadState("empty");
           }
         }
       } catch (err: any) {
         if (isCurrentActiveMount) {
-          setLoadingStatus(`Critical Crash: ${err?.message || "Check connection parameters"}`);
+          setLoadingStatus(err instanceof Error ? err.message : "Unable to load this setlist. Check your connection and try again.");
           setLoadedSetlistId(setlistId);
-          setLoading(false);
+          setLoadState("error");
         }
       }
     }
 
     initializeEnvironment();
     return () => { isCurrentActiveMount = false; };
-  }, [setlistId, supabase]);
+  }, [setlistId, retryCount, supabase]);
 
   // ✅ SURGICAL FIX: Return the newly mounted sections directly so the caller doesn't have to wait for React state!
   const mountTargetSetlistTrackIndex = (trackIndex: number) => {
@@ -157,7 +211,17 @@ export function useSetlistData(setlistId: string, supabase: any) {
   };
 
   return {
-    loading: loading || loadedSetlistId !== setlistId, loadingStatus, setlistName, setlistEventName, setlistTeamId, setlistTrackTitles, tracksList, setTracksList, tracksListRef,
+    loading: loadState === "loading" || loadedSetlistId !== setlistId,
+    loadState,
+    loadingStatus,
+    retryLoad: () => setRetryCount((count) => count + 1),
+    setlistName,
+    setlistEventName,
+    setlistTeamId,
+    setlistTrackTitles,
+    tracksList,
+    setTracksList,
+    tracksListRef,
     currentTrackIndex, setCurrentTrackIndex, currentTrackIndexRef,
     activeSong, setActiveSong, activeSongRef,
     sections, setSections, sectionsRef,

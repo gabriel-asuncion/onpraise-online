@@ -48,6 +48,7 @@ interface TimelineArrangementProps {
   onSnapChange: (snap: TimelineSnap) => void;
   onDownbeatOffsetChange: (offsetMs: number) => void;
   onSeekTime: (time: number) => void;
+  onUpdateLineDurations: (sectionId: string, sectionType: string, lineDurations: number[]) => void;
   canUndo: boolean;
   onUndo: () => void;
 }
@@ -56,7 +57,8 @@ type Gesture =
   | { kind: "move-pending"; pointerId: number; sectionId: string; startX: number; startY: number; grabOffsetBeats: number }
   | { kind: "move"; pointerId: number; sectionId: string; grabOffsetBeats: number }
   | { kind: "resize"; pointerId: number; sectionId: string; startBeat: number; durationBeats: number }
-  | { kind: "insert-pending"; pointerId: number; sectionType: string };
+  | { kind: "insert-pending"; pointerId: number; sectionType: string }
+  | { kind: "partition-resize"; pointerId: number; sectionId: string; sectionType: string; partitionIndex: number; initialLineDurations: number[]; sectionStartBeat: number; totalSectionBeats: number };
 
 interface MovePreview {
   sectionId: string;
@@ -111,11 +113,13 @@ export default function TimelineArrangement({
   onSnapChange,
   onDownbeatOffsetChange,
   onSeekTime,
+  onUpdateLineDurations,
   canUndo,
   onUndo,
 }: TimelineArrangementProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const rulerViewportRef = useRef<HTMLDivElement>(null);
   const gestureRef = useRef<Gesture | null>(null);
   const insertHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draggedJustFinishedRef = useRef(false);
@@ -133,6 +137,7 @@ export default function TimelineArrangement({
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSequenceOpen, setIsSequenceOpen] = useState(false);
   const [resizePreview, setResizePreview] = useState<{ id: string; duration: number } | null>(null);
+  const [partitionPreview, setPartitionPreview] = useState<{ sectionId: string; lineDurations: number[]; activeHandle: number; handleBeat: number } | null>(null);
   const [offsetDraft, setOffsetDraft] = useState((downbeatOffsetMs / 1000).toFixed(2));
   const [isSectionDetailsOpen, setIsSectionDetailsOpen] = useState(false);
   const portalTarget = typeof document === "undefined" ? null : document.body;
@@ -288,9 +293,32 @@ export default function TimelineArrangement({
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
+    const partitionHandle = target.closest<HTMLElement>("[data-partition-handle]");
     const sectionId = target.closest<HTMLElement>("[data-section-id]")?.dataset.sectionId;
     const resizeHandle = target.closest<HTMLElement>("[data-resize-section]")?.dataset.resizeSection;
     const moveHandle = target.closest<HTMLElement>("[data-move-section]")?.dataset.moveSection;
+
+    if (partitionHandle) {
+      const lineIndex = Number(partitionHandle.dataset.partitionHandle);
+      const partitionSectionId = partitionHandle.dataset.partitionSection;
+      const sectionIndex = sections.findIndex((section) => section.id === partitionSectionId);
+      if (sectionIndex >= 0 && !isNaN(lineIndex) && partitionSectionId) {
+        event.preventDefault();
+        const currentLineDurations = lineDurationsBySectionId[partitionSectionId] ?? [];
+        gestureRef.current = {
+          kind: "partition-resize",
+          pointerId: event.pointerId,
+          sectionId: partitionSectionId,
+          sectionType: sections[sectionIndex].type,
+          partitionIndex: lineIndex,
+          initialLineDurations: [...currentLineDurations],
+          sectionStartBeat: layout.starts[sectionIndex],
+          totalSectionBeats: durations[sectionIndex],
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        return;
+      }
+    }
 
     if (resizeHandle) {
       const sectionIndex = sections.findIndex((section) => section.id === resizeHandle);
@@ -360,8 +388,44 @@ export default function TimelineArrangement({
       setMovePreview(nextPreview);
       setInsertionIndex(nextPreview.insertionIndex);
     } else if (gesture.kind === "resize") {
-      const duration = Math.max(snapStep, snapBeat(getBeatAtX(event.clientX) - gesture.startBeat, snapStep));
+      const lineDurs = lineDurationsBySectionId[gesture.sectionId] ?? [];
+      const hasLines = lineDurs.length > 0;
+      // When clip has lyrics lines, snap to integer beats with a floor of 1 beat per line
+      const step = hasLines ? 1 : snapStep;
+      const minDuration = hasLines ? Math.max(1, lineDurs.length) : snapStep;
+      const duration = Math.max(minDuration, snapBeat(getBeatAtX(event.clientX) - gesture.startBeat, step));
       setResizePreview({ id: gesture.sectionId, duration });
+    } else if (gesture.kind === "partition-resize") {
+      const { sectionId, partitionIndex, initialLineDurations, sectionStartBeat, totalSectionBeats } = gesture;
+      const relativeBeat = getBeatAtX(event.clientX) - sectionStartBeat;
+      const totalLineBeats = initialLineDurations.reduce((sum, d) => sum + d, 0);
+      const fraction = totalSectionBeats > 0 ? Math.max(0, Math.min(1, relativeBeat / totalSectionBeats)) : 0;
+      const targetLineBeat = fraction * totalLineBeats;
+
+      const cumBeats = [0];
+      for (let i = 0; i < initialLineDurations.length; i++) {
+        cumBeats.push(cumBeats[i] + initialLineDurations[i]);
+      }
+
+      // Minimum 1-beat floor for both adjacent lines
+      const minBeat = cumBeats[partitionIndex] + 1;
+      const maxBeat = cumBeats[partitionIndex + 2] - 1;
+
+      if (minBeat <= maxBeat) {
+        const targetSnapped = Math.round(targetLineBeat);
+        const clampedBeat = Math.max(minBeat, Math.min(maxBeat, targetSnapped));
+
+        const newLineDurations = [...initialLineDurations];
+        newLineDurations[partitionIndex] = clampedBeat - cumBeats[partitionIndex];
+        newLineDurations[partitionIndex + 1] = cumBeats[partitionIndex + 2] - clampedBeat;
+
+        setPartitionPreview({
+          sectionId,
+          lineDurations: newLineDurations,
+          activeHandle: partitionIndex,
+          handleBeat: clampedBeat,
+        });
+      }
     } else if (gesture.kind === "insert-pending") {
       const targetBeat = snapBeat(getBeatAtX(event.clientX), snapStep);
       setInsertionIndex(getInsertionIndex(targetBeat));
@@ -383,6 +447,12 @@ export default function TimelineArrangement({
         ? resizePreview.duration
         : gesture.durationBeats;
       if (duration !== gesture.durationBeats) onResize(gesture.sectionId, duration);
+    } else if (gesture.kind === "partition-resize") {
+      draggedJustFinishedRef.current = true;
+      if (partitionPreview && partitionPreview.sectionId === gesture.sectionId) {
+        onUpdateLineDurations(gesture.sectionId, gesture.sectionType, partitionPreview.lineDurations);
+      }
+      setPartitionPreview(null);
     } else if (gesture.kind === "insert-pending" && insertionLaneType) {
       const targetBeat = snapBeat(getBeatAtX(event.clientX), snapStep);
       onAddSection(gesture.sectionType, getInsertionIndex(targetBeat));
@@ -394,6 +464,7 @@ export default function TimelineArrangement({
     setInsertionLaneType(null);
     setInsertionIndex(null);
     setResizePreview(null);
+    setPartitionPreview(null);
   };
 
   const cancelGesture = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -405,6 +476,7 @@ export default function TimelineArrangement({
     setInsertionLaneType(null);
     setInsertionIndex(null);
     setResizePreview(null);
+    setPartitionPreview(null);
   };
 
   const playheadVisible = playheadBeat >= 0 && playheadBeat <= canvasBeats;
@@ -538,56 +610,29 @@ export default function TimelineArrangement({
           <span className="text-xs font-medium text-on-surface-variant">No lyric at the current playback position.</span>
         )}
         </div>
-      </div>
-      <div
-        ref={viewportRef}
-        className="relative h-[calc(100vh-14rem)] min-h-[360px] w-full min-w-0 max-w-full overflow-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-inner"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={finishGesture}
-        onPointerCancel={cancelGesture}
-      >
-        <div className="flex min-h-full w-max min-w-full">
-          <aside
-            className="sticky left-0 z-30 h-fit self-start shrink-0 border-r border-outline-variant/30 bg-surface-container-low shadow-[4px_0_10px_rgba(0,0,0,0.12)] transition-[width] duration-200"
+
+        {/* ✅ DOCKED TIMELINE BAR RULER: Pinned to the sticky top section */}
+        <div className="flex items-center overflow-hidden rounded-xl border border-outline-variant/30 bg-surface-container-low shadow-sm">
+          {/* Section Column Header matching aside width */}
+          <button
+            type="button"
+            onClick={() => setLaneNamesCollapsed((collapsed) => !collapsed)}
+            title={laneNamesCollapsed ? "Expand section names" : "Collapse section names"}
             style={{ width: `${laneColumnWidth}px` }}
+            className="flex h-8 shrink-0 select-none items-center justify-center border-r border-outline-variant/30 bg-surface-container text-[9px] font-black uppercase tracking-widest text-on-surface-variant hover:bg-surface-container-high transition-[width] duration-200 cursor-pointer"
           >
-            <button
-              type="button"
-              onClick={() => setLaneNamesCollapsed((collapsed) => !collapsed)}
-              aria-label={laneNamesCollapsed ? "Expand section lane names" : "Collapse section lane names"}
-              title={laneNamesCollapsed ? "Expand lanes" : "Collapse lanes"}
-              className="flex h-9 w-full items-center justify-center gap-1 border-b border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-high"
-            >
-              <span className="material-symbols-outlined !text-[17px]">{laneNamesCollapsed ? "chevron_right" : "chevron_left"}</span>
-              
-            </button>
-            {/* <div className="flex h-8 items-center justify-center border-b border-outline-variant/30 text-[9px] font-black uppercase tracking-widest text-on-surface-variant">
-              {laneNamesCollapsed ? "Lane" : "Section"}
-            </div> */}
-            {laneTypes.map((type) => (
-              <button
-                key={type}
-                type="button"
-                data-lane-type={type}
-                onClick={(event) => { event.stopPropagation(); setSelectedLaneType(type); setSelectedSectionId(null); }}
-                title={type}
-                className={`flex h-10 w-full items-center border-b border-outline-variant/20 text-xs font-black uppercase tracking-wide text-on-surface transition-[padding,background-color] duration-200 ${laneNamesCollapsed ? "justify-center px-1" : "px-3"} ${selectedLaneType === type ? "bg-primary/20 text-primary ring-1 ring-inset ring-primary/50" : "hover:bg-surface-container-high"}`}
-              >
-                {laneNamesCollapsed ? abbreviateLane(type) : <span className="truncate">{type}</span>}
-              </button>
-            ))}
-            {laneTypes.length === 0 && (
-              <div className="flex h-16 items-center justify-center px-2 text-center text-[10px] font-semibold text-on-surface-variant">
-                {laneNamesCollapsed ? "+" : "Add a section to start"}
-              </div>
-            )}
-          </aside>
-          <div ref={canvasRef} className="relative shrink-0" style={{ width: `${canvasWidth}px` }}>
-            {/* <div aria-hidden="true" className="h-9 border-b border-outline-variant/30 bg-surface-container-low" /> */}
+            {laneNamesCollapsed ? "»" : "SECTIONS"}
+          </button>
+
+          {/* Horizontally synced ruler viewport */}
+          <div
+            ref={rulerViewportRef}
+            className="relative h-8 flex-1 overflow-hidden select-none cursor-pointer"
+            aria-label="Timeline bar ruler"
+          >
             <div
-              className="relative h-8 border-b border-outline-variant/30 bg-surface-container-low"
-              aria-label="Timeline bar ruler"
+              className="relative h-full"
+              style={{ width: `${canvasWidth}px` }}
               onClick={(event) => {
                 const rect = event.currentTarget.getBoundingClientRect();
                 const beat = Math.max(0, (event.clientX - rect.left) / pixelsPerBeat);
@@ -613,7 +658,61 @@ export default function TimelineArrangement({
                   ))}
                 </div>
               ))}
+              {playheadVisible && (
+                <div
+                  className="pointer-events-none absolute bottom-0 top-0 z-20 w-0.75 bg-error"
+                  style={{ left: `${playheadBeat * pixelsPerBeat}px` }}
+                >
+                  <div className="absolute -bottom-1 -left-1 h-2.5 w-2.5 rotate-45 bg-error shadow-sm" />
+                </div>
+              )}
             </div>
+          </div>
+        </div>
+      </div>
+      <div
+        ref={viewportRef}
+        className="relative h-[calc(100vh-14rem)] min-h-[360px] w-full min-w-0 max-w-full overflow-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-inner"
+        onScroll={(e) => {
+          if (rulerViewportRef.current) {
+            rulerViewportRef.current.scrollLeft = e.currentTarget.scrollLeft;
+          }
+        }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={finishGesture}
+        onPointerCancel={cancelGesture}
+      >
+        <div className="flex min-h-full w-max min-w-full">
+          <aside
+            className="sticky left-0 z-30 self-stretch shrink-0 border-r border-outline-variant/30 bg-surface-container-low shadow-[4px_0_10px_rgba(0,0,0,0.12)] transition-[width] duration-200"
+            style={{ width: `${laneColumnWidth}px` }}
+          >
+            {/* Clicking any section in the column toggles expand/collapse */}
+            {laneTypes.map((type) => (
+              <button
+                key={type}
+                type="button"
+                data-lane-type={type}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setLaneNamesCollapsed((collapsed) => !collapsed);
+                  setSelectedLaneType(type);
+                  setSelectedSectionId(null);
+                }}
+                title={laneNamesCollapsed ? `Click to expand (${type})` : `Click to collapse (${type})`}
+                className={`flex h-10 w-full items-center border-b border-outline-variant/20 text-xs font-black uppercase tracking-wide text-on-surface transition-[padding,background-color] duration-200 cursor-pointer ${laneNamesCollapsed ? "justify-center px-1" : "px-3"} ${selectedLaneType === type ? "bg-primary/20 text-primary ring-1 ring-inset ring-primary/50" : "hover:bg-surface-container-high"}`}
+              >
+                {laneNamesCollapsed ? abbreviateLane(type) : <span className="truncate">{type}</span>}
+              </button>
+            ))}
+            {laneTypes.length === 0 && (
+              <div className="flex h-16 items-center justify-center px-2 text-center text-[10px] font-semibold text-on-surface-variant">
+                {laneNamesCollapsed ? "+" : "Add a section to start"}
+              </div>
+            )}
+          </aside>
+          <div ref={canvasRef} className="relative shrink-0" style={{ width: `${canvasWidth}px` }}>
             {laneTypes.map((type, laneIndex) => (
               <div
                 key={type}
@@ -693,21 +792,93 @@ export default function TimelineArrangement({
                           </button>
                         )}
                         <span className="min-w-0 truncate text-[10px] font-black">{clipLabel}</span>
-                        {totalLineDuration > 0 && (
-                          <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-md">
-                            {lineDurations.slice(0, -1).map((lineDuration, lineIndex) => {
-                              partitionCursor += lineDuration;
-                              return (
-                                <span
-                                  key={`${section.id}-line-partition-${lineIndex}`}
-                                  title={`Line ${lineIndex + 1} · ${lineDuration} beats`}
-                                  className="absolute bottom-0 top-0 border-l border-white/80 shadow-[0_0_2px_rgba(0,0,0,0.8)]"
-                                  style={{ left: `${(partitionCursor / totalLineDuration) * 100}%` }}
-                                />
-                              );
-                            })}
-                          </div>
-                        )}
+                        {(() => {
+                          // Helper to waterfall resize preview to line dividers
+                          const getWaterfalledLineDurations = (baseLineDurs: number[], targetDuration: number) => {
+                            if (baseLineDurs.length === 0) return baseLineDurs;
+                            const durs = [...baseLineDurs];
+                            const currentTotal = durs.reduce((a, b) => a + b, 0);
+                            const target = Math.max(durs.length, Math.round(targetDuration));
+                            const delta = target - currentTotal;
+                            if (delta > 0) {
+                              durs[durs.length - 1] += delta;
+                            } else if (delta < 0) {
+                              let deficit = -delta;
+                              for (let i = durs.length - 1; i >= 0 && deficit > 0; i--) {
+                                const canReduce = Math.max(0, durs[i] - 1);
+                                const reduction = Math.min(canReduce, deficit);
+                                durs[i] -= reduction;
+                                deficit -= reduction;
+                              }
+                            }
+                            return durs;
+                          };
+
+                          const activeLineDurations = (partitionPreview && partitionPreview.sectionId === section.id)
+                            ? partitionPreview.lineDurations
+                            : (resizePreview && resizePreview.id === section.id)
+                            ? getWaterfalledLineDurations(lineDurationsBySectionId[section.id] ?? [], resizePreview.duration)
+                            : (lineDurationsBySectionId[section.id] ?? []);
+                          const activeTotal = activeLineDurations.reduce((total, d) => total + d, 0);
+
+                          if (activeTotal <= 0 || activeLineDurations.length <= 1) return null;
+
+                          return (
+                            <>
+                              {/* Background visible divider lines */}
+                              <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-md">
+                                {(() => {
+                                  let cursor = 0;
+                                  return activeLineDurations.slice(0, -1).map((ld, lIdx) => {
+                                    cursor += ld;
+                                    return (
+                                      <span
+                                        key={`${section.id}-part-${lIdx}`}
+                                        className="absolute bottom-0 top-0 border-l border-white/70 shadow-[0_0_2px_rgba(0,0,0,0.8)]"
+                                        style={{ left: `${(cursor / activeTotal) * 100}%` }}
+                                      />
+                                    );
+                                  });
+                                })()}
+                              </div>
+
+                              {/* Interactive Draggable Handles when clip is selected */}
+                              {isSelected && !section.type.startsWith("Spacer") && (() => {
+                                let cursor = 0;
+                                return activeLineDurations.slice(0, -1).map((ld, lIdx) => {
+                                  cursor += ld;
+                                  const leftPercent = (cursor / activeTotal) * 100;
+                                  return (
+                                    <div
+                                      key={`${section.id}-handle-${lIdx}`}
+                                      data-partition-handle={lIdx}
+                                      data-partition-section={section.id}
+                                      onClick={(e) => e.stopPropagation()}
+                                      title={`Drag to adjust split between Line ${lIdx + 1} and Line ${lIdx + 2}`}
+                                      className="absolute top-0 bottom-0 z-30 flex w-4 -ml-2 cursor-col-resize items-center justify-center group/part-handle"
+                                      style={{ left: `${leftPercent}%` }}
+                                    >
+                                      <div className="h-5 w-1 rounded-full bg-white shadow-md group-hover/part-handle:scale-125 group-hover/part-handle:bg-amber-300 transition-all" />
+                                    </div>
+                                  );
+                                });
+                              })()}
+
+                              {/* Real-time Musical Tooltip Badge during Handle Drag */}
+                              {partitionPreview && partitionPreview.sectionId === section.id && (
+                                <div
+                                  data-timeline-overlay
+                                  className="pointer-events-none absolute -top-8 z-40 -translate-x-1/2 whitespace-nowrap rounded-md border border-amber-400 bg-surface-container-highest px-2 py-0.5 text-[10px] font-mono font-bold text-on-surface shadow-2xl backdrop-blur"
+                                  style={{ left: `${(partitionPreview.handleBeat / activeTotal) * 100}%` }}
+                                >
+                                  L{partitionPreview.activeHandle + 1}: {partitionPreview.lineDurations[partitionPreview.activeHandle]}b (M{Math.floor(partitionPreview.lineDurations[partitionPreview.activeHandle] / 4)}, B{partitionPreview.lineDurations[partitionPreview.activeHandle] % 4})
+                                  {" · "}
+                                  L{partitionPreview.activeHandle + 2}: {partitionPreview.lineDurations[partitionPreview.activeHandle + 1]}b (M{Math.floor(partitionPreview.lineDurations[partitionPreview.activeHandle + 1] / 4)}, B{partitionPreview.lineDurations[partitionPreview.activeHandle + 1] % 4})
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                         {isSelected && (
                           <div
                             data-resize-section={section.id}
@@ -768,7 +939,7 @@ export default function TimelineArrangement({
                 className="pointer-events-none absolute z-30 -translate-y-full whitespace-nowrap rounded-md border border-primary/60 bg-surface-container-highest px-2 py-1 text-[10px] font-black text-on-surface shadow-lg"
                 style={{
                   left: `${movingSectionStartBeat * pixelsPerBeat + 2}px`,
-                  top: `${68 + movingLaneIndex * 40 - 3}px`,
+                  top: `${movingLaneIndex * 40 - 3}px`,
                 }}
               >
                 {movingTimeLabel} · Bar {movingSectionBar} · Beat {beatNumber} {beatSubdivisionLabel}
@@ -776,7 +947,7 @@ export default function TimelineArrangement({
             )}
             {playheadVisible && (
               <div
-                className="pointer-events-none absolute bottom-0 top-[2rem] z-10 w-0.75 bg-error"
+                className="pointer-events-none absolute bottom-0 top-0 z-10 w-0.75 bg-error"
                 style={{ left: `${playheadBeat * pixelsPerBeat}px` }}
                 aria-label="Audio playhead"
               />

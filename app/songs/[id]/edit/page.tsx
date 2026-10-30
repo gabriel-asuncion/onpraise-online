@@ -64,6 +64,7 @@ interface TimelineUndoSnapshot {
   meterDenominator: number;
   snap: TimelineSnap;
   downbeatOffsetMs: number;
+  lineOverrides?: Record<string, Record<number, { measures: number; beats: number }>> | null;
 }
 
 interface TimelineClipboardItem {
@@ -1485,6 +1486,92 @@ function formatTimeWithMs(seconds: number) {
     return () => window.removeEventListener("keydown", handleNashvilleNumberKeyInjections);
   }, [chordMode, chordTargetCoordinate, activeScaleDiatonicDeck]);
 
+  // ✅ Media playback & seek keyboard shortcuts
+  useEffect(() => {
+    const handleMediaShortcuts = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      // Do not trigger while typing in inputs, textareas, or dropdowns
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      // Do not trigger if modal dialogs are open
+      if (isConfirmExitModalOpen || isImportModalOpen || isKeyPopupOpen || isTapBpmModalOpen) {
+        return;
+      }
+
+      if (!ytPlayerRef.current) return;
+
+      // Spacebar: Play / Pause
+      if (e.code === "Space" || e.key === " ") {
+        e.preventDefault();
+        initAudioContext();
+        if (typeof ytPlayerRef.current.getPlayerState === "function") {
+          const state = ytPlayerRef.current.getPlayerState();
+          if (state === 1) { // 1 = playing
+            ytPlayerRef.current.pauseVideo();
+          } else {
+            ytPlayerRef.current.playVideo();
+          }
+        } else {
+          if (ytPlaying) ytPlayerRef.current.pauseVideo();
+          else ytPlayerRef.current.playVideo();
+        }
+        return;
+      }
+
+      // Left Arrow: Seek -5s
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        const cur = typeof ytPlayerRef.current.getCurrentTime === "function" ? ytPlayerRef.current.getCurrentTime() : ytCurrentTime;
+        const newT = Math.max(0, cur - 5);
+        ytPlayerRef.current.seekTo(newT, true);
+        setYtCurrentTime(newT);
+        return;
+      }
+
+      // Right Arrow: Seek +5s
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        const cur = typeof ytPlayerRef.current.getCurrentTime === "function" ? ytPlayerRef.current.getCurrentTime() : ytCurrentTime;
+        const maxD = typeof ytPlayerRef.current.getDuration === "function" ? ytPlayerRef.current.getDuration() : (ytDuration || 9999);
+        const newT = Math.min(maxD, cur + 5);
+        ytPlayerRef.current.seekTo(newT, true);
+        setYtCurrentTime(newT);
+        return;
+      }
+
+      // J: Seek -10s
+      if (e.key === "j" || e.key === "J") {
+        e.preventDefault();
+        const cur = typeof ytPlayerRef.current.getCurrentTime === "function" ? ytPlayerRef.current.getCurrentTime() : ytCurrentTime;
+        const newT = Math.max(0, cur - 10);
+        ytPlayerRef.current.seekTo(newT, true);
+        setYtCurrentTime(newT);
+        return;
+      }
+
+      // L: Seek +10s
+      if (e.key === "l" || e.key === "L") {
+        e.preventDefault();
+        const cur = typeof ytPlayerRef.current.getCurrentTime === "function" ? ytPlayerRef.current.getCurrentTime() : ytCurrentTime;
+        const maxD = typeof ytPlayerRef.current.getDuration === "function" ? ytPlayerRef.current.getDuration() : (ytDuration || 9999);
+        const newT = Math.min(maxD, cur + 10);
+        ytPlayerRef.current.seekTo(newT, true);
+        setYtCurrentTime(newT);
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", handleMediaShortcuts);
+    return () => window.removeEventListener("keydown", handleMediaShortcuts);
+  }, [ytPlaying, ytCurrentTime, ytDuration, initAudioContext, isConfirmExitModalOpen, isImportModalOpen, isKeyPopupOpen, isTapBpmModalOpen]);
+
   useEffect(() => {
     if (!youtubeVideoId) {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.destroy === 'function') {
@@ -1659,6 +1746,7 @@ function formatTimeWithMs(seconds: number) {
       meterDenominator: timelineMeterDenominator,
       snap: timelineSnap,
       downbeatOffsetMs: formYoutubeSyncOffset,
+      lineOverrides: lineOverrides ? JSON.parse(JSON.stringify(lineOverrides)) : null,
     };
     timelineUndoStackRef.current = [...timelineUndoStackRef.current.slice(-49), snapshot];
     setTimelineUndoCount(timelineUndoStackRef.current.length);
@@ -1677,6 +1765,25 @@ function formatTimeWithMs(seconds: number) {
     setTimelineSnap(previous.snap);
     prevOffsetVal.current = previous.downbeatOffsetMs;
     setFormYoutubeSyncOffset(previous.downbeatOffsetMs);
+    if (previous.lineOverrides !== undefined) {
+      setLineOverrides(previous.lineOverrides);
+    }
+    setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineUpdateLineDurations = (sectionId: string, sectionType: string, lineDurations: number[]) => {
+    recordTimelineUndo();
+    const newOverrides: Record<number, { measures: number; beats: number }> = {};
+    lineDurations.forEach((duration, lineIndex) => {
+      newOverrides[lineIndex] = {
+        measures: Math.floor(duration / 4),
+        beats: duration % 4,
+      };
+    });
+    setLineOverrides((prev) => ({
+      ...(prev || {}),
+      [sectionType]: newOverrides,
+    }));
     setHasUnsavedChanges(true);
   };
 
@@ -1760,7 +1867,63 @@ function formatTimeWithMs(seconds: number) {
 
   const handleTimelineResize = (sectionId: string, durationBeats: number) => {
     recordTimelineUndo();
-    setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: durationBeats }));
+    const section = formSections.find((item) => item.id === sectionId);
+
+    if (section && !section.type.toLowerCase().startsWith("spacer")) {
+      const currentLineDurs = [...(timelineLineDurationsBySectionId[sectionId] || [])];
+
+      if (currentLineDurs.length > 0) {
+        const currentTotal = currentLineDurs.reduce((sum, d) => sum + d, 0);
+        // Minimum section length is 1 beat per line
+        const minPossibleTotal = currentLineDurs.length;
+        const targetTotal = Math.max(minPossibleTotal, Math.round(durationBeats));
+        const delta = targetTotal - currentTotal;
+
+        if (delta > 0) {
+          // Lengthen only the last line
+          currentLineDurs[currentLineDurs.length - 1] += delta;
+        } else if (delta < 0) {
+          // Waterfall reduce backward from the last line, keeping a 1-beat floor per line
+          let deficit = -delta;
+          for (let i = currentLineDurs.length - 1; i >= 0 && deficit > 0; i--) {
+            const canReduce = Math.max(0, currentLineDurs[i] - 1);
+            const reduction = Math.min(canReduce, deficit);
+            currentLineDurs[i] -= reduction;
+            deficit -= reduction;
+          }
+        }
+
+        // Write to lineOverrides
+        const newOverrides: Record<number, { measures: number; beats: number }> = {};
+        currentLineDurs.forEach((d, lineIndex) => {
+          newOverrides[lineIndex] = {
+            measures: Math.floor(d / 4),
+            beats: d % 4,
+          };
+        });
+        setLineOverrides((prev) => ({
+          ...(prev || {}),
+          [section.type]: newOverrides,
+        }));
+
+        const finalSectionDuration = currentLineDurs.reduce((sum, d) => sum + d, 0);
+        setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: finalSectionDuration }));
+
+        // Sync sectionTimings so measures/beats match total without alignment errors
+        setSectionTimings((prev) => ({
+          ...prev,
+          [section.type]: {
+            ...(prev[section.type] || { repeats: 0, head_m: 0, tail_m: 0 }),
+            measures: Math.floor(finalSectionDuration / 4),
+            beats: finalSectionDuration % 4,
+          },
+        }));
+      } else {
+        setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: Math.max(1, Math.round(durationBeats)) }));
+      }
+    } else {
+      setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: Math.max(0.125, durationBeats) }));
+    }
     setHasUnsavedChanges(true);
   };
 
@@ -2214,11 +2377,6 @@ function formatTimeWithMs(seconds: number) {
           tempo: parseInt(formTempo, 10) || 75,
           original_key: formKey,
           themes: formThemes.join(", "),
-          default_structure: formSections.map((section) => ({
-            id: section.id,
-            section_name: section.type,
-            content: section.content || "",
-          })),
           section_timings: updatedSectionTimings,
           chordpro_content: compiledChordPro,
           youtube_url: formYoutubeUrl.trim(),
@@ -2241,11 +2399,6 @@ function formatTimeWithMs(seconds: number) {
             tempo: parseInt(formTempo, 10) || 75,
             original_key: formKey,
             themes: formThemes.join(", "),
-            default_structure: formSections.map((section) => ({
-              id: section.id,
-              section_name: section.type,
-              content: section.content || "",
-            })),
             section_timings: updatedSectionTimings,
             chordpro_content: compiledChordPro,
             youtube_url: formYoutubeUrl.trim(),
@@ -3092,6 +3245,7 @@ function formatTimeWithMs(seconds: number) {
             onMeterChange={handleTimelineMeterChange}
             onSnapChange={handleTimelineSnapChange}
             onDownbeatOffsetChange={handleTimelineDownbeatOffsetChange}
+            onUpdateLineDurations={handleTimelineUpdateLineDurations}
             canUndo={timelineUndoCount > 0}
             onUndo={handleTimelineUndo}
           />

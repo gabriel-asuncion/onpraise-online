@@ -29,6 +29,7 @@ export interface SetlistTrackItem {
   start_time: string;
   custom_key?: string; 
   custom_structure?: ArrangementSection[] | null;
+  original_structure?: ArrangementSection[];
   songs: SongRecord | null;
   group_name?: string | null;
   group_color?: string | null;

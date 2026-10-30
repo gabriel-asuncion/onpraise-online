@@ -26,6 +26,8 @@ export function useYouTubeSync({
   
   // ✅ SURGICAL FIX: A synchronous reference so the hardware clock never waits for a React render
   const isYtBufferingRef = useRef<boolean>(false);
+  const requestedVideoIdRef = useRef<string | null>(youtubeVideoId);
+  requestedVideoIdRef.current = youtubeVideoId;
 
   useEffect(() => {
     if (!activeSong?.youtube_url) { setYoutubeVideoId(null); return; }
@@ -37,47 +39,66 @@ export function useYouTubeSync({
 
   useEffect(() => {
     if (!youtubeVideoId || !isYoutubeSyncEnabled) return;
+    let isActive = true;
+    let readinessTimer: ReturnType<typeof setTimeout> | null = null;
+
     const initPlayer = () => {
-      if (!(window as any).YT || !(window as any).YT.Player) { setTimeout(initPlayer, 200); return; }
-      
-      if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.cueVideoById === 'function') {
-        if (loadedVideoIdRef.current !== youtubeVideoId) {
-          loadedVideoIdRef.current = youtubeVideoId;
-          try { ytPlayerRef.current.cueVideoById(youtubeVideoId); } catch(e) {}
+      if (!isActive) return;
+      const youtubeApi = (window as Window & { YT?: { Player?: new (element: string, options: unknown) => { [key: string]: unknown } } }).YT;
+      if (!youtubeApi?.Player) {
+        readinessTimer = setTimeout(initPlayer, 200);
+        return;
+      }
+
+      if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.cueVideoById === "function") {
+        const currentVideoId = requestedVideoIdRef.current;
+        if (currentVideoId && loadedVideoIdRef.current !== currentVideoId) {
+          loadedVideoIdRef.current = currentVideoId;
+          try { ytPlayerRef.current.cueVideoById(currentVideoId); } catch {}
         }
       } else if (!ytPlayerRef.current) {
         loadedVideoIdRef.current = youtubeVideoId;
-        ytPlayerRef.current = new (window as any).YT.Player('yt-live-player-container', {
-          height: '10px', width: '10px', videoId: youtubeVideoId,
-          playerVars: { 'playsinline': 1, 'controls': 0, 'disablekb': 1 },
+        ytPlayerRef.current = new youtubeApi.Player("yt-live-player-container", {
+          height: "10px", width: "10px", videoId: youtubeVideoId,
+          playerVars: { playsinline: 1, controls: 0, disablekb: 1 },
           events: {
-            'onReady': (event: any) => {
-              isYtPlayerReadyRef.current = true; 
+            onReady: (event: { target: { setVolume: (volume: number) => void; cueVideoById?: (videoId: string) => void } }) => {
+              if (!isActive) return;
+              isYtPlayerReadyRef.current = true;
               event.target.setVolume(youtubeVolumeRef.current * 100);
+              const currentVideoId = requestedVideoIdRef.current;
+              if (currentVideoId && loadedVideoIdRef.current !== currentVideoId) {
+                loadedVideoIdRef.current = currentVideoId;
+                event.target.cueVideoById?.(currentVideoId);
+              }
             },
-            'onStateChange': (event: any) => {
-               if (event.data === 3) {
-                 isYtBufferingRef.current = true;
-                 setIsYtBuffering(true); 
-               } else if (event.data === 1 || event.data === 2 || event.data === 0) {
-                 isYtBufferingRef.current = false;
-                 setIsYtBuffering(false); 
-               }
+            onStateChange: (event: { data: number }) => {
+              if (!isActive) return;
+              if (event.data === 3) {
+                isYtBufferingRef.current = true;
+                setIsYtBuffering(true);
+              } else if (event.data === 1 || event.data === 2 || event.data === 0) {
+                isYtBufferingRef.current = false;
+                setIsYtBuffering(false);
+              }
             }
           }
         });
       }
     };
 
-    if (!(window as any).YT) {
-      const tag = document.createElement('script'); tag.src = "https://www.youtube.com/iframe_api";
-      const firstScriptTag = document.getElementsByTagName('script')[0];
-      firstScriptTag?.parentNode?.insertBefore(tag, firstScriptTag);
+    const existingScript = document.querySelector<HTMLScriptElement>('script[src="https://www.youtube.com/iframe_api"]');
+    if (!((window as Window & { YT?: unknown }).YT) && !existingScript) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(tag);
     }
     initPlayer();
 
     return () => {
-      if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
+      isActive = false;
+      if (readinessTimer) clearTimeout(readinessTimer);
+      if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === "function") ytPlayerRef.current.pauseVideo();
     };
   }, [youtubeVideoId, isYoutubeSyncEnabled]);
 

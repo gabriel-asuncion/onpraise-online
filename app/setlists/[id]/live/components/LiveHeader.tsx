@@ -34,6 +34,12 @@ interface LiveHeaderProps {
   setIsUserLobbyOpen?: (val: boolean) => void;
   unreadMessageCount?: number;
   setIsChaptersModalOpen?: (val: boolean) => void; // ✅ Add this
+  isRecordingTelemetry?: boolean;
+  isTelemetryPaused?: boolean;
+  recordingStartTime?: number | null;
+  recordingAccumulatedMs?: number;
+  telemetrySaveError?: string | null;
+  getGlobalTime?: () => number;
 }
 
 export function LiveHeader({
@@ -44,7 +50,9 @@ export function LiveHeader({
   accentProgressBarRef, isSoloMode = false,
   wakeUpAudioEngine, 
   scrollContainerRef, activeSectionName, nextSectionName, handleSyncBack,
-  showSyncBack, setIsUserLobbyOpen, unreadMessageCount = 0, setIsChaptersModalOpen
+  showSyncBack, setIsUserLobbyOpen, unreadMessageCount = 0, setIsChaptersModalOpen,
+  isRecordingTelemetry = false, isTelemetryPaused = false, recordingStartTime,
+  recordingAccumulatedMs = 0, telemetrySaveError, getGlobalTime
 }: LiveHeaderProps) {
   
   const [isExpanded, setIsExpanded] = useState(false);
@@ -53,6 +61,13 @@ export function LiveHeader({
   const [mounted, setMounted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [hasInitiallyMounted, setHasInitiallyMounted] = useState(false);
+  const [telemetryNow, setTelemetryNow] = useState(() => getGlobalTime?.() ?? Date.now());
+
+  useEffect(() => {
+    if (!isRecordingTelemetry || isTelemetryPaused || !recordingStartTime) return;
+    const timer = window.setInterval(() => setTelemetryNow(getGlobalTime?.() ?? Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isRecordingTelemetry, isTelemetryPaused, recordingStartTime, getGlobalTime]);
 
   useEffect(() => {
     setMounted(true);
@@ -96,6 +111,18 @@ export function LiveHeader({
       <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
     </svg>
   );
+
+  const telemetryElapsedMs = recordingAccumulatedMs + (
+    isRecordingTelemetry && !isTelemetryPaused && recordingStartTime && telemetryNow
+      ? Math.max(0, telemetryNow - recordingStartTime)
+      : 0
+  );
+  const telemetrySeconds = Math.floor(telemetryElapsedMs / 1000);
+  const telemetryTime = [
+    Math.floor(telemetrySeconds / 3600).toString().padStart(2, "0"),
+    Math.floor((telemetrySeconds % 3600) / 60).toString().padStart(2, "0"),
+    (telemetrySeconds % 60).toString().padStart(2, "0"),
+  ].join(":");
 
   // =========================================
   // 1. COLLAPSED VIEW (Mobile Docked Player)
@@ -218,23 +245,34 @@ export function LiveHeader({
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="text-on-surface"><polyline points="6 9 12 15 18 9"></polyline></svg>
         </button>
         
-        <div className="flex items-center gap-1.5 bg-surface-container p-1.5 rounded-[14px] shadow-inner">
-            {[1, 2, 3, 4, 5, 6, 7, 8].map((beatNum) => (
-              <div 
-                key={beatNum} 
-                ref={(el) => { if (metronomeRefs?.current) metronomeRefs.current[beatNum - 1] = el; }} 
-                style={{ display: beatNum <= currentMeasureLength ? 'flex' : 'none' }} 
-                className={`w-8 h-8 items-center justify-center font-mono font-black text-sm rounded-lg border transition-all duration-75 select-none ${
-                  isPlayingFlow && currentBeat === beatNum 
-                    ? beatNum === 1 
-                      ? "bg-[#faba37] text-white border-[#e0a22b]" 
-                      : "bg-primary text-on-primary border-primary/50" 
-                    : "bg-surface-container-high text-on-surface-variant border-outline-variant/30"
-                }`}
-              >
-                {beatNum}
-              </div>
-            ))}
+        <div className="flex flex-col items-center gap-1.5">
+          <div className="flex items-center gap-1.5 bg-surface-container p-1.5 rounded-[14px] shadow-inner">
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((beatNum) => (
+                <div
+                  key={beatNum}
+                  ref={(el) => { if (metronomeRefs?.current) metronomeRefs.current[beatNum - 1] = el; }}
+                  style={{ display: beatNum <= currentMeasureLength ? 'flex' : 'none' }}
+                  className={`w-8 h-8 items-center justify-center font-mono font-black text-sm rounded-lg border transition-all duration-75 select-none ${
+                    isPlayingFlow && currentBeat === beatNum
+                      ? beatNum === 1
+                        ? "bg-[#faba37] text-white border-[#e0a22b]"
+                        : "bg-primary text-on-primary border-primary/50"
+                      : "bg-surface-container-high text-on-surface-variant border-outline-variant/30"
+                  }`}
+                >
+                  {beatNum}
+                </div>
+              ))}
+          </div>
+          <div className="flex items-center gap-1.5 font-mono text-[10px] font-bold tabular-nums text-on-surface-variant" aria-live="off">
+            <span className={`w-1.5 h-1.5 rounded-full ${isRecordingTelemetry && !isTelemetryPaused ? "bg-red-500 animate-pulse" : "bg-outline-variant"}`} />
+            <span>{isTelemetryPaused ? "PAUSED" : "REHEARSAL"} {telemetryTime}</span>
+          </div>
+          {telemetrySaveError && (
+            <span role="alert" className="max-w-40 text-center text-[9px] font-semibold text-red-600">
+              {telemetrySaveError}
+            </span>
+          )}
         </div>
         
         <div className="w-10 h-10 pointer-events-none" />

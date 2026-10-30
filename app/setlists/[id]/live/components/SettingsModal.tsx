@@ -5,11 +5,17 @@ import { SongRecord } from "../types/setlist";
 // ✅ Import the Mixer Component
 import { VolumeMixerModal } from "./VolumeMixerModal";
 
+interface LivePresenceUser {
+  id: string;
+  isMD: boolean;
+  name?: string;
+}
+
 interface SettingsModalProps {
   isSettingsModalOpen: boolean;
   setIsSettingsModalOpen: (val: boolean) => void;
-  localPresenceUser: any;
-  onlineUsers: any[];
+  localPresenceUser: LivePresenceUser | null;
+  onlineUsers: LivePresenceUser[];
   handleToggleMusicDirectorMode: () => void;
   showChords: boolean;
   setShowChords: (val: boolean) => void;
@@ -51,6 +57,7 @@ interface SettingsModalProps {
   recordingStartTime?: number | null;
   isPaused?: boolean;
   recordingAccumulatedMs?: number;
+  getGlobalTime?: () => number;
   metronomeSoundType: "blip" | "bell" | "block" | "glass";
   setMetronomeSoundType: (val: "blip" | "bell" | "block" | "glass") => void;
 }
@@ -88,7 +95,7 @@ export function SettingsModal(props: SettingsModalProps) {
     isRecording: props.isRecording,
     isPaused: props.isPaused,
     accumulatedMs: props.recordingAccumulatedMs || 0,
-    startTime: props.recordingStartTime || Date.now()
+    startTime: props.recordingStartTime || 0
   });
 
   React.useEffect(() => {
@@ -96,9 +103,9 @@ export function SettingsModal(props: SettingsModalProps) {
       isRecording: props.isRecording,
       isPaused: props.isPaused,
       accumulatedMs: props.recordingAccumulatedMs || 0,
-      startTime: props.recordingStartTime || Date.now()
+      startTime: props.recordingStartTime || props.getGlobalTime?.() || Date.now()
     };
-  }, [props.isRecording, props.isPaused, props.recordingAccumulatedMs, props.recordingStartTime]);
+  }, [props.isRecording, props.isPaused, props.recordingAccumulatedMs, props.recordingStartTime, props.getGlobalTime]);
 
   React.useEffect(() => {
     const formatTime = (ms: number) => {
@@ -118,12 +125,12 @@ export function SettingsModal(props: SettingsModalProps) {
       if (state.isPaused) {
         setElapsedStr(formatTime(state.accumulatedMs));
       } else {
-        setElapsedStr(formatTime(state.accumulatedMs + (Date.now() - state.startTime)));
+        setElapsedStr(formatTime(state.accumulatedMs + ((props.getGlobalTime?.() ?? Date.now()) - state.startTime)));
       }
     }, 250);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [props.getGlobalTime]);
 
   if (!props.isSettingsModalOpen) return null;
 
@@ -324,12 +331,16 @@ export function SettingsModal(props: SettingsModalProps) {
                     <div className="flex flex-col">
                       <span className="text-[13px] text-on-surface font-bold">YouTube Telemetry Sync</span>
                       <span className="text-[11px] text-on-surface-variant">
-                        {alternateMD ? "Locked to Music Director" : "Lock stage clock to backing track"}
+                        {isMDActive
+                          ? "Use the backing track as your stage clock"
+                          : alternateMD
+                            ? "Only the Music Director's device loads the backing track"
+                            : "Only the Music Director can enable this"}
                       </span>
                     </div>
                   </div>
                   <button 
-                    disabled={!!alternateMD} // ✅ Lock if there's an active MD
+                    disabled={!isMDActive}
                     onClick={() => setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled)} 
                     className={`relative inline-flex h-7 w-12 items-center rounded-full p-0.5 transition-colors focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isYoutubeSyncEnabled ? 'bg-[#2563eb]' : 'bg-surface-container-highest'}`} 
                     type="button"
@@ -337,6 +348,34 @@ export function SettingsModal(props: SettingsModalProps) {
                     <span className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform duration-200 ease-in-out shadow-sm ${isYoutubeSyncEnabled ? 'translate-x-5' : 'translate-x-0 bg-outline'}`}></span>
                   </button>
                 </div>
+              )}
+
+              {setIsRecordModalOpen && (
+                <button
+                  type="button"
+                  onClick={() => { triggerClose(); setIsRecordModalOpen(true); }}
+                  className="w-full flex items-center justify-between px-1 pt-2 border-t border-outline-variant/10 text-left"
+                >
+                  <span className="flex items-center gap-3">
+                    <span className="material-symbols-outlined text-[20px] text-error">mic</span>
+                    <span className="flex flex-col">
+                      <span className="text-[13px] font-bold text-on-surface">Rehearsal Telemetry</span>
+                      <span className="text-[11px] text-on-surface-variant">
+                        {props.isRecording
+                          ? props.isPaused ? "Rehearsal paused" : "Rehearsal in progress"
+                          : "View rehearsal session log"}
+                      </span>
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-2">
+                    {props.isRecording && (
+                      <span className={`font-mono text-xs font-bold tabular-nums ${props.isPaused ? "text-amber-500" : "text-error"}`}>
+                        {elapsedStr}
+                      </span>
+                    )}
+                    <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
+                  </span>
+                </button>
               )}
 
             </div>
@@ -349,16 +388,6 @@ export function SettingsModal(props: SettingsModalProps) {
             <span className="text-[15px] font-extrabold text-on-surface tracking-tight">Setlist Actions</span>
             <div className="bg-surface-container border border-outline-variant/20 rounded-xl overflow-hidden shadow-sm divide-y divide-outline-variant/10">
               
-              {setIsRecordModalOpen && (
-                <button disabled={isPlayingFlow} onClick={() => { triggerClose(); setIsRecordModalOpen(true); }} className="w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer">
-                  <div className="flex items-center gap-3">
-                    <span className="material-symbols-outlined text-[20px] text-error">mic</span>
-                    <span className="text-[13px] font-bold text-on-surface">Rehearsal Telemetry</span>
-                  </div>
-                  <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
-                </button>
-              )}
-
               {canEditSong && activeSong && (
                 <button type="button" disabled={isPlayingFlow} onClick={() => { triggerClose(); router.push(`/songs/${activeSong.id}/edit`); }} className="w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer">
                   <div className="flex items-center gap-3">
@@ -375,7 +404,7 @@ export function SettingsModal(props: SettingsModalProps) {
                 </div>
                 <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
               </button>
-              <button disabled={isPlayingFlow} onClick={() => { triggerClose(); setIsStructureModalOpen(true); }} className="w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer">
+              <button id="open-structure-editor" disabled={isPlayingFlow} onClick={() => { triggerClose(); setIsStructureModalOpen(true); }} className="w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer">
                 <div className="flex items-center gap-3">
                   <span className="material-symbols-outlined text-[20px] text-primary">view_stream</span>
                   <span className="text-[13px] font-bold text-on-surface">Edit Structure</span>

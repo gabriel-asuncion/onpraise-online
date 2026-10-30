@@ -31,6 +31,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
         <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet" />
+
+        <Script
+          id="pwa-install-prompt-capture"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.addEventListener('beforeinstallprompt', function(event) {
+                event.preventDefault();
+                window.__onPraiseDeferredInstallPrompt = event;
+              });
+            `
+          }}
+        />
         
         {/* ✅ SURGICAL FIX: "Desktop Mode" Viewport Buster */}
         {/* This runs synchronously before CSS paints to prevent the tiny desktop layout flash */}
@@ -70,8 +83,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           dangerouslySetInnerHTML={{
             __html: `
               if ('serviceWorker' in navigator) {
-                window.addEventListener('load', function() {
-                  navigator.serviceWorker.register('/sw.js');
+                navigator.serviceWorker.register('/sw.js').catch(function(error) {
+                  console.error('PWA service worker registration failed:', error);
                 });
               }
             `

@@ -16,6 +16,7 @@ export interface HardwareClockConfig {
   mdSectionStartTimeRef: React.MutableRefObject<number | null>;
   audioLatencyOffsetMs: number;
   isYtBackingTrackStartRef: React.MutableRefObject<boolean>;
+  isYtBufferingRef?: React.MutableRefObject<boolean>;
   countdownValueRef: React.MutableRefObject<number | null>;
   setCountdownValue: (val: number | null) => void;
   backdropProgressRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -33,6 +34,7 @@ export interface HardwareClockConfig {
   pendingQuantizedJumpRef: React.MutableRefObject<any>;
   getGlobalTime: () => number;
   getYoutubeTime: () => number | null;
+  seekYoutubeTo?: (seconds: number) => void;
   executeJumpNow: (trackIdx: number, secIdx: number, time: number, isInitialStart?: boolean) => void;
   localPresenceUserRef: React.MutableRefObject<any>;
   sendSupabaseBroadcast: (payload: any) => void;
@@ -73,6 +75,8 @@ export function useHardwareClock(config: HardwareClockConfig) {
     else config.sectionStartTimeRef.current = performance.now();
     
     config.lastBeatRef.current = 0; 
+    let lastHeartbeatTime = 0;
+    let lastYoutubeResyncTime = 0;
 
     const clockExecutionTick = () => {
       const c = configRef.current; 
@@ -137,30 +141,40 @@ export function useHardwareClock(config: HardwareClockConfig) {
       
       if (!c.mdSectionStartTimeRef.current || isNaN(c.mdSectionStartTimeRef.current)) return;
 
+      const globalNow = c.getGlobalTime();
+      const sectionStartBeat = c.beatMapRef.current.sectionStartBeats[idx] || 0;
+      if (isCurrentlyMD && globalNow - lastHeartbeatTime >= 1000) {
+        lastHeartbeatTime = globalNow;
+        const elapsedBeats = Math.max(0, Math.floor(
+          (globalNow - c.mdSectionStartTimeRef.current) / beatSpeedMsCurrent
+        ));
+        c.sendSupabaseBroadcast({
+          action: "HEARTBEAT",
+          trackIndex: c.playingTrackIndexRef.current,
+          sectionIndex: idx,
+          mdSectionStartTime: c.mdSectionStartTimeRef.current,
+          mdAbsoluteBeat: sectionStartBeat + elapsedBeats,
+          mdGlobalBeatTime: c.mdSectionStartTimeRef.current + elapsedBeats * beatSpeedMsCurrent,
+          isYtSource: c.isYtBackingTrackStartRef.current,
+        });
+      }
+
       let elapsedMs = 0;
-      if (c.isYtBackingTrackStartRef.current) {
+      elapsedMs = globalNow - c.mdSectionStartTimeRef.current;
+
+      if (c.isYtBackingTrackStartRef.current && isCurrentlyMD && !c.isYtBufferingRef?.current) {
         const ytTimeSecs = c.getYoutubeTime();
-        if (ytTimeSecs === null) return; 
-
-        const targetAbsoluteBeat = c.beatMapRef.current.sectionStartBeats[idx] || 0;
-        const theoreticalSongStartOffsetSecs = targetAbsoluteBeat * (beatSpeedMsCurrent / 1000);
-        const ytOffsetSecs = (song.youtube_sync_offset_ms || 0) / 1000;
-        
-        const sectionElapsedSecs = ytTimeSecs - ytOffsetSecs - theoreticalSongStartOffsetSecs;
-        elapsedMs = sectionElapsedSecs * 1000;
-
-        const audioCtx = c.getAudioContext ? c.getAudioContext() : null;
-        if (c.audioContextStartTimeRef && c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
-          const theoreticalSongElapsed = audioCtx.currentTime - c.audioContextStartTimeRef.current;
-          const actualSongElapsed = ytTimeSecs - ytOffsetSecs;
-          const driftSecs = theoreticalSongElapsed - actualSongElapsed;
-
-          if (Math.abs(driftSecs) > 0.150) {
-            c.audioContextStartTimeRef.current = audioCtx.currentTime - actualSongElapsed;
+        if (ytTimeSecs !== null && c.seekYoutubeTo && globalNow - lastYoutubeResyncTime >= 2000) {
+          const expectedYoutubeTime = (
+            elapsedMs +
+            sectionStartBeat * beatSpeedMsCurrent +
+            (song.youtube_sync_offset_ms || 0)
+          ) / 1000;
+          if (Math.abs(ytTimeSecs - expectedYoutubeTime) > 0.75) {
+            c.seekYoutubeTo(Math.max(0, expectedYoutubeTime));
+            lastYoutubeResyncTime = globalNow;
           }
         }
-      } else {
-        elapsedMs = c.getGlobalTime() - c.mdSectionStartTimeRef.current;
       }
       
       if (elapsedMs < -500) {
@@ -243,22 +257,6 @@ export function useHardwareClock(config: HardwareClockConfig) {
           nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
         }
         
-        if (isCurrentlyMD && c.lastAudioBeatRef.current > 0 && c.lastAudioBeatRef.current % 16 === 0) {
-          if ((window as any)._lastHeartbeatBeat !== c.lastAudioBeatRef.current) {
-            (window as any)._lastHeartbeatBeat = c.lastAudioBeatRef.current;
-            
-            const sectionStartBeat = c.beatMapRef.current.sectionStartBeats[c.currentSectionIndexRef.current] || 0;
-            const localBeatCount = c.lastAudioBeatRef.current - sectionStartBeat;
-            const exactGlobalBeatTime = c.mdSectionStartTimeRef.current + (localBeatCount * beatSpeedSecs * 1000);
-            
-            c.sendSupabaseBroadcast({ 
-                action: "HEARTBEAT", 
-                mdAbsoluteBeat: c.lastAudioBeatRef.current, 
-                mdGlobalBeatTime: exactGlobalBeatTime,
-                mdSectionIndex: c.currentSectionIndexRef.current 
-            });
-          }
-        }
       }
 
       const localSectionElapsedBeats = visualElapsedMs / beatSpeedMsCurrent;

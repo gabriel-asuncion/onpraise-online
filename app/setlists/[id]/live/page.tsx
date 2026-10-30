@@ -23,7 +23,6 @@ import { useHardwareClock } from "./hooks/useHardwareClock";
 import { LiveHeader } from "./components/LiveHeader";
 import { SimplifiedStackView } from "./components/SimplifiedStackView";
 import { StandardSheetView } from "./components/StandardSheetView";
-import { ScrubberOverlay } from "./components/ScrubberOverlay";
 import { SettingsModal } from "./components/SettingsModal";
 import { StructureEditorModal } from "./components/StructureEditorModal";
 import { AddBlockModal } from "./components/AddBlockModal";
@@ -41,6 +40,39 @@ interface SongSegment {
   duration: number;
   color: string;
   sectionIndex: number; // Added to easily map back to the active sections array
+}
+
+interface PlaybackStatePayload {
+  action?: string;
+  targetConnectionId?: string;
+  trackIndex?: number;
+  sectionIndex?: number;
+  isPlaying?: boolean;
+  mdSectionStartTime?: number | null;
+  mdAbsoluteBeat?: number;
+  mdGlobalBeatTime?: number;
+  isYtSource?: boolean;
+}
+
+interface RehearsalHistoryItem {
+  timestamp: number;
+  title: string;
+  label: string;
+}
+
+interface PlaybackTelemetrySession {
+  setlistId: string;
+  sessionNumber: number;
+  startedAt: number;
+  ownsRecording: boolean;
+}
+
+interface TelemetryUpdate {
+  is_recording?: boolean;
+  is_paused?: boolean;
+  recording_start_time?: number | null;
+  recording_accumulated_ms?: number;
+  rehearsal_history?: RehearsalHistoryItem[];
 }
 
 function getSectionColor(label: string) {
@@ -70,6 +102,8 @@ export default function SetlistPerformanceRoomPage() {
 
   const { simulatedUserId, simulatedRole, activeRole, userTeamId } = useEngine(); // ✅ Added activeRole
   const { isSynced, getGlobalTime } = useTimesync();
+  const isSyncedRef = useRef(isSynced);
+  isSyncedRef.current = isSynced;
   
 
   // ✅ SURGICAL FIX: Calculates if the current user hierarchy can edit the song
@@ -96,7 +130,7 @@ export default function SetlistPerformanceRoomPage() {
   }, [isClickGuideHardPannedRight, setAudioPanRight]);
 
   const {
-    loading, loadingStatus, setlistName, setlistEventName, setlistTeamId, setlistTrackTitles, tracksList, setTracksList, tracksListRef,
+    loading, loadState, loadingStatus, retryLoad, setlistName, setlistEventName, setlistTeamId, setlistTrackTitles, tracksList, setTracksList, tracksListRef,
     currentTrackIndex, setCurrentTrackIndex, currentTrackIndexRef,
     activeSong, setActiveSong, activeSongRef,
     sections, setSections, sectionsRef,
@@ -146,6 +180,7 @@ export default function SetlistPerformanceRoomPage() {
   const [testVisualBeat, setTestVisualBeat] = useState<number>(1);
   const [countdownValue, setCountdownValue] = useState<number | null>(null);
   const countdownValueRef = useRef<number | null>(null);
+  const [playbackClockNotice, setPlaybackClockNotice] = useState<string | null>(null);
 
   // ✅ SURGICAL ADDITION: Pause state tracking
   const [isPaused, setIsPaused] = useState(false);
@@ -228,7 +263,7 @@ export default function SetlistPerformanceRoomPage() {
       senderName: localPresenceUserRef.current.name || "User",
       text,
       targetUserId,
-      timestamp: Date.now(),
+      timestamp: getGlobalTime(),
       seenBy: [] // ✅ Initialize empty read receipt array
     };
     setLobbyMessages(prev => [...prev, msg].slice(-100)); // Keep last 100
@@ -283,6 +318,10 @@ export default function SetlistPerformanceRoomPage() {
   const carouselRef = useRef<HTMLDivElement>(null);
   const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  useEffect(() => () => {
+    if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+  }, []);
+
   const handleNativeScroll = () => {
     if (!carouselRef.current) return;
     
@@ -321,6 +360,8 @@ export default function SetlistPerformanceRoomPage() {
       setAvailableSongSections([]);
       return;
     }
+    let isCurrentRequest = true;
+    setAvailableSongSections([]);
     const fetchAvailableSections = async () => {
       try {
         // ✅ SURGICAL FIX: Wrapped in try/catch to prevent aggressive Chrome Extensions
@@ -330,23 +371,24 @@ export default function SetlistPerformanceRoomPage() {
           .select("section_name")
           .eq("song_id", activeSong.id);
           
-        if (!error && data) {
-          // Extract names and remove any potential duplicates
-          const uniqueNames = Array.from(new Set(data.map(s => s.section_name)));
+        if (isCurrentRequest && !error && data) {
+          const uniqueNames = Array.from(new Set(data.map((section) => section.section_name)));
           setAvailableSongSections(uniqueNames);
         }
       } catch (err) {
-        console.warn("Supabase fetch intercepted or failed:", err);
+        if (isCurrentRequest) console.warn("Could not load available song sections:", err);
       }
     };
-    fetchAvailableSections();
+    void fetchAvailableSections();
+    return () => { isCurrentRequest = false; };
   }, [activeSong?.id]);
 
   const [isStructureModalOpen, setIsStructureModalOpen] = useState(false);
   const [draggedSectionIndex, setDraggedSectionIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [isSavingStructure, setIsSavingStructure] = useState(false);
-const [isTransposerOpen, setIsTransposerOpen] = useState(false);
+  const [structureSaveError, setStructureSaveError] = useState<string | null>(null);
+  const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   const [modalRoot, setModalRoot] = useState("G");
   const [modalAccidental, setModalAccidental] = useState<"" | "#" | "b">("");
 
@@ -354,9 +396,12 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   const [isRecordModalOpen, setIsRecordModalOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
-  const [rehearsalHistory, setRehearsalHistory] = useState<any[]>([]);
+  const [rehearsalHistory, setRehearsalHistory] = useState<RehearsalHistoryItem[]>([]);
+  const [telemetrySaveError, setTelemetrySaveError] = useState<string | null>(null);
   const isRecordingRef = useRef(false);
-  const rehearsalHistoryRef = useRef<any[]>([]);
+  const rehearsalHistoryRef = useRef<RehearsalHistoryItem[]>([]);
+  const playbackTelemetrySessionRef = useRef<PlaybackTelemetrySession | null>(null);
+  const stopPlaybackTelemetryRef = useRef<() => Promise<void>>(async () => {});
   const jumpReasonRef = useRef<"Auto Play" | "Quick Play" | "Queued">("Auto Play");
 
   const [isZenMode, setIsZenMode] = useState<boolean>(false);
@@ -387,11 +432,15 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   const isYtBackingTrackStartRef = useRef<boolean>(false);
   const activeLineIndexRef = useRef<number>(0);
   const isPlayingRef = useRef(false);
+  const playbackSyncRevisionRef = useRef(0);
   const currentSectionIndexRef = useRef(0);
   const sectionStartTimeRef = useRef<number>(0);
   const pauseOffsetMsRef = useRef<number>(0);
   const lastBeatRef = useRef<number>(1);
   const animationFrameRef = useRef<number | null>(null);
+  const pendingPlaybackStateRef = useRef<PlaybackStatePayload | null>(null);
+  const handleSyncCommandRef = useRef<(payload: PlaybackStatePayload) => void>(() => {});
+  const playbackStateRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // const sectionRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
   const audioContextStartTimeRef = useRef<number | null>(null);
   const astTreeRef = useRef<CompiledSectionToken[]>([]);
@@ -441,10 +490,10 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       const targetLine = activeContainer?.querySelector(`#${activeLineId}`) || document.getElementById(activeLineId);
       
       if (targetLine) {
-        if ((window as any)._autoScrollTimeout) clearTimeout((window as any)._autoScrollTimeout);
         isAutoScrollingRef.current = true;
         targetLine.scrollIntoView({ behavior: "smooth", block: "center" });
-        (window as any)._autoScrollTimeout = setTimeout(() => { isAutoScrollingRef.current = false; }, 550); 
+        const timeout = setTimeout(() => { isAutoScrollingRef.current = false; }, 550);
+        return () => clearTimeout(timeout);
       }
     }
   }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack, currentTrackIndex]);
@@ -484,17 +533,139 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
   useEffect(() => { rehearsalHistoryRef.current = rehearsalHistory; }, [rehearsalHistory]);
 
+  const telemetryWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  function formatTelemetryDuration(durationMs: number) {
+    const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+    const hours = Math.floor(totalSeconds / 3600).toString().padStart(2, "0");
+    const minutes = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, "0");
+    const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+    return hours === "00" ? `${minutes}:${seconds}` : `${hours}:${minutes}:${seconds}`;
+  }
+
+  async function persistTelemetryUpdate(update: TelemetryUpdate, targetSetlistId = setlistId) {
+    if (!targetSetlistId) {
+      setTelemetrySaveError("Telemetry could not be saved because the setlist is unavailable.");
+      return;
+    }
+
+    const write = telemetryWriteQueueRef.current.catch(() => undefined).then(async () => {
+      const { error } = await supabase.from("setlists").update(update).eq("id", targetSetlistId);
+      if (error) throw error;
+    });
+    telemetryWriteQueueRef.current = write;
+
+    try {
+      await write;
+      setTelemetrySaveError(null);
+    } catch (error) {
+      console.error("Failed to save rehearsal telemetry:", error);
+      setTelemetrySaveError("Telemetry could not be saved. Check your connection.");
+    }
+  }
+
+  function updateRehearsalHistory(history: RehearsalHistoryItem[]) {
+    const cappedHistory = history.slice(0, 100);
+    rehearsalHistoryRef.current = cappedHistory;
+    setRehearsalHistory(cappedHistory);
+    return cappedHistory;
+  }
+
+  async function startPlaybackTelemetry() {
+    if (!localPresenceUserRef.current?.isMD || playbackTelemetrySessionRef.current) return;
+
+    const startedAt = getGlobalTime();
+    const ownsRecording = !isRecordingRef.current;
+    const sessionNumber = rehearsalHistoryRef.current.reduce((largest, item) => {
+      const match = /^Session #(\d+)$/.exec(item.title);
+      return match ? Math.max(largest, Number(match[1])) : largest;
+    }, 0) + 1;
+    const sessionHistory = updateRehearsalHistory([
+      { timestamp: startedAt, title: `Session #${sessionNumber}`, label: "Playback started" },
+      ...rehearsalHistoryRef.current,
+    ]);
+
+    playbackTelemetrySessionRef.current = { setlistId, sessionNumber, startedAt, ownsRecording };
+    if (ownsRecording) {
+      isRecordingRef.current = true;
+      setIsRecording(true);
+      setIsPaused(false);
+      setRecordingAccumulatedMs(0);
+      setRecordingStartTime(startedAt);
+    }
+
+    await persistTelemetryUpdate({
+      rehearsal_history: sessionHistory,
+      ...(ownsRecording
+        ? {
+            is_recording: true,
+            is_paused: false,
+            recording_start_time: startedAt,
+            recording_accumulated_ms: 0,
+          }
+        : {}),
+    });
+  }
+
+  async function stopPlaybackTelemetry() {
+    const session = playbackTelemetrySessionRef.current;
+    if (!session) return;
+
+    playbackTelemetrySessionRef.current = null;
+    const stoppedAt = getGlobalTime();
+    const sessionHistory = updateRehearsalHistory([
+      {
+        timestamp: stoppedAt,
+        title: `Session #${session.sessionNumber}`,
+        label: `Playback stopped · ${formatTelemetryDuration(stoppedAt - session.startedAt)}`,
+      },
+      ...rehearsalHistoryRef.current,
+    ]);
+    const update: TelemetryUpdate = { rehearsal_history: sessionHistory };
+
+    if (session.ownsRecording) {
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      setIsPaused(false);
+      setRecordingStartTime(null);
+      setRecordingAccumulatedMs(0);
+      update.is_recording = false;
+      update.is_paused = false;
+      update.recording_start_time = null;
+      update.recording_accumulated_ms = 0;
+    }
+
+    await persistTelemetryUpdate(update, session.setlistId);
+  }
+
+  stopPlaybackTelemetryRef.current = stopPlaybackTelemetry;
+
   // ✅ SURGICAL ADDITION: Dedicated Postgres Listener for Telemetry
   useEffect(() => {
     if (!setlistId) return;
+    let isCurrent = true;
+    let realtimeRevision = 0;
+
+    setIsRecording(false);
+    isRecordingRef.current = false;
+    setIsPaused(false);
+    isPausedRef.current = false;
+    setRecordingAccumulatedMs(0);
+    setRecordingStartTime(null);
+    setRehearsalHistory([]);
+    rehearsalHistoryRef.current = [];
+    setTelemetrySaveError(null);
     
     const fetchTelemetry = async () => {
+       const requestRevision = realtimeRevision;
        const { data, error } = await supabase
         .from('setlists')
         .select('is_recording, is_paused, recording_accumulated_ms, recording_start_time, rehearsal_history')
         .eq('id', setlistId)
         .single();
        
+       if (!isCurrent) return;
+       if (requestRevision !== realtimeRevision) return;
        if (error) {
          console.error("🚨 Telemetry Fetch Error:", error.message);
          return;
@@ -502,26 +673,39 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
        if (data) {
           setIsRecording(data.is_recording || false);
+          isRecordingRef.current = data.is_recording || false;
           setIsPaused(data.is_paused || false);
+          isPausedRef.current = data.is_paused || false;
           // ✅ SURGICAL FIX: Force int8 to be a Number so the timer math doesn't glitch
           setRecordingAccumulatedMs(Number(data.recording_accumulated_ms) || 0);
           setRecordingStartTime(data.recording_start_time);
-          setRehearsalHistory(data.rehearsal_history || []);
+          const history = data.rehearsal_history || [];
+          setRehearsalHistory(history);
+          rehearsalHistoryRef.current = history;
        }
     }
-    fetchTelemetry();
-
     const telemetryChannel = supabase.channel(`telemetry_${setlistId}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'setlists', filter: `id=eq.${setlistId}` }, (payload) => {
+        realtimeRevision += 1;
         setIsRecording(payload.new.is_recording || false);
+        isRecordingRef.current = payload.new.is_recording || false;
         setIsPaused(payload.new.is_paused || false);
+        isPausedRef.current = payload.new.is_paused || false;
         // ✅ SURGICAL FIX: Force int8 to be a Number
         setRecordingAccumulatedMs(Number(payload.new.recording_accumulated_ms) || 0);
         setRecordingStartTime(payload.new.recording_start_time);
-        setRehearsalHistory(payload.new.rehearsal_history || []);
-      }).subscribe();
+        const history = payload.new.rehearsal_history || [];
+        setRehearsalHistory(history);
+        rehearsalHistoryRef.current = history;
+      }).subscribe((status) => {
+        if (status === "SUBSCRIBED") void fetchTelemetry();
+      });
 
-    return () => { supabase.removeChannel(telemetryChannel); }
+    return () => {
+      isCurrent = false;
+      if (playbackTelemetrySessionRef.current?.setlistId === setlistId) void stopPlaybackTelemetryRef.current();
+      void supabase.removeChannel(telemetryChannel);
+    };
   }, [setlistId]);
 
   const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4) => {
@@ -565,10 +749,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
   const beatMapRef = useRef<CompiledBeatMap>({ totalBeats: 0, nodes: [], sectionStartBeats: [] });
 
-  // ✅ SURGICAL ADDITION: Track YT setting for late-joiner sync
-  const isYoutubeSyncEnabledRef = useRef(isYoutubeSyncEnabled);
-  useEffect(() => { isYoutubeSyncEnabledRef.current = isYoutubeSyncEnabled; }, [isYoutubeSyncEnabled]);
-
   // ✅ Core Supabase Transmitter
   const sendSupabaseBroadcast = (payload: any) => {
     if (realtimeChannelRef.current) {
@@ -580,24 +760,157 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     }
   };
 
-  // ✅ SURGICAL ADDITION: Synchronized YouTube Toggle wrapper
+  // YouTube telemetry is a local setting for the current Music Director only.
   const handleSetYoutubeSync = (val: boolean) => {
+    if (!localPresenceUserRef.current?.isMD) return;
     setIsYoutubeSyncEnabled(val);
-    if (localPresenceUserRef.current?.isMD) {
-      sendSupabaseBroadcast({ action: "SYNC_YT_SETTING", value: val });
+  };
+
+  const clearPlaybackStateRetry = () => {
+    if (playbackStateRetryRef.current) {
+      clearInterval(playbackStateRetryRef.current);
+      playbackStateRetryRef.current = null;
     }
+  };
+
+  const applySharedPlaybackState = (payload: PlaybackStatePayload) => {
+    const trackIndex = payload.trackIndex;
+    const sectionIndex = payload.sectionIndex;
+    const startTime = payload.mdSectionStartTime;
+    if (
+      typeof trackIndex !== "number" ||
+      !Number.isInteger(trackIndex) ||
+      trackIndex < 0 ||
+      typeof sectionIndex !== "number" ||
+      !Number.isInteger(sectionIndex) ||
+      sectionIndex < 0 ||
+      typeof startTime !== "number" ||
+      !Number.isFinite(startTime) ||
+      !tracksListRef.current[trackIndex]
+    ) {
+      console.error("Ignoring invalid live playback state:", payload);
+      return;
+    }
+
+    clearPlaybackStateRetry();
+    const isTrackMismatch = playingTrackIndexRef.current !== trackIndex;
+    const isSectionMismatch = currentSectionIndexRef.current !== sectionIndex;
+    const isPlaybackMismatch = !isPlayingRef.current;
+    const isSourceMismatch = isYtBackingTrackStartRef.current !== (payload.isYtSource === true);
+
+    if (isTrackMismatch || isSectionMismatch || isPlaybackMismatch || isSourceMismatch) {
+      const revision = ++playbackSyncRevisionRef.current;
+      const mountedSections = mountTargetSetlistTrackIndex(trackIndex);
+      if (!mountedSections || sectionIndex >= mountedSections.length) {
+        console.error("Ignoring playback state with a section outside the target track:", payload);
+        return;
+      }
+
+      currentSectionIndexRef.current = sectionIndex;
+      setCurrentSectionIndex(sectionIndex);
+      playingTrackIndexRef.current = trackIndex;
+      setPlayingTrackIndex(trackIndex);
+      isYtBackingTrackStartRef.current = payload.isYtSource === true;
+      mdSectionStartTimeRef.current = startTime;
+      isPlayingRef.current = true;
+      setIsPlayingFlow(true);
+
+      const synchronizeAfterTrackMount = () => {
+        if (revision !== playbackSyncRevisionRef.current) return;
+        executeJumpNow(trackIndex, sectionIndex, startTime, true);
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
+        const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
+        const elapsedMs = Math.max(0, getGlobalTime() - startTime);
+        lastAudioBeatRef.current = sectionStartBeat + Math.floor(elapsedMs / beatDurationMs) + 1;
+      };
+
+      if (isTrackMismatch) {
+        requestAnimationFrame(() => requestAnimationFrame(synchronizeAfterTrackMount));
+      } else {
+        synchronizeAfterTrackMount();
+      }
+      return;
+    }
+
+    const localStartTime = mdSectionStartTimeRef.current;
+    if (localStartTime === null) return;
+    const correctionMs = startTime - localStartTime;
+    if (Math.abs(correctionMs) > 15) {
+      if (Math.abs(correctionMs) > 50) {
+        cancelFutureAudio?.();
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
+        const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
+        const elapsedMs = Math.max(0, getGlobalTime() - startTime);
+        lastAudioBeatRef.current = sectionStartBeat + Math.floor(elapsedMs / beatDurationMs) + 1;
+      }
+      mdSectionStartTimeRef.current = startTime;
+      if (audioContextStartTimeRef.current !== null) {
+        audioContextStartTimeRef.current += correctionMs / 1000;
+      }
+    }
+  };
+
+  const applyPlaybackState = (payload: PlaybackStatePayload) => {
+    if (payload.targetConnectionId !== localPresenceUserRef.current?.connectionId) return;
+    clearPlaybackStateRetry();
+    if (!isSyncedRef.current) {
+      pendingPlaybackStateRef.current = payload;
+      return;
+    }
+
+    if (payload.isPlaying) {
+      applySharedPlaybackState(payload);
+      return;
+    }
+
+    const trackIndex = payload.trackIndex;
+    const sectionIndex = payload.sectionIndex;
+    if (
+      typeof trackIndex !== "number" ||
+      typeof sectionIndex !== "number" ||
+      !tracksListRef.current[trackIndex]
+    ) return;
+    playbackSyncRevisionRef.current++;
+    executeLocalResetSequence();
+    mountTargetSetlistTrackIndex(trackIndex);
+    currentSectionIndexRef.current = sectionIndex;
+    setCurrentSectionIndex(sectionIndex);
+    playingTrackIndexRef.current = trackIndex;
+    setPlayingTrackIndex(trackIndex);
   };
 
   // ✅ Core Receiver
   const handleSyncCommand = (payload: any) => {
+    if (
+      !isSyncedRef.current &&
+      ["START", "JUMP", "HEARTBEAT", "PLAYBACK_STATE"].includes(payload.action)
+    ) {
+      if (
+        payload.action !== "PLAYBACK_STATE" ||
+        payload.targetConnectionId === localPresenceUserRef.current?.connectionId
+      ) {
+        pendingPlaybackStateRef.current = payload;
+      }
+      return;
+    }
+
     if (payload.action === "START") {
+      clearPlaybackStateRetry();
+      playbackSyncRevisionRef.current++;
       const targetTrackIdx = payload.trackIndex !== undefined ? payload.trackIndex : currentTrackIndexRef.current;
       isPlayingRef.current = true; setIsPlayingFlow(true);
       isYtBackingTrackStartRef.current = payload.isYtSource || false;
       executeJumpNow(targetTrackIdx, payload.sectionIndex, payload.mdSectionStartTime, true);
     }
-    else if (payload.action === "STOP") { executeLocalResetSequence(); } 
+    else if (payload.action === "STOP") {
+      clearPlaybackStateRetry();
+      pendingPlaybackStateRef.current = null;
+      playbackSyncRevisionRef.current++;
+      executeLocalResetSequence();
+    }
     else if (payload.action === "JUMP") {
+      clearPlaybackStateRetry();
+      playbackSyncRevisionRef.current++;
       const jumpTime = payload.mdSectionStartTime || getGlobalTime();
       const timeUntilJump = jumpTime - getGlobalTime();
       if (isPlayingRef.current && timeUntilJump > 50) {
@@ -608,24 +921,29 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         executeJumpNow(payload.trackIndex ?? currentTrackIndexRef.current, payload.sectionIndex, jumpTime);
       }
     }
-    else if (payload.action === "TRACK_CHANGE") { mountTargetSetlistTrackIndex(payload.trackIndex); }
+    else if (payload.action === "TRACK_CHANGE") { playbackSyncRevisionRef.current++; mountTargetSetlistTrackIndex(payload.trackIndex); }
     else if (payload.action === "QUEUE") { setQueuedTrackIndex(payload.trackIndex); setQueuedSectionIndex(payload.sectionIndex); }
     else if (payload.action === "HEARTBEAT" && !localPresenceUserRef.current?.isMD) {
-      if (mdSectionStartTimeRef.current !== null && isPlayingRef.current) {
-        const { mdAbsoluteBeat, mdGlobalBeatTime, mdSectionIndex } = payload;
-        if (mdSectionIndex === currentSectionIndexRef.current) {
-          const beatSpeedMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
-          const sectionStartAbsoluteBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
-          const localBeatCount = mdAbsoluteBeat - sectionStartAbsoluteBeat;
-          const mdImpliedStartMs = mdGlobalBeatTime - (localBeatCount * beatSpeedMs);
-          const driftMs = mdSectionStartTimeRef.current - mdImpliedStartMs;
-          if (Math.abs(driftMs) > 15) {
-            mdSectionStartTimeRef.current = mdImpliedStartMs;
-          }
-        }
+      applySharedPlaybackState(payload);
+    }
+    else if (payload.action === "PLAYBACK_STATE_REQUEST") {
+      if (localPresenceUserRef.current?.isMD && payload.requesterConnectionId) {
+        const isPlaying = isPlayingRef.current;
+        sendSupabaseBroadcast({
+          action: "PLAYBACK_STATE",
+          targetConnectionId: payload.requesterConnectionId,
+          isPlaying,
+          trackIndex: isPlaying ? playingTrackIndexRef.current : currentTrackIndexRef.current,
+          sectionIndex: currentSectionIndexRef.current,
+          mdSectionStartTime: mdSectionStartTimeRef.current,
+          isYtSource: isPlaying && isYtBackingTrackStartRef.current
+        });
       }
     }
-   else if (payload.action === "MD_TAKEOVER") {
+    else if (payload.action === "PLAYBACK_STATE") {
+      applyPlaybackState(payload);
+    }
+    else if (payload.action === "MD_TAKEOVER") {
       latestMdBroadcastRef.current = { mdId: payload.newMdId, timestamp: Date.now() };
       setOnlineUsers(prev => prev.map(u => ({ ...u, isMD: u.id === payload.newMdId })));
 
@@ -655,22 +973,12 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     else if (payload.action === "MD_REQUEST_REJECTED") {
       if (localPresenceUserRef.current?.id === payload.requesterId) alert("The current Music Director declined your request.");
     }
-    // ✅ SURGICAL ADDITION: Receive YouTube Setting Sync from MD
-    else if (payload.action === "SYNC_YT_SETTING") {
-      if (!localPresenceUserRef.current?.isMD) {
-        setIsYoutubeSyncEnabled(payload.value);
-      }
-    }
     // ✅ SURGICAL FIX: Decentralized Chat History Auto-Sync
     else if (payload.action === "CHAT_SYNC_REQUEST") {
       // Allow ANYONE in the room with history to answer. This prevents failure if MD drops or desyncs!
       if (lobbyMessagesRef.current.length > 0) {
         const globalHistory = lobbyMessagesRef.current.filter(m => !m.targetUserId);
         sendSupabaseBroadcast({ action: "CHAT_SYNC_RESPONSE", requesterId: payload.requesterId, history: globalHistory });
-      }
-      // ✅ SURGICAL ADDITION: MD automatically syncs their YouTube setting to the late-joiner!
-      if (localPresenceUserRef.current?.isMD) {
-        sendSupabaseBroadcast({ action: "SYNC_YT_SETTING", value: isYoutubeSyncEnabledRef.current });
       }
     }
     else if (payload.action === "CHAT_SYNC_RESPONSE") {
@@ -688,6 +996,16 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       }
     }
   };
+
+  handleSyncCommandRef.current = handleSyncCommand;
+  useEffect(() => {
+    if (!isSynced) return;
+    setPlaybackClockNotice(null);
+    const pendingState = pendingPlaybackStateRef.current;
+    if (!pendingState) return;
+    pendingPlaybackStateRef.current = null;
+    handleSyncCommandRef.current(pendingState);
+  }, [isSynced]);
 
   // ✅ SURGICAL ADDITION: MD Transfer Request Senders
   const handleRequestMusicDirector = () => {
@@ -715,6 +1033,11 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   };
 
   function executeStartSequence(useCountdown: boolean, forcedStartTimestamp?: number, isYtSource: boolean = false) {
+    if (!isSyncedRef.current) {
+      setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist.");
+      return;
+    }
+
     isYtBackingTrackStartRef.current = isYtSource; 
     playingTrackIndexRef.current = currentTrackIndexRef.current;
     setPlayingTrackIndex(currentTrackIndexRef.current);
@@ -729,6 +1052,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     const startTimestamp = forcedStartTimestamp ?? (getGlobalTime() + delayMs);
     mdSectionStartTimeRef.current = startTimestamp;
 
+    void startPlaybackTelemetry();
     executeJumpNow(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, true);
 
     sendSupabaseBroadcast({ 
@@ -750,13 +1074,13 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     currentSectionIndexRef,
     getGlobalTime, 
     youtubeVolumeRef, 
-    isYoutubeSyncEnabled
+    isYoutubeSyncEnabled: isYoutubeSyncEnabled && localPresenceUser?.isMD === true
   });
 
   useHardwareClock({
     isPlayingFlow, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
-    audioLatencyOffsetMs, isYtBackingTrackStartRef, countdownValueRef, setCountdownValue,
+    audioLatencyOffsetMs, isYtBackingTrackStartRef, isYtBufferingRef, countdownValueRef, setCountdownValue,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
     queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
@@ -779,12 +1103,48 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       }
       return null;
     },
+    seekYoutubeTo: (seconds) => {
+      if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
+        ytPlayerRef.current.seekTo(seconds, true);
+      }
+    },
     executeJumpNow, localPresenceUserRef, 
     sendSupabaseBroadcast, // (Note: In the solo page, this is `sendSupabaseBroadcast: () => {},`)
     updateMetronomeUI, activeLineIndexRef, setActiveLineIndex, 
-    handleAdvanceToNextSetlistTrack: () => { handleResetFlowTrigger(); }, // (Note: In page_2.tsx this is just `handleAdvanceToNextSetlistTrack,`)
+    handleAdvanceToNextSetlistTrack,
     sectionStartTimeRef, pauseOffsetMsRef, animationFrameRef, playingTrackIndexRef
   });
+
+  const [roomChannelGeneration, setRoomChannelGeneration] = useState(0);
+
+  useEffect(() => {
+    if (
+      loading ||
+      roomChannelGeneration === 0 ||
+      !isChannelSubscribedRef.current ||
+      !localPresenceUserRef.current ||
+      localPresenceUserRef.current.isMD
+    ) {
+      return;
+    }
+
+    const requestPlaybackState = () => {
+      if (!isChannelSubscribedRef.current || !localPresenceUserRef.current || localPresenceUserRef.current.isMD) return;
+      realtimeChannelRef.current?.send({
+        type: "broadcast",
+        event: "lobby_sync",
+        payload: {
+          action: "PLAYBACK_STATE_REQUEST",
+          requesterConnectionId: localPresenceUserRef.current.connectionId
+        }
+      });
+    };
+
+    clearPlaybackStateRetry();
+    requestPlaybackState();
+    playbackStateRetryRef.current = setInterval(requestPlaybackState, 2500);
+    return clearPlaybackStateRetry;
+  }, [loading, roomChannelGeneration, localPresenceUser?.connectionId, localPresenceUser?.isMD]);
 
   // ✅ SURGICAL FIX: Restored Flawless Supabase Implementation
   useEffect(() => {
@@ -860,16 +1220,6 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
             executeLocalResetSequence();
         }
 
-        // 4. Ensure late-joiners get the start command if I'm currently playing
-        if (isPlayingRef.current && localPresenceUserRef.current?.isMD && (!mdClaimant || mdClaimant.id === localPresenceUserRef.current.id)) {
-          sendSupabaseBroadcast({ 
-            action: "START", 
-            trackIndex: currentTrackIndexRef.current, 
-            sectionIndex: currentSectionIndexRef.current, 
-            mdSectionStartTime: mdSectionStartTimeRef.current || Date.now(), 
-            isYtSource: isYtBackingTrackStartRef.current 
-          });
-        }
       })
       .on("broadcast", { event: "lobby_sync" }, ({ payload }) => {
         handleSyncCommand(payload);
@@ -917,6 +1267,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       .subscribe((status) => {
         if (status === "SUBSCRIBED") { 
           isChannelSubscribedRef.current = true; 
+          setRoomChannelGeneration(generation => generation + 1);
           lobbyChannel.track(localPresenceUserRef.current); 
           // ✅ SURGICAL FIX: Request global chat history automatically when joining
           // Increased buffer to 1200ms to guarantee WebSockets are fully established and tracking
@@ -933,7 +1284,11 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       });
 
     realtimeChannelRef.current = lobbyChannel;
-    return () => { if (lobbyChannel) supabase.removeChannel(lobbyChannel); };
+    return () => {
+      playbackSyncRevisionRef.current++;
+      isChannelSubscribedRef.current = false;
+      if (lobbyChannel) supabase.removeChannel(lobbyChannel);
+    };
   }, [setlistId, localPresenceUser?.connectionId]);
 
   function executeJumpNow(targetTrackIdx: number, targetSectionIdx: number, jumpTime: number, isInitialStart: boolean = false) {
@@ -963,18 +1318,15 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         const ytOffsetSecs = (activeSongRef.current?.youtube_sync_offset_ms || 0) / 1000;
         const ytSeekTargetSecs = targetSectionIdx === 0 ? 0 : (ytOffsetSecs + theoreticalSongStartOffset);
 
-        if (isYtBackingTrackStartRef.current) {
-          audioContextStartTimeRef.current = absoluteHardwareTimeAtJump + ytOffsetSecs - ytSeekTargetSecs;
-        } else {
-          audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
-        }
+        audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
         console.log(`🕒 [Clock Sync] Ctx State: ${audioCtx?.state} | StartTimeRef: ${audioContextStartTimeRef.current}`);
         if (isYtBackingTrackStartRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
           try { 
             ytPlayerRef.current.seekTo(ytSeekTargetSecs, true); 
             ytPlayerRef.current.pauseVideo();
             
-            const timeUntilPlayMs = Math.max(0, jumpTime - getGlobalTime());
+            const videoStartTime = targetSectionIdx === 0 ? jumpTime - (activeSongRef.current?.youtube_sync_offset_ms || 0) : jumpTime;
+            const timeUntilPlayMs = Math.max(0, videoStartTime - getGlobalTime());
             setTimeout(() => {
               if (isPlayingRef.current) ytPlayerRef.current.playVideo();
             }, timeUntilPlayMs);
@@ -989,13 +1341,12 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       const section = playingSectionsRef.current[targetSectionIdx];
       if (track && section) {
           const newItem = {
-              timestamp: Date.now(),
+              timestamp: getGlobalTime(),
               title: track.songs?.title || "Unknown Song",
               label: `[${jumpReasonRef.current}] - ${section.section_name}`
           };
-          const newHistory = [newItem, ...rehearsalHistoryRef.current].slice(0, 100);
-          setRehearsalHistory(newHistory); 
-          supabase.from('setlists').update({ rehearsal_history: newHistory }).eq('id', setlistId).then();
+          const newHistory = updateRehearsalHistory([newItem, ...rehearsalHistoryRef.current]);
+          void persistTelemetryUpdate({ rehearsal_history: newHistory });
       }
     }
     jumpReasonRef.current = "Auto Play";
@@ -1030,6 +1381,50 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
     if (simplifiedProgressBarRef.current) simplifiedProgressBarRef.current.style.transform = "scaleX(0)";
   }
 
+  async function persistStructure(workingBlocks: ArrangementSection[]) {
+    const track = tracksListRef.current[currentTrackIndexRef.current];
+    if (!track?.id) {
+      setStructureSaveError("Could not save this structure because the setlist track is unavailable.");
+      return;
+    }
+
+    const trackId = track.id;
+    const originalStructure = track.custom_structure || [];
+    const trackIndex = currentTrackIndexRef.current;
+    const optimisticTracks = tracksListRef.current.map((item) =>
+      item.id === trackId ? { ...item, custom_structure: workingBlocks } : item
+    );
+    setIsSavingStructure(true);
+    setStructureSaveError(null);
+    setTracksList(optimisticTracks);
+    tracksListRef.current = optimisticTracks;
+    setSections(workingBlocks);
+    sectionsRef.current = workingBlocks;
+
+    try {
+      const { error } = await supabase
+        .from("setlist_songs")
+        .update({ custom_structure: workingBlocks })
+        .eq("id", trackId);
+      if (error) throw error;
+      if (currentTrackIndexRef.current === trackIndex) handleResetFlowTrigger();
+    } catch (error) {
+      console.error("Failed to save setlist structure:", error);
+      const restoredTracks = tracksListRef.current.map((item) =>
+        item.id === trackId ? { ...item, custom_structure: originalStructure } : item
+      );
+      setTracksList(restoredTracks);
+      tracksListRef.current = restoredTracks;
+      if (currentTrackIndexRef.current === trackIndex) {
+        setSections(originalStructure);
+        sectionsRef.current = originalStructure;
+      }
+      setStructureSaveError("Could not save the structure. The previous structure has been restored; please try again.");
+    } finally {
+      setIsSavingStructure(false);
+    }
+  }
+
   function handleUserSelectTrackBadge(trackIdx: number) {
     mountTargetSetlistTrackIndex(trackIdx);
     // CSS Native Snapping useEffect will automatically handle the smooth glide!
@@ -1040,25 +1435,31 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
   }
 
   function handleAdvanceToNextSetlistTrack() {
-    jumpReasonRef.current = "Auto Play"; // ✅ Tag for the tracker
-    const nextTrackIndex = playingTrackIndexRef.current + 1;
-    if (nextTrackIndex < tracksListRef.current.length) {
-      mountTargetSetlistTrackIndex(nextTrackIndex);
-      
-      setTimeout(() => { 
-        isPlayingRef.current = true; 
-        setIsPlayingFlow(true); 
-        
-        if (localPresenceUserRef.current?.isMD) {
-          const jumpTime = getGlobalTime();
-          mdSectionStartTimeRef.current = jumpTime;
-          executeJumpNow(nextTrackIndex, 0, jumpTime, true);
-          sendSupabaseBroadcast({ action: "START", trackIndex: nextTrackIndex, sectionIndex: 0, mdSectionStartTime: jumpTime, isYtSource: false });
-        }
-      }, 120);
-    } else {
-      handleResetFlowTrigger();
+    if (!localPresenceUserRef.current?.isMD) {
+      executeLocalResetSequence();
+      return;
     }
+
+    jumpReasonRef.current = "Auto Play";
+    const nextTrackIndex = playingTrackIndexRef.current + 1;
+    if (nextTrackIndex >= tracksListRef.current.length) {
+      handleResetFlowTrigger();
+      return;
+    }
+
+    isPlayingRef.current = false;
+    setIsPlayingFlow(false);
+    mountTargetSetlistTrackIndex(nextTrackIndex);
+
+    setTimeout(() => {
+      if (!localPresenceUserRef.current?.isMD) return;
+      const jumpTime = getGlobalTime();
+      mdSectionStartTimeRef.current = jumpTime;
+      isPlayingRef.current = true;
+      setIsPlayingFlow(true);
+      executeJumpNow(nextTrackIndex, 0, jumpTime, true);
+      sendSupabaseBroadcast({ action: "START", trackIndex: nextTrackIndex, sectionIndex: 0, mdSectionStartTime: jumpTime, isYtSource: false });
+    }, 120);
   }
 
   function handleToggleFlowPlaybackState() {
@@ -1072,23 +1473,28 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
 
       if (playClickTimeoutRef.current) {
         clearTimeout(playClickTimeoutRef.current); playClickTimeoutRef.current = null;
-        executeStartSequence(true, undefined, isYoutubeSyncEnabled && !!youtubeVideoId); 
+        executeStartSequence(true, undefined, localPresenceUser?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
       } else {
         playClickTimeoutRef.current = setTimeout(() => {
           playClickTimeoutRef.current = null;
-          executeStartSequence(true, undefined, isYoutubeSyncEnabled && !!youtubeVideoId);
+          executeStartSequence(true, undefined, localPresenceUser?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
         }, 250);
       }
     }
   }
 
   function handleResetFlowTrigger() {
+    void stopPlaybackTelemetry();
     executeLocalResetSequence();
     if (localPresenceUser?.isMD) sendSupabaseBroadcast({ action: "STOP" });
   }
 
   function handleSectionInteractiveSelection(index: number) {
     if (!localPresenceUser?.isMD && (onlineUsers.find(u => u.isMD && u.id !== localPresenceUser?.id) !== undefined)) return; 
+    if (!isPlayingFlow && !isSyncedRef.current) {
+      setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist.");
+      return;
+    }
     
     jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play"; 
 
@@ -1391,7 +1797,19 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
           setIsUserLobbyOpen={setIsUserLobbyOpen} 
           unreadMessageCount={totalUnreadCount} 
           setIsChaptersModalOpen={setIsChaptersModalOpen} // ✅ Add prop to trigger modal
+          isRecordingTelemetry={isRecording}
+          isTelemetryPaused={isPaused}
+          recordingStartTime={recordingStartTime}
+          recordingAccumulatedMs={recordingAccumulatedMs}
+          telemetrySaveError={telemetrySaveError}
+          getGlobalTime={getGlobalTime}
         />
+      )}
+
+      {playbackClockNotice && (
+        <div role="status" className="fixed top-20 left-1/2 z-[500000] -translate-x-1/2 rounded-xl bg-amber-100 px-4 py-2 text-center text-sm font-bold text-amber-900 shadow-lg">
+          {playbackClockNotice}
+        </div>
       )}
 
       {/* ========================================================================= */}
@@ -1499,8 +1917,8 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}
         localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume} audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
-        isYoutubeSyncEnabled={isYoutubeSyncEnabled} 
-        setIsYoutubeSyncEnabled={handleSetYoutubeSync} // ✅ Pass the syncing wrapper
+        isYoutubeSyncEnabled={localPresenceUser?.isMD === true && isYoutubeSyncEnabled}
+        setIsYoutubeSyncEnabled={handleSetYoutubeSync}
         youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}
         isClickGuideHardPannedRight={isClickGuideHardPannedRight}
         setIsClickGuideHardPannedRight={setIsClickGuideHardPannedRight}
@@ -1508,24 +1926,29 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         isRecording={isRecording} setIsRecordModalOpen={setIsRecordModalOpen} 
         recordingStartTime={recordingStartTime}
         isPaused={isPaused} recordingAccumulatedMs={recordingAccumulatedMs} 
+        getGlobalTime={getGlobalTime}
         isPlayingFlow={isPlayingFlow} router={router} handleOpenTransposerModal={() => setIsTransposerOpen(true)} setIsStructureModalOpen={setIsStructureModalOpen}
       />
 
       <StructureEditorModal 
         isStructureModalOpen={isStructureModalOpen} setIsStructureModalOpen={setIsStructureModalOpen} isSavingStructure={isSavingStructure} sections={sections}
+        originalStructure={tracksList[currentTrackIndex]?.original_structure || []}
+        onReset={() => { void persistStructure([...(tracksList[currentTrackIndex]?.original_structure || [])]); }}
         draggedSectionIndex={draggedSectionIndex} setDraggedSectionIndex={setDraggedSectionIndex} dragOverIndex={dragOverIndex} setDragOverIndex={setDragOverIndex}
         handleModalSectionDrop={(idx) => {
-          if (draggedSectionIndex === null || draggedSectionIndex === idx || !activeSong) return;
-          const workingBlocks = [...sections]; workingBlocks.splice(idx, 0, workingBlocks.splice(draggedSectionIndex, 1)[0]);
-          setSections(workingBlocks); setDragOverIndex(null); setDraggedSectionIndex(null);
-          setIsSavingStructure(true); supabase.from("setlist_songs").update({ custom_structure: workingBlocks as any }).eq("id", tracksList[currentTrackIndex]?.id).then(() => { setTracksList(prev => prev.map((t, i) => i === currentTrackIndex ? { ...t, custom_structure: workingBlocks } : t)); setIsSavingStructure(false); handleResetFlowTrigger(); });
+          if (isSavingStructure || draggedSectionIndex === null || draggedSectionIndex === idx || !activeSong) return;
+          const workingBlocks = [...sections];
+          workingBlocks.splice(idx, 0, workingBlocks.splice(draggedSectionIndex, 1)[0]);
+          setDragOverIndex(null);
+          setDraggedSectionIndex(null);
+          void persistStructure(workingBlocks);
         }}
         handleModalSectionRemoveItem={(idx) => {
-          if (!activeSong || sections.length <= 1) return;
-          const workingBlocks = sections.filter((_, i) => i !== idx); setSections(workingBlocks);
-          setIsSavingStructure(true); supabase.from("setlist_songs").update({ custom_structure: workingBlocks as any }).eq("id", tracksList[currentTrackIndex]?.id).then(() => { setTracksList(prev => prev.map((t, i) => i === currentTrackIndex ? { ...t, custom_structure: workingBlocks } : t)); setIsSavingStructure(false); handleResetFlowTrigger(); });
+          if (isSavingStructure || !activeSong || sections.length <= 1) return;
+          void persistStructure(sections.filter((_, i) => i !== idx));
         }}
         setIsAddBlockModalOpen={setIsAddBlockModalOpen}
+        saveError={structureSaveError}
       />
 
       <AddBlockModal 
@@ -1533,11 +1956,23 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
         setIsAddBlockModalOpen={setIsAddBlockModalOpen} 
         availableSectionNames={availableSongSections}
         handleModalAppendNewSectionItem={async (name) => {
-          if (!activeSong) return;
-          let sectionContent = sections.find(s => s.section_name === name)?.content;
-          if (!sectionContent || sectionContent.trim() === "") { const { data } = await supabase.from("song_sections").select("content").eq("song_id", activeSong.id).eq("section_name", name).maybeSingle(); if (data?.content) sectionContent = data.content; }
+          if (!activeSong || isSavingStructure) return;
+          let sectionContent = sections.find((section) => section.section_name === name)?.content;
+          if (!sectionContent?.trim()) {
+            const { data, error } = await supabase
+              .from("song_sections")
+              .select("content")
+              .eq("song_id", activeSong.id)
+              .eq("section_name", name)
+              .maybeSingle();
+            if (error) {
+              setStructureSaveError("Could not load the selected section. Please try again.");
+              return;
+            }
+            sectionContent = data?.content || undefined;
+          }
           const workingBlocks = [...sections, { id: `local-${Date.now()}`, section_name: name, content: sectionContent || " " }];
-          setSections(workingBlocks); setIsSavingStructure(true); supabase.from("setlist_songs").update({ custom_structure: workingBlocks as any }).eq("id", tracksList[currentTrackIndex]?.id).then(() => { setTracksList(prev => prev.map((t, i) => i === currentTrackIndex ? { ...t, custom_structure: workingBlocks } : t)); setIsSavingStructure(false); handleResetFlowTrigger(); });
+          await persistStructure(workingBlocks);
         }}
       />
 
@@ -1581,30 +2016,64 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
       <RecordRehearsalModal 
         isRecordModalOpen={isRecordModalOpen} setIsRecordModalOpen={setIsRecordModalOpen} isMD={localPresenceUser?.isMD} isRecording={isRecording}
         isPaused={isPaused} recordingStartTime={recordingStartTime} recordingAccumulatedMs={recordingAccumulatedMs} history={rehearsalHistory}
+        saveError={telemetrySaveError}
+        getGlobalTime={getGlobalTime}
         onStartRecording={async () => {
           if (!localPresenceUser?.isMD) return;
-          const now = Date.now(); setIsRecording(true); setIsPaused(false); setRecordingStartTime(now);
+          const now = getGlobalTime(); setIsRecording(true); setIsPaused(false); setRecordingStartTime(now);
+          isRecordingRef.current = true;
+          isPausedRef.current = false;
           const isFreshStart = !isPaused && recordingAccumulatedMs === 0;
-          let updatedHistory = rehearsalHistoryRef.current;
-          if (isFreshStart) { updatedHistory = [{ timestamp: now, title: "🎙️ New Recording Session", label: "Session Initiated" }, ...rehearsalHistoryRef.current].slice(0, 100);
-          } else { updatedHistory = [{ timestamp: now, title: "▶️ Session Resumed", label: "Timer continued" }, ...rehearsalHistoryRef.current].slice(0, 100); }
-          setRehearsalHistory(updatedHistory);
-          await supabase.from('setlists').update({ is_recording: true, is_paused: false, recording_start_time: now, rehearsal_history: updatedHistory, ...(isFreshStart ? { recording_accumulated_ms: 0 } : {}) }).eq('id', setlistId).then();
+          const updatedHistory = updateRehearsalHistory([
+            {
+              timestamp: now,
+              title: isFreshStart ? "🎙️ New Recording Session" : "▶️ Session Resumed",
+              label: isFreshStart ? "Session Initiated" : "Timer continued",
+            },
+            ...rehearsalHistoryRef.current,
+          ]);
+          await persistTelemetryUpdate({
+            is_recording: true,
+            is_paused: false,
+            recording_start_time: now,
+            rehearsal_history: updatedHistory,
+            ...(isFreshStart ? { recording_accumulated_ms: 0 } : {}),
+          });
         }}
         onPauseRecording={async () => {
           if (!localPresenceUser?.isMD || !recordingStartTime) return;
-          const now = Date.now(); const newAccumulated = recordingAccumulatedMs + (now - recordingStartTime);
+          const now = getGlobalTime(); const newAccumulated = recordingAccumulatedMs + (now - recordingStartTime);
           setIsPaused(true); setRecordingAccumulatedMs(newAccumulated);
-          const updatedHistory = [{ timestamp: now, title: "⏸️ Session Paused", label: "Timer halted" }, ...rehearsalHistoryRef.current].slice(0, 100);
-          setRehearsalHistory(updatedHistory);
-          await supabase.from('setlists').update({ is_paused: true, recording_accumulated_ms: newAccumulated, rehearsal_history: updatedHistory }).eq('id', setlistId).then();
+          isPausedRef.current = true;
+          const updatedHistory = updateRehearsalHistory([
+            { timestamp: now, title: "⏸️ Session Paused", label: "Timer halted" },
+            ...rehearsalHistoryRef.current,
+          ]);
+          await persistTelemetryUpdate({
+            is_paused: true,
+            recording_accumulated_ms: newAccumulated,
+            rehearsal_history: updatedHistory,
+          });
         }}
         onStopRecording={async () => {
           if (!localPresenceUser?.isMD) return;
-          const now = Date.now(); setIsRecording(false); setIsPaused(false); setRecordingAccumulatedMs(0);
-          const updatedHistory = [{ timestamp: now, title: "⏹️ Session Ended", label: "Recording finalized" }, ...rehearsalHistoryRef.current].slice(0, 100);
-          setRehearsalHistory(updatedHistory);
-          await supabase.from('setlists').update({ is_recording: false, is_paused: false, recording_start_time: null, recording_accumulated_ms: 0, rehearsal_history: updatedHistory }).eq('id', setlistId).then();
+          const now = getGlobalTime(); setIsRecording(false); setIsPaused(false); setRecordingStartTime(null); setRecordingAccumulatedMs(0);
+          isRecordingRef.current = false;
+          isPausedRef.current = false;
+          if (playbackTelemetrySessionRef.current) {
+            playbackTelemetrySessionRef.current.ownsRecording = false;
+          }
+          const updatedHistory = updateRehearsalHistory([
+            { timestamp: now, title: "⏹️ Session Ended", label: "Recording finalized" },
+            ...rehearsalHistoryRef.current,
+          ]);
+          await persistTelemetryUpdate({
+            is_recording: false,
+            is_paused: false,
+            recording_start_time: null,
+            recording_accumulated_ms: 0,
+            rehearsal_history: updatedHistory,
+          });
         }}
       />
 
@@ -1735,7 +2204,7 @@ const [isTransposerOpen, setIsTransposerOpen] = useState(false);
                                   // ✅ SURGICAL FIX: "Play Now" while stopped actually STARTS the playback from this chapter!
                                   currentSectionIndexRef.current = seg.sectionIndex;
                                   setCurrentSectionIndex(seg.sectionIndex);
-                                  executeStartSequence(false, undefined, isYoutubeSyncEnabled && !!youtubeVideoId);
+                                  executeStartSequence(false, undefined, localPresenceUser?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
                                 } else {
                                   let jumpTime = getGlobalTime() + 150;
                                   if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {

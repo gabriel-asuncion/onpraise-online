@@ -15,27 +15,32 @@ interface RecordRehearsalModalProps {
   recordingStartTime: number | null;
   recordingAccumulatedMs: number;
   history: HistoryItem[];
+  saveError?: string | null;
+  getGlobalTime?: () => number;
   onStartRecording: () => void;
   onPauseRecording: () => void;
   onStopRecording: () => void;
 }
 
 export function RecordRehearsalModal({
-  isRecordModalOpen, setIsRecordModalOpen, isMD, isRecording, isPaused, recordingStartTime, recordingAccumulatedMs, history, onStartRecording, onPauseRecording, onStopRecording
+  isRecordModalOpen, setIsRecordModalOpen, isMD, isRecording, isPaused, recordingStartTime, recordingAccumulatedMs, history, saveError, getGlobalTime, onStartRecording, onPauseRecording, onStopRecording
 }: RecordRehearsalModalProps) {
 
 const [elapsedStr, setElapsedStr] = useState("00:00:00");
 
   // ✅ SURGICAL FIX: The Indestructible Ref-Timer
   const timerStateRef = React.useRef({
-    isRecording, isPaused, accumulatedMs: recordingAccumulatedMs, startTime: recordingStartTime || Date.now()
+    isRecording, isPaused, accumulatedMs: recordingAccumulatedMs, startTime: recordingStartTime || 0
   });
 
   useEffect(() => {
     timerStateRef.current = {
-      isRecording, isPaused, accumulatedMs: recordingAccumulatedMs, startTime: recordingStartTime || Date.now()
+      isRecording,
+      isPaused,
+      accumulatedMs: recordingAccumulatedMs,
+      startTime: recordingStartTime || getGlobalTime?.() || Date.now()
     };
-  }, [isRecording, isPaused, recordingAccumulatedMs, recordingStartTime]);
+  }, [isRecording, isPaused, recordingAccumulatedMs, recordingStartTime, getGlobalTime]);
 
   useEffect(() => {
     const formatTime = (ms: number) => {
@@ -57,12 +62,12 @@ const [elapsedStr, setElapsedStr] = useState("00:00:00");
       if (state.isPaused) {
         setElapsedStr(formatTime(state.accumulatedMs));
       } else {
-        setElapsedStr(formatTime(state.accumulatedMs + (Date.now() - state.startTime)));
+        setElapsedStr(formatTime(state.accumulatedMs + ((getGlobalTime?.() ?? Date.now()) - state.startTime)));
       }
     }, 250);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [getGlobalTime]);
 
   if (!isRecordModalOpen) return null;
 
@@ -79,6 +84,8 @@ const [elapsedStr, setElapsedStr] = useState("00:00:00");
           </h3>
           <button type="button" onClick={() => setIsRecordModalOpen(false)} className="w-8 h-8 rounded-full bg-zinc-100 text-zinc-500 text-sm font-bold flex items-center justify-center hover:bg-zinc-200 transition-colors">✕</button>
         </div>
+
+        {saveError && <p role="alert" className="mx-4 mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{saveError}</p>}
 
         <div className="p-5 flex flex-col items-center justify-center border-b border-zinc-100 bg-zinc-50 shrink-0">
           <span className={`font-mono text-5xl font-black tracking-tighter tabular-nums mb-4 transition-colors ${isRecording && !isPaused ? 'text-red-600 drop-shadow-sm' : isPaused ? 'text-amber-600' : 'text-zinc-300'}`}>

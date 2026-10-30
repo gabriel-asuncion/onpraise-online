@@ -1,10 +1,59 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useSyncExternalStore } from 'react';
 import { createClient } from '../utils/supabase/client';
 import { useRouter, useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
+import type { Session } from '@supabase/supabase-js';
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+}
+
+declare global {
+  interface Window {
+    __onPraiseDeferredInstallPrompt?: BeforeInstallPromptEvent;
+  }
+}
+
+const BROWSER_IOS = 1;
+const BROWSER_MOBILE = 2;
+const BROWSER_IN_APP = 4;
+const BROWSER_STANDALONE = 8;
+
+function subscribeToBrowserFlags(onChange: () => void) {
+  if (typeof window === 'undefined') return () => {};
+
+  const displayMode = window.matchMedia('(display-mode: standalone)');
+  displayMode.addEventListener('change', onChange);
+  return () => displayMode.removeEventListener('change', onChange);
+}
+
+function getBrowserFlags() {
+  if (typeof window === 'undefined') return 0;
+
+  const userAgent = window.navigator.userAgent;
+  const normalizedUserAgent = userAgent.toLowerCase();
+  const isAppleDevice = /iphone|ipad|ipod/.test(normalizedUserAgent) ||
+    (window.navigator.platform === 'MacIntel' && window.navigator.maxTouchPoints > 1);
+  const isAndroidDevice = /android/.test(normalizedUserAgent);
+  const isMobile = isAppleDevice || isAndroidDevice || /mobile/.test(normalizedUserAgent);
+  const isInAppBrowser = /FBAN|FBAV|FB_IAB|Messenger|Instagram|Line\/|Twitter|TikTok/i.test(userAgent);
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches ||
+    ('standalone' in window.navigator && Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone));
+
+  return (isAppleDevice ? BROWSER_IOS : 0) |
+    (isMobile ? BROWSER_MOBILE : 0) |
+    (isInAppBrowser ? BROWSER_IN_APP : 0) |
+    (isStandalone ? BROWSER_STANDALONE : 0);
+}
+
+function clearStoredInstallPrompt() {
+  if (typeof window !== 'undefined') {
+    window.__onPraiseDeferredInstallPrompt = undefined;
+  }
+}
 
 // ✅ SURGICAL FIX: Force the Lottie Player to only load on the client side (browser)
 const Player = dynamic(
@@ -38,6 +87,12 @@ const Blob = ({
 export default function Home() {
   const supabase = createClient();
   const router = useRouter();
+  const browserFlags = useSyncExternalStore(subscribeToBrowserFlags, getBrowserFlags, () => 0);
+  const isStandalone = Boolean(browserFlags & BROWSER_STANDALONE);
+  const isInBrowserTab = !isStandalone;
+  const isIOS = Boolean(browserFlags & BROWSER_IOS);
+  const isMobileDevice = Boolean(browserFlags & BROWSER_MOBILE);
+  const isInAppBrowser = Boolean(browserFlags & BROWSER_IN_APP);
   
   const searchParams = useSearchParams();
   const inviteCode = searchParams.get("invite");
@@ -46,48 +101,33 @@ export default function Home() {
   const [isTransitioning, setIsTransitioning] = useState(true);
 
   // PWA Install Engine States
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstallable, setIsInstallable] = useState(false);
   const [hasInstalledApp, setHasInstalledApp] = useState(false);
-  const [isInBrowserTab, setIsInBrowserTab] = useState(true);
   const [showInstallSuccessModal, setShowInstallSuccessModal] = useState(false);
   
   // ✅ SURGICAL ADDITION: iOS Custom Prompt States
-  const [isIOS, setIsIOS] = useState(false);
   const [showIOSTutorial, setShowIOSTutorial] = useState(false);
   const [showInstallHelp, setShowInstallHelp] = useState(false);
-  const [isMobileDevice, setIsMobileDevice] = useState(false);
-  const [isInAppBrowser, setIsInAppBrowser] = useState(false);
+  const [installHelpMode, setInstallHelpMode] = useState<'install' | 'open'>('install');
 
   // ✅ SURGICAL ADDITION: Device Detection & PWA Event Listeners
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    // 1. Detect if we are already running inside the installed PWA
-    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone === true;
-    setIsInBrowserTab(!isStandalone);
-    if (isStandalone) setHasInstalledApp(true);
-
-    // Detect mobile platforms, including iPads reporting desktop Safari.
-    const userAgent = window.navigator.userAgent;
-    const normalizedUserAgent = userAgent.toLowerCase();
-    const isAppleDevice = /iphone|ipad|ipod/.test(normalizedUserAgent) ||
-      (window.navigator.platform === 'MacIntel' && window.navigator.maxTouchPoints > 1);
-    const isAndroidDevice = /android/.test(normalizedUserAgent);
-    const isMobile = isAppleDevice || isAndroidDevice || /mobile/.test(normalizedUserAgent);
-    setIsMobileDevice(isMobile);
-    setIsIOS(isAppleDevice);
-    setIsInAppBrowser(/FBAN|FBAV|FB_IAB|Messenger|Instagram|Line\/|Twitter|TikTok/i.test(userAgent));
-
     // 4. Listen for Android/Chrome Install Prompt
     const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault(); // Stop Chrome from showing the mini-infobar automatically
-      setDeferredPrompt(e);
+      const promptEvent = e as BeforeInstallPromptEvent;
+      promptEvent.preventDefault();
+      window.__onPraiseDeferredInstallPrompt = promptEvent;
+      setDeferredPrompt(promptEvent);
       setIsInstallable(true);
     };
 
     // 5. Listen for Successful Installation
     const handleAppInstalled = () => {
+      window.__onPraiseDeferredInstallPrompt = undefined;
+      setDeferredPrompt(null);
       setIsInstallable(false);
       setHasInstalledApp(true);
       setShowInstallSuccessModal(true);
@@ -97,6 +137,10 @@ export default function Home() {
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     window.addEventListener('appinstalled', handleAppInstalled);
+
+    if (window.__onPraiseDeferredInstallPrompt) {
+      handleBeforeInstallPrompt(window.__onPraiseDeferredInstallPrompt);
+    }
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
@@ -114,7 +158,7 @@ export default function Home() {
     }
 
     // ✅ HELPER: Checks profile completion before letting them into the app
-    const checkAndRouteUser = async (session: any) => {
+    const checkAndRouteUser = async (session: Session) => {
       // ✅ SURGICAL FIX: Pull from localStorage in case the OAuth callback stripped the URL params!
       const activeInvite = currentInvite || localStorage.getItem("onpraise_pending_invite");
 
@@ -161,30 +205,74 @@ export default function Home() {
   }, [supabase, router, inviteCode]);
 
   const handleInstallClick = async () => {
-    // iOS Safari requires the user to add the app from its Share menu.
-    if (isIOS && !isInAppBrowser) {
-      setShowIOSTutorial(true);
-      return;
-    }
-
     // Use the native install dialog only when the browser actually provided it.
     if (deferredPrompt) {
       try {
-        await deferredPrompt.prompt();
-        const { outcome } = await deferredPrompt.userChoice;
-        if (outcome === 'accepted') setIsInstallable(false);
+        const promptEvent = deferredPrompt;
+        clearStoredInstallPrompt();
         setDeferredPrompt(null);
+        setIsInstallable(false);
+        await promptEvent.prompt();
+        await promptEvent.userChoice;
       } catch (error) {
         console.error('PWA install prompt failed:', error);
+        clearStoredInstallPrompt();
         setDeferredPrompt(null);
+        setIsInstallable(false);
+        setInstallHelpMode('install');
         setShowInstallHelp(true);
       }
       return;
     }
 
-    // In-app browsers commonly do not expose beforeinstallprompt. Explain the
-    // supported manual steps instead of leaving the install button inert.
-    setShowInstallHelp(true);
+    if (isInAppBrowser) {
+      setInstallHelpMode('install');
+      setShowInstallHelp(true);
+      return;
+    }
+
+    attemptAppLaunch('install');
+  };
+
+  const attemptAppLaunch = (fallbackMode: 'install' | 'open') => {
+    let leftPage = false;
+    const launchUrl = 'web+onpraise://open';
+    setShowInstallSuccessModal(false);
+    const handleVisibilityChange = () => {
+      leftPage ||= document.visibilityState === 'hidden';
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    try {
+      window.location.href = launchUrl;
+    } catch (error) {
+      console.error('PWA app launch failed:', error);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (fallbackMode === 'install' && isIOS) {
+        setShowIOSTutorial(true);
+      } else {
+        setInstallHelpMode(fallbackMode);
+        setShowInstallHelp(true);
+      }
+      return;
+    }
+
+    window.setTimeout(() => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (!leftPage && document.visibilityState === 'visible') {
+        if (fallbackMode === 'install' && isIOS) {
+          setShowIOSTutorial(true);
+        } else {
+          setInstallHelpMode(fallbackMode);
+          setShowInstallHelp(true);
+        }
+      }
+    }, 1500);
+  };
+
+  const handleOpenApp = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    attemptAppLaunch('open');
   };
 
   const handleGoogleLogin = async () => {
@@ -475,6 +563,7 @@ export default function Home() {
         {hasInstalledApp && isInBrowserTab && (
           <a
             href="web+onpraise://open"
+            onClick={handleOpenApp}
             className="w-full max-w-sm mb-3 bg-[#009DFE] hover:bg-[#1954D5] text-white font-black text-sm uppercase tracking-wider py-4 px-4 rounded-2xl shadow-xl transition-all active:scale-95 flex items-center justify-center gap-3 cursor-pointer text-center decoration-transparent"
           >
             <span className="text-lg">🚀</span> Open OnPraise App
@@ -520,10 +609,7 @@ export default function Home() {
             <div className="w-full space-y-3 relative z-10">
               <a
                 href="web+onpraise://open"
-                onClick={() => {
-                  // Wait a second, then close the modal so they aren't trapped if the protocol fails
-                  setTimeout(() => setShowInstallSuccessModal(false), 1000);
-                }}
+                onClick={handleOpenApp}
                 className="w-full bg-[#009DFE] hover:bg-[#1954D5] text-white font-black text-sm uppercase tracking-wider py-4 px-4 rounded-xl shadow-md transition-all active:scale-95 flex items-center justify-center gap-2 cursor-pointer decoration-transparent block"
               >
                 Launch OnPraise App
@@ -563,25 +649,21 @@ export default function Home() {
               Install OnPraise
             </h3>
             <p className="text-[13px] font-bold text-zinc-500 leading-relaxed mb-6">
-              Safari requires you to install apps manually. Follow these two quick steps to get the app on your home screen.
+              iOS does not allow websites to show an automatic install popup. Use your browser&apos;s Share menu to add OnPraise to your Home Screen.
+            </p>
+            <p className="mb-5 text-xs font-semibold text-zinc-500">
+              Already installed? Launch OnPraise from your Home Screen.
             </p>
 
             <div className="flex flex-col gap-3 w-full bg-zinc-50 p-4 rounded-2xl border border-zinc-100 text-left mb-6">
               <div className="flex items-center gap-3">
                 <span className="w-6 h-6 rounded-full bg-blue-500 text-white font-black text-[10px] flex items-center justify-center shrink-0">1</span>
-                <span className="text-[12px] font-bold text-zinc-700">Tap the <strong>Share</strong> button below.</span>
+                <span className="text-[12px] font-bold text-zinc-700">Tap the <strong>Share</strong> button in your browser toolbar.</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="w-6 h-6 rounded-full bg-blue-500 text-white font-black text-[10px] flex items-center justify-center shrink-0">2</span>
                 <span className="text-[12px] font-bold text-zinc-700">Scroll down and tap <strong>Add to Home Screen</strong>.</span>
               </div>
-            </div>
-
-            {/* Bouncing Arrow Pointing Down to the Safari Share Button */}
-            <div className="animate-bounce text-blue-500 mt-2 mb-2">
-              <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-              </svg>
             </div>
 
           </div>
@@ -601,14 +683,20 @@ export default function Home() {
             </button>
             <div className="clear-both pt-2">
               <h3 id="install-help-title" className="mb-2 text-xl font-black tracking-tight text-zinc-900">
-                {isInAppBrowser ? 'Open OnPraise in your browser' : 'Install OnPraise'}
+                {installHelpMode === 'open'
+                  ? 'Open OnPraise from your Home Screen'
+                  : isInAppBrowser
+                    ? 'Open OnPraise in your browser'
+                    : 'Install OnPraise'}
               </h3>
               <p className="mb-5 text-[13px] font-semibold leading-relaxed text-zinc-600">
-                {isInAppBrowser
-                  ? 'Messenger and some other in-app browsers do not support app installation. Use the app menu to open this page in Safari or Chrome, then install it there.'
-                  : 'This browser has not provided an automatic install prompt. Open its menu and choose “Install app” or “Add to Home Screen.”'}
+                {installHelpMode === 'open'
+                  ? 'This browser could not switch to the installed app. Close this tab and launch OnPraise from your Home Screen. Browsers do not always allow websites to open an installed PWA directly.'
+                  : isInAppBrowser
+                    ? 'Messenger and some other in-app browsers do not support app installation. Use the app menu to open this page in Safari or Chrome, then install it there.'
+                    : 'This browser has not provided an automatic install prompt. If OnPraise is already installed, open it from your Home Screen; otherwise, open the browser menu and choose “Install app” or “Add to Home Screen.”'}
               </p>
-              {isInAppBrowser && (
+              {installHelpMode === 'install' && isInAppBrowser && (
                 <p className="mb-5 rounded-xl bg-zinc-50 p-3 text-left text-xs font-semibold leading-relaxed text-zinc-600">
                   Your sign-in link will carry over when you open it in the browser. This page cannot launch another browser automatically.
                 </p>
