@@ -57,7 +57,7 @@ type Gesture =
   | { kind: "move-pending"; pointerId: number; sectionId: string; startX: number; startY: number; grabOffsetBeats: number }
   | { kind: "move"; pointerId: number; sectionId: string; grabOffsetBeats: number }
   | { kind: "resize"; pointerId: number; sectionId: string; startBeat: number; durationBeats: number }
-  | { kind: "insert-pending"; pointerId: number; sectionType: string }
+  | { kind: "insert-pending"; pointerId: number; sectionType: string; startX: number; startY: number; startScrollLeft: number; hasMoved: boolean }
   | { kind: "partition-resize"; pointerId: number; sectionId: string; sectionType: string; partitionIndex: number; initialLineDurations: number[]; sectionStartBeat: number; totalSectionBeats: number };
 
 interface MovePreview {
@@ -120,6 +120,14 @@ export default function TimelineArrangement({
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const rulerViewportRef = useRef<HTMLDivElement>(null);
+  const rulerDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startScrollLeft: number;
+    hasMoved: boolean;
+  } | null>(null);
+  const initialPinchRef = useRef<{ distance: number; zoom: number } | null>(null);
+  const activePointersRef = useRef(new Map<number, { x: number; y: number }>());
   const gestureRef = useRef<Gesture | null>(null);
   const insertHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draggedJustFinishedRef = useRef(false);
@@ -217,6 +225,53 @@ export default function TimelineArrangement({
     return Math.max(0, (clientX - canvasRect.left) / pixelsPerBeat);
   };
 
+  // ✅ Swiping on the ruler navigates horizontally across the timeline
+  const handleRulerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    rulerDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: viewportRef.current?.scrollLeft ?? 0,
+      hasMoved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleRulerPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = rulerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - drag.startX;
+    if (Math.abs(deltaX) > 4) {
+      drag.hasMoved = true;
+      if (viewportRef.current) {
+        viewportRef.current.scrollLeft = drag.startScrollLeft - deltaX;
+      }
+    }
+  };
+
+  const handleRulerPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = rulerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const hasMoved = drag.hasMoved;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch (_) {}
+    rulerDragRef.current = null;
+
+    // Only seek if the user tapped rather than swiped
+    if (!hasMoved) {
+      // ✅ SURGICAL FIX: Rely on global getBeatAtX to perfectly account for horizontal scroll state
+      const beat = getBeatAtX(event.clientX);
+      onSeekTime(Math.max(0, downbeatOffsetMs / 1000 + (beat * 60) / Math.max(1, tempo)));
+    }
+  };
+
+  const handleRulerPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch (_) {}
+    rulerDragRef.current = null;
+  };
+
   const getInsertionIndex = (beat: number, skippedSectionId?: string) => {
     let index = 0;
     let position = 0;
@@ -292,6 +347,28 @@ export default function TimelineArrangement({
   const canvasWidth = Math.max(320, canvasBeats * pixelsPerBeat + 36);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    
+    // ✅ SURGICAL ADDITION: Detect 2-finger pinch initiation
+    if (activePointersRef.current.size === 2) {
+      const pts = Array.from(activePointersRef.current.values());
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      initialPinchRef.current = { distance: dist, zoom };
+      
+      // Cancel any single-finger gesture that might have started
+      if (gestureRef.current) {
+        try { event.currentTarget.releasePointerCapture(gestureRef.current.pointerId); } catch (_) {}
+        gestureRef.current = null;
+        setDraggingSectionId(null);
+        setMovePreview(null);
+        setInsertionLaneType(null);
+        setInsertionIndex(null);
+        setResizePreview(null);
+        setPartitionPreview(null);
+      }
+      return;
+    }
+
     const target = event.target as HTMLElement;
     const partitionHandle = target.closest<HTMLElement>("[data-partition-handle]");
     const sectionId = target.closest<HTMLElement>("[data-section-id]")?.dataset.sectionId;
@@ -355,7 +432,18 @@ export default function TimelineArrangement({
 
     const laneType = target.closest<HTMLElement>("[data-lane-canvas]")?.dataset.laneType;
     if (!laneType) return;
-    gestureRef.current = { kind: "insert-pending", pointerId: event.pointerId, sectionType: laneType };
+    
+    // ✅ SURGICAL FIX: Allow initial insert gesture to transition seamlessly into a timeline pan/swipe
+    gestureRef.current = { 
+      kind: "insert-pending", 
+      pointerId: event.pointerId, 
+      sectionType: laneType,
+      startX: event.clientX,
+      startY: event.clientY,
+      startScrollLeft: viewportRef.current?.scrollLeft ?? 0,
+      hasMoved: false
+    };
+    
     const insertionStartBeat = snapBeat(getBeatAtX(event.clientX), snapStep);
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
     insertHoldTimerRef.current = setTimeout(() => {
@@ -367,6 +455,20 @@ export default function TimelineArrangement({
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (activePointersRef.current.has(event.pointerId)) {
+      activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    
+    // ✅ SURGICAL ADDITION: Execute pinch scaling dynamically
+    if (activePointersRef.current.size === 2 && initialPinchRef.current) {
+      const pts = Array.from(activePointersRef.current.values());
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      const scale = dist / initialPinchRef.current.distance;
+      const newZoom = Math.max(0.1, Math.min(3, initialPinchRef.current.zoom * scale));
+      setZoom(Number(newZoom.toFixed(2)));
+      return;
+    }
+
     const gesture = gestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
@@ -427,8 +529,21 @@ export default function TimelineArrangement({
         });
       }
     } else if (gesture.kind === "insert-pending") {
-      const targetBeat = snapBeat(getBeatAtX(event.clientX), snapStep);
-      setInsertionIndex(getInsertionIndex(targetBeat));
+      // ✅ SURGICAL FIX: Intercept movement to pan/scroll the timeline canvas
+      const deltaX = event.clientX - gesture.startX;
+      const deltaY = event.clientY - gesture.startY;
+      if (Math.abs(deltaX) > 5 || Math.abs(deltaY) > 5) {
+        gesture.hasMoved = true;
+        if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
+        if (viewportRef.current) {
+          viewportRef.current.scrollLeft = gesture.startScrollLeft - deltaX;
+        }
+        setInsertionLaneType(null);
+        setInsertionIndex(null);
+      } else if (insertionLaneType) {
+        const targetBeat = snapBeat(getBeatAtX(event.clientX), snapStep);
+        setInsertionIndex(getInsertionIndex(targetBeat));
+      }
     }
   };
 
@@ -453,7 +568,8 @@ export default function TimelineArrangement({
         onUpdateLineDurations(gesture.sectionId, gesture.sectionType, partitionPreview.lineDurations);
       }
       setPartitionPreview(null);
-    } else if (gesture.kind === "insert-pending" && insertionLaneType) {
+    } else if (gesture.kind === "insert-pending" && insertionLaneType && !gesture.hasMoved) {
+      // ✅ SURGICAL FIX: Only drop a new section if they haven't swiped/panned
       const targetBeat = snapBeat(getBeatAtX(event.clientX), snapStep);
       onAddSection(gesture.sectionType, getInsertionIndex(targetBeat));
     }
@@ -468,6 +584,12 @@ export default function TimelineArrangement({
   };
 
   const cancelGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+    // ✅ Release active pointers on cancel
+    activePointersRef.current.delete(event.pointerId);
+    if (activePointersRef.current.size < 2) {
+      initialPinchRef.current = null;
+    }
+
     if (gestureRef.current?.pointerId !== event.pointerId) return;
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
     gestureRef.current = null;
@@ -624,20 +746,20 @@ export default function TimelineArrangement({
             {laneNamesCollapsed ? "»" : "SECTIONS"}
           </button>
 
-          {/* Horizontally synced ruler viewport */}
+          {/* Horizontally synced ruler viewport with touch-swipe navigation */}
           <div
             ref={rulerViewportRef}
-            className="relative h-8 flex-1 overflow-hidden select-none cursor-pointer"
+            onPointerDown={handleRulerPointerDown}
+            onPointerMove={handleRulerPointerMove}
+            onPointerUp={handleRulerPointerUp}
+            onPointerCancel={handleRulerPointerCancel}
+            style={{ touchAction: "none" }}
+            className="relative h-8 flex-1 overflow-hidden select-none cursor-ew-resize"
             aria-label="Timeline bar ruler"
           >
             <div
               className="relative h-full"
               style={{ width: `${canvasWidth}px` }}
-              onClick={(event) => {
-                const rect = event.currentTarget.getBoundingClientRect();
-                const beat = Math.max(0, (event.clientX - rect.left) / pixelsPerBeat);
-                onSeekTime(Math.max(0, downbeatOffsetMs / 1000 + beat * 60 / Math.max(1, tempo)));
-              }}
             >
               {Array.from({ length: Math.ceil(canvasBeats / quarterBeatsPerBar) + 1 }, (_, index) => (
                 <div key={index} className="absolute inset-y-0" style={{ left: `${index * quarterBeatsPerBar * pixelsPerBeat}px`, width: `${quarterBeatsPerBar * pixelsPerBeat}px` }}>
@@ -673,6 +795,7 @@ export default function TimelineArrangement({
       <div
         ref={viewportRef}
         className="relative h-[calc(100vh-14rem)] min-h-[360px] w-full min-w-0 max-w-full overflow-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-inner"
+        style={{ touchAction: "pan-x pan-y" }}
         onScroll={(e) => {
           if (rulerViewportRef.current) {
             rulerViewportRef.current.scrollLeft = e.currentTarget.scrollLeft;
@@ -720,7 +843,7 @@ export default function TimelineArrangement({
                 data-lane-canvas
                 className={`relative h-10 border-b border-outline-variant/30 transition-colors ${laneIndex % 2 === 1 ? "bg-[#252529]" : "bg-[#111113]"} ${selectedLaneType === type ? "!bg-primary/15 ring-2 ring-inset ring-primary/70" : ""}`}
                 style={{
-                  touchAction: "none",
+                  touchAction: "pan-x pan-y",
                   backgroundColor: laneIndex % 2 === 1 ? "#252529" : "#111113",
                   backgroundImage: [
                     `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, snapStep * pixelsPerBeat - snapGridWidth)}px, rgba(220,220,230,0.18) ${Math.max(0, snapStep * pixelsPerBeat - snapGridWidth)}px, rgba(220,220,230,0.18) ${snapStep * pixelsPerBeat}px)`,

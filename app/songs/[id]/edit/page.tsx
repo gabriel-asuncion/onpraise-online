@@ -898,9 +898,9 @@ function formatTimeWithMs(seconds: number) {
   useEffect(() => {
     const updateScrubber = () => {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isTimelineScrubbingRef.current) {
-        // Double check internal playing state directly from the player
         const playerState = typeof ytPlayerRef.current.getPlayerState === 'function' ? ytPlayerRef.current.getPlayerState() : -1;
-        const isActuallyPlaying = playerState === 1 || playerState === 3;
+        // Only advance scrubber and metronome clicks when actively playing (state 1)
+        const isActuallyPlaying = playerState === 1;
         
         if (isActuallyPlaying) {
           const currentTime = ytPlayerRef.current.getCurrentTime();
@@ -1486,11 +1486,31 @@ function formatTimeWithMs(seconds: number) {
     return () => window.removeEventListener("keydown", handleNashvilleNumberKeyInjections);
   }, [chordMode, chordTargetCoordinate, activeScaleDiatonicDeck]);
 
+  // ✅ Bulletproof Play/Pause toggle that strictly waits for the player to be ready
+  const handleTogglePlayback = () => {
+    initAudioContext();
+    if (!ytPlayerRef.current || !isYtPlayerReadyRef.current) return;
+    
+    const playerState = typeof ytPlayerRef.current.getPlayerState === "function" 
+      ? ytPlayerRef.current.getPlayerState() 
+      : -1;
+    
+    if (ytPlaying || playerState === 1 || playerState === 3) {
+      if (typeof ytPlayerRef.current.pauseVideo === "function") {
+        ytPlayerRef.current.pauseVideo();
+      }
+      setYtPlaying(false);
+    } else {
+      if (typeof ytPlayerRef.current.playVideo === "function") {
+        ytPlayerRef.current.playVideo();
+      }
+    }
+  };
+
   // ✅ Media playback & seek keyboard shortcuts
   useEffect(() => {
     const handleMediaShortcuts = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      // Do not trigger while typing in inputs, textareas, or dropdowns
       if (
         target?.tagName === "INPUT" ||
         target?.tagName === "TEXTAREA" ||
@@ -1500,7 +1520,6 @@ function formatTimeWithMs(seconds: number) {
         return;
       }
 
-      // Do not trigger if modal dialogs are open
       if (isConfirmExitModalOpen || isImportModalOpen || isKeyPopupOpen || isTapBpmModalOpen) {
         return;
       }
@@ -1510,18 +1529,7 @@ function formatTimeWithMs(seconds: number) {
       // Spacebar: Play / Pause
       if (e.code === "Space" || e.key === " ") {
         e.preventDefault();
-        initAudioContext();
-        if (typeof ytPlayerRef.current.getPlayerState === "function") {
-          const state = ytPlayerRef.current.getPlayerState();
-          if (state === 1) { // 1 = playing
-            ytPlayerRef.current.pauseVideo();
-          } else {
-            ytPlayerRef.current.playVideo();
-          }
-        } else {
-          if (ytPlaying) ytPlayerRef.current.pauseVideo();
-          else ytPlayerRef.current.playVideo();
-        }
+        handleTogglePlayback();
         return;
       }
 
@@ -1608,7 +1616,8 @@ function formatTimeWithMs(seconds: number) {
             try { setYtDuration(event.target.getDuration() || 0); } catch(e){}
           },
           'onStateChange': (event: any) => {
-            if (event.data === 1 || event.data === 3) { 
+            // Only set playing to true when video is actually decoding frames (state 1)
+            if (event.data === 1) { 
               setYtPlaying(true);
               try { setYtDuration(event.target.getDuration() || 0); } catch(e){}
             } else if (event.data === 2 || event.data === 0) { 
@@ -2535,9 +2544,19 @@ function formatTimeWithMs(seconds: number) {
   const seekToTimelineChapter = (time: number) => {
     const seekTime = Math.max(0, Math.min(ytDuration || time, time));
     setYtCurrentTime(seekTime);
-    if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === "function") {
+    initAudioContext();
+    
+    if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
       ytPlayerRef.current.seekTo(seekTime, true);
-      if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+      
+      // ✅ SURGICAL FIX: Give YouTube 50ms to buffer the new chunk before playing
+      setTimeout(() => {
+        if (!ytPlaying && typeof ytPlayerRef.current.pauseVideo === "function") {
+          ytPlayerRef.current.pauseVideo();
+        } else if (ytPlaying && typeof ytPlayerRef.current.playVideo === "function") {
+           ytPlayerRef.current.playVideo();
+        }
+      }, 50);
     }
     setIsTimelineChaptersOpen(false);
   };
@@ -2578,11 +2597,19 @@ function formatTimeWithMs(seconds: number) {
   }
 
   const isAnySectionMismatchedAcrossModal = formSections.some((checkSec) => {
+    if (checkSec.type.toLowerCase().startsWith("spacer")) return false; // Ignore Spacers
+    
     const checkTuple = getCentralizedMetricsTuple(checkSec.type);
     const checkLines = checkSec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").trim()).filter(l => l.length > 0);
     if (checkLines.length === 0) return false;
     
-    const targetAbsoluteBeats = (checkTuple.measures * 4) + checkTuple.beats;
+    // ✅ SURGICAL FIX: The validation math MUST exactly match the Auto-Sync marker generator math!
+    const sectionMultiplier = (Number(checkTuple.repeats) || 0) + 1;
+    const basePassBeats = (Number(checkTuple.measures) * 4) + Number(checkTuple.beats);
+    const paddingBeats = (Number(checkTuple.head_m) || 0) * 4 + (Number(checkTuple.tail_m) || 0) * 4;
+    
+    // The total beats the lines inside one pass should equal:
+    const targetAbsoluteBeats = basePassBeats; 
     
     const checkSpreadMeasures = Math.floor(checkTuple.measures / checkLines.length);
     const checkRemainderMeasures = checkTuple.measures % checkLines.length;
@@ -3294,11 +3321,15 @@ function formatTimeWithMs(seconds: number) {
                         setSelectedMarkerId(null);
                         
                         setTimeout(() => {
-                           if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
+                           if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
                               ytPlayerRef.current.seekTo(seekTime, true);
-                              if (!ytPlaying) ytPlayerRef.current.pauseVideo();
+                              if (!ytPlaying && typeof ytPlayerRef.current.pauseVideo === 'function') {
+                                 ytPlayerRef.current.pauseVideo();
+                              } else if (ytPlaying && typeof ytPlayerRef.current.playVideo === 'function') {
+                                 ytPlayerRef.current.playVideo();
+                              }
                            }
-                        }, 0);
+                        }, 50);
                       }}
                         onPointerMove={(e) => {
                           if (e.buttons !== 1) return; 
@@ -4416,6 +4447,7 @@ function formatTimeWithMs(seconds: number) {
                 <button 
                   onClick={(e) => {
                     e.stopPropagation(); 
+                    handleTogglePlayback()
                     initAudioContext();
                     if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
                     if (ytPlaying) ytPlayerRef.current.pauseVideo();
@@ -4489,7 +4521,7 @@ function formatTimeWithMs(seconds: number) {
                     <button type="button" className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }}>
                       <span className="material-symbols-outlined text-[28px]">replay_5</span>
                     </button>
-                    <button type="button" className="w-20 h-20 bg-white text-[#18181b] rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none shrink-0" onClick={(e) => { e.stopPropagation(); initAudioContext(); if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return; if (ytPlaying) ytPlayerRef.current.pauseVideo(); else ytPlayerRef.current.playVideo(); }}>
+                    <button type="button" className="w-20 h-20 bg-white text-[#18181b] rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none shrink-0" onClick={(e) => { e.stopPropagation(); handleTogglePlayback(); initAudioContext(); if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return; if (ytPlaying) ytPlayerRef.current.pauseVideo(); else ytPlayerRef.current.playVideo(); }}>
                       {ytPlaying ? <svg viewBox="0 0 24 24" className="w-10 h-10 fill-white ml-1"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg> : <svg viewBox="0 0 24 24" className="w-10 h-10 fill-white ml-2"><path d="M8 5v14l11-7z" /></svg>}
                     </button>
                     <button type="button" className="w-12 h-12 rounded-full flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }}>
@@ -4541,6 +4573,7 @@ function formatTimeWithMs(seconds: number) {
                   className="w-12 h-12 bg-white text-[#ffffff] rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none shrink-0"
                   onClick={(e) => {
                     e.stopPropagation();
+                    handleTogglePlayback();
                     initAudioContext();
                     if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
                     if (ytPlaying) ytPlayerRef.current.pauseVideo();
@@ -4612,7 +4645,7 @@ function formatTimeWithMs(seconds: number) {
 
       <div 
         key={youtubeVideoId || "empty"} 
-        style={{ position: 'fixed', top: '-9999px', left: '-9999px', width: '640px', height: '360px' }}
+        className="fixed bottom-0 right-0 w-[200px] h-[200px] opacity-[0.001] pointer-events-none -z-50 overflow-hidden"
       >
         <div id="onpraise-persistent-yt"></div>
       </div>
