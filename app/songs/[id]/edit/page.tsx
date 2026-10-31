@@ -1918,15 +1918,25 @@ function formatTimeWithMs(seconds: number) {
         const finalSectionDuration = currentLineDurs.reduce((sum, d) => sum + d, 0);
         setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: finalSectionDuration }));
 
-        // Sync sectionTimings so measures/beats match total without alignment errors
-        setSectionTimings((prev) => ({
-          ...prev,
-          [section.type]: {
-            ...(prev[section.type] || { repeats: 0, head_m: 0, tail_m: 0 }),
-            measures: Math.floor(finalSectionDuration / 4),
-            beats: finalSectionDuration % 4,
-          },
-        }));
+        // ✅ SURGICAL FIX: Save total duration locally but DO NOT force write to sectionTimings blindly
+        // The total beats includes the repeats. To extract the raw base measures/beats, we reverse the math:
+        setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: finalSectionDuration }));
+        
+        setSectionTimings((prev) => {
+           const existing = prev[section.type] || { repeats: 0, head_m: 0, tail_m: 0 };
+           const mult = (Number(existing.repeats) || 0) + 1;
+           const paddingBeats = (Number(existing.head_m || 0) * 4) + (Number(existing.tail_m || 0) * 4);
+           // Calculate what the core pass should be to equal the final total
+           const baseCoreBeats = Math.max(0, Math.round((finalSectionDuration - paddingBeats) / mult));
+           return {
+             ...prev,
+             [section.type]: {
+               ...existing,
+               measures: Math.floor(baseCoreBeats / 4),
+               beats: baseCoreBeats % 4,
+             },
+           };
+        });
       } else {
         setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: Math.max(1, Math.round(durationBeats)) }));
       }
@@ -2454,22 +2464,29 @@ function formatTimeWithMs(seconds: number) {
 
   const uniqueContentSectionsList = formSections.reduce((acc: SongSectionBlock[], curr) => { if (!acc.some(item => item.type === curr.type)) acc.push(curr); return acc; }, []);
   const timelineLineDurationsBySectionId = Object.fromEntries(formSections.map((section) => {
-    const lines = section.content.split("\n");
+    // ✅ SURGICAL FIX: Safely parse lines ignoring empty/comment rows
+    const lines = section.content.split("\n").filter(l => l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0);
     const lineCount = Math.max(1, lines.length);
-    const timing = sectionTimings[section.type] ?? { measures: 4, beats: 0 };
+    const timing = sectionTimings[section.type] ?? { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
+    
+    // ✅ SURGICAL FIX: The target must be the RAW base core duration WITHOUT repeats and padding!
+    // The visual timeline automatically scales a single pass.
     const measureCount = Math.max(0, Number(timing.measures) || 0);
     const beatCount = Math.max(0, Number(timing.beats) || 0);
-    const autoMeasures = Math.floor(measureCount / lineCount);
+    
+    const autoSpreadMeasures = Math.floor(measureCount / lineCount);
     const remainderMeasures = measureCount % lineCount;
-    const autoBeats = Math.floor(beatCount / lineCount);
+    const autoSpreadBeats = Math.floor(beatCount / lineCount);
     const remainderBeats = beatCount % lineCount;
+    
     const sectionOverrides = lineOverrides?.[section.type];
     const durations = lines.map((line, lineIndex) => {
       const saved = sectionOverrides?.[lineIndex];
-      const lineMeasures = Number(saved?.measures ?? autoMeasures + (lineIndex < remainderMeasures ? 1 : 0));
-      const lineBeats = Number(saved?.beats ?? autoBeats + (lineIndex < remainderBeats ? 1 : 0));
-      return { line: line.trim(), duration: Math.max(0, lineMeasures * 4 + lineBeats) };
-    }).filter((line) => line.line.length > 0).map((line) => line.duration);
+      const lineMeasures = Number(saved?.measures ?? autoSpreadMeasures + (lineIndex < remainderMeasures ? 1 : 0));
+      const lineBeats = Number(saved?.beats ?? autoSpreadBeats + (lineIndex < remainderBeats ? 1 : 0));
+      return Math.max(0, lineMeasures * 4 + lineBeats);
+    });
+    
     return [section.id, durations.some((duration) => duration > 0) ? durations : durations.map(() => 1)];
   }));
   const timelineChapters = (() => {
@@ -2597,20 +2614,24 @@ function formatTimeWithMs(seconds: number) {
   }
 
   const isAnySectionMismatchedAcrossModal = formSections.some((checkSec) => {
-    if (checkSec.type.toLowerCase().startsWith("spacer")) return false; // Ignore Spacers
+    if (checkSec.type.toLowerCase().startsWith("spacer")) return false; 
     
     const checkTuple = getCentralizedMetricsTuple(checkSec.type);
     const checkLines = checkSec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").trim()).filter(l => l.length > 0);
     if (checkLines.length === 0) return false;
     
-    // ✅ SURGICAL FIX: The validation math MUST exactly match the Auto-Sync marker generator math!
-    const sectionMultiplier = (Number(checkTuple.repeats) || 0) + 1;
     const basePassBeats = (Number(checkTuple.measures) * 4) + Number(checkTuple.beats);
-    const paddingBeats = (Number(checkTuple.head_m) || 0) * 4 + (Number(checkTuple.tail_m) || 0) * 4;
-    
-    // The total beats the lines inside one pass should equal:
     const targetAbsoluteBeats = basePassBeats; 
     
+    // ✅ SURGICAL FIX: Safely pull the exact math the timeline uses
+    const lineDurs = timelineLineDurationsBySectionId[checkSec.id] || [];
+    
+    if (lineDurs.length > 0) {
+      const calculatedBeatsSum = lineDurs.reduce((sum, d) => sum + d, 0);
+      return calculatedBeatsSum !== targetAbsoluteBeats;
+    }
+
+    // Fallback if the component hasn't computed timeline overrides yet
     const checkSpreadMeasures = Math.floor(checkTuple.measures / checkLines.length);
     const checkRemainderMeasures = checkTuple.measures % checkLines.length;
     const checkSpreadBeats = Math.floor(checkTuple.beats / checkLines.length);

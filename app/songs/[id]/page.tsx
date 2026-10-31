@@ -266,6 +266,12 @@ export default function SoloPracticeRoomPage() {
         if (song.youtube_url && song.youtube_url.trim() !== "") {
           setIsYoutubeSyncEnabled(true);
         }
+        
+        // ✅ SURGICAL ADDITION: Pass global sync offset down to latency state so the UI scrubs at the proper time offset
+        if (typeof song.youtube_sync_offset_ms === 'number') {
+           setAudioLatencyOffsetMs(song.youtube_sync_offset_ms);
+        }
+        
         setLoading(false);
       } else {
         router.push("/songs");
@@ -449,15 +455,17 @@ export default function SoloPracticeRoomPage() {
         const beatSpeedSecs = 60 / (activeSongRef.current?.tempo || 75);
         const theoreticalSongStartOffset = targetAbsoluteBeat * beatSpeedSecs;
         
+        // ✅ SURGICAL FIX: Calculate correct seek target and hardware baseline using youtube_sync_offset_ms
         const ytOffsetSecs = (activeSongRef.current?.youtube_sync_offset_ms || 0) / 1000;
-        const ytSeekTargetSecs = targetSectionIdx === 0 ? 0 : (ytOffsetSecs + theoreticalSongStartOffset);
+        const ytSeekTargetSecs = ytOffsetSecs + theoreticalSongStartOffset;
 
         if (isYtBackingTrackStartRef.current) {
-          audioContextStartTimeRef.current = absoluteHardwareTimeAtJump + ytOffsetSecs - ytSeekTargetSecs;
+          audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
         } else {
           audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
         }
-        console.log(`🕒 [Clock Sync] Ctx State: ${audioCtx?.state} | StartTimeRef: ${audioContextStartTimeRef.current}`);
+        
+        console.log(`🕒 [Clock Sync] Ctx State: ${audioCtx?.state} | StartTimeRef: ${audioContextStartTimeRef.current} | Offset: ${ytOffsetSecs}s`);
 
         if (isYtBackingTrackStartRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
           try { 

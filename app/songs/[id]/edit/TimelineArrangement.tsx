@@ -459,10 +459,11 @@ export default function TimelineArrangement({
       activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     }
     
-    // ✅ SURGICAL ADDITION: Execute pinch scaling dynamically
+    // ✅ SURGICAL ADDITION: Execute pinch scaling dynamically on timeline width only
     if (activePointersRef.current.size === 2 && initialPinchRef.current) {
       const pts = Array.from(activePointersRef.current.values());
-      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      // We only care about horizontal spread to zoom the timeline, not vertical pinch
+      const dist = Math.abs(pts[0].x - pts[1].x); 
       const scale = dist / initialPinchRef.current.distance;
       const newZoom = Math.max(0.1, Math.min(3, initialPinchRef.current.zoom * scale));
       setZoom(Number(newZoom.toFixed(2)));
@@ -794,8 +795,7 @@ export default function TimelineArrangement({
       </div>
       <div
         ref={viewportRef}
-        className="relative h-[calc(100vh-14rem)] min-h-[360px] w-full min-w-0 max-w-full overflow-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-inner"
-        style={{ touchAction: "pan-x pan-y" }}
+        className="relative h-[calc(100vh-14rem)] min-h-[360px] w-full min-w-0 max-w-full overflow-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-inner touch-pan-x touch-pan-y"
         onScroll={(e) => {
           if (rulerViewportRef.current) {
             rulerViewportRef.current.scrollLeft = e.currentTarget.scrollLeft;
