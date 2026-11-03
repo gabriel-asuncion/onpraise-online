@@ -16,6 +16,7 @@ import { useHardwareClock } from "../../setlists/[id]/live/hooks/useHardwareCloc
 import { LiveHeader } from "../../setlists/[id]/live/components/LiveHeader";
 import { SimplifiedStackView } from "../../setlists/[id]/live/components/SimplifiedStackView";
 import { StandardSheetView } from "../../setlists/[id]/live/components/StandardSheetView";
+import { TracksView } from "../../setlists/[id]/live/components/TracksView";
 import { ScrubberOverlay } from "../../setlists/[id]/live/components/ScrubberOverlay";
 import { SettingsModal } from "../../setlists/[id]/live/components/SettingsModal";
 import { TransposerModal } from "../../setlists/[id]/live/components/TransposerModal";
@@ -70,7 +71,7 @@ export default function SoloPracticeRoomPage() {
   
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
-    isSimplifiedMode, setIsSimplifiedMode, lineSpacing, setLineSpacing,
+    isSimplifiedMode, setIsSimplifiedMode, isTracksMode, setIsTracksMode, lineSpacing, setLineSpacing,
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isMetronomeSoundEnabledRef,
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
@@ -140,6 +141,7 @@ export default function SoloPracticeRoomPage() {
   const [isPlayingFlow, setIsPlayingFlow] = useState(false);
   const [currentSectionIndex, setCurrentSectionIndex] = useState<number>(0);
   const [currentBeat, setCurrentBeat] = useState<number>(1);
+  const [tracksPlayheadBeat, setTracksPlayheadBeat] = useState(0);
   const [activeLineIndex, setActiveLineIndex] = useState<number>(0);
   const [showSyncBack, setShowSyncBack] = useState<boolean>(false);
 
@@ -350,7 +352,8 @@ export default function SoloPracticeRoomPage() {
 
   useEffect(() => { if (!isSettingsModalOpen) setIsTestingSync(false); }, [isSettingsModalOpen]);
 
-  const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4) => {
+  const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4, absoluteBeat?: number) => {
+    if (isTracksMode && absoluteBeat !== undefined) setTracksPlayheadBeat(absoluteBeat);
     metronomeRefs.current.forEach((el, index) => {
       if (!el) return;
       const beatNum = index + 1;
@@ -653,6 +656,10 @@ export default function SoloPracticeRoomPage() {
 
     return { totalBeats: currentAbsoluteBeat, nodes: map, sectionStartBeats };
   }, [activeSong, sections, memoizedSongAstTree, timelineDurationsBySectionId]);
+  const timelineSectionDurations = useMemo(
+    () => sections.map((_, index) => Math.max(0.5, (beatMap.sectionStartBeats[index + 1] ?? beatMap.totalBeats) - (beatMap.sectionStartBeats[index] ?? 0))),
+    [beatMap, sections],
+  );
 
   useEffect(() => {
     beatMapRef.current = beatMap;
@@ -850,7 +857,26 @@ export default function SoloPracticeRoomPage() {
       {/* ✅ EXACT MATCH: Restored the flex-row container that wraps the SheetView and Scrubber[cite: 5] */}
       <div className="flex-1 flex flex-row w-full h-full relative" style={{ overscrollBehaviorX: 'none', touchAction: 'pan-y' }}>
         <div className="w-full h-full shrink-0 relative flex flex-col">
-          {isSimplifiedMode ? (
+          {isTracksMode ? (
+            <TracksView
+              sections={sections}
+              songAst={memoizedSongAstTree}
+              sectionStarts={beatMap.sectionStartBeats}
+              sectionDurations={timelineSectionDurations}
+              totalBeats={beatMap.totalBeats}
+              activeSectionIndex={currentSectionIndex}
+              queuedSectionIndex={queuedSectionIndex}
+              activeLineIndex={activeLineIndex}
+              playheadBeat={isPlayingFlow ? tracksPlayheadBeat : beatMap.sectionStartBeats[currentSectionIndex] ?? 0}
+              isPlaying={isPlayingFlow}
+              tempo={activeSong?.tempo ?? 75}
+              showChords={showChords}
+              lyricsFontSize={lyricsFontSize}
+              lineSpacing={lineSpacing}
+              chordFormat={chordFormat}
+              activeDisplayKey={activeDisplayKey}
+            />
+          ) : isSimplifiedMode ? (
               <SimplifiedStackView 
                 memoizedSongAstTree={memoizedSongAstTree} 
                 currentSectionIndex={currentSectionIndex}
@@ -904,7 +930,7 @@ export default function SoloPracticeRoomPage() {
 
       <SettingsModal
         isSettingsModalOpen={isSettingsModalOpen} setIsSettingsModalOpen={setIsSettingsModalOpen} localPresenceUser={localPresenceUser} onlineUsers={[]} handleToggleMusicDirectorMode={() => {}}
-        showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode}
+        showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode} isTracksMode={isTracksMode} setIsTracksMode={setIsTracksMode}
         isZenMode={isZenMode} setIsZenMode={setIsZenMode} metronomeSoundType={metronomeSoundType} setMetronomeSoundType={setMetronomeSoundType}
         lineSpacing={lineSpacing} setLineSpacing={setLineSpacing} lyricsFontSize={lyricsFontSize} setLyricsFontSize={setLyricsFontSize}
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}

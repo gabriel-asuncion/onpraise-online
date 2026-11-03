@@ -38,7 +38,7 @@ export interface HardwareClockConfig {
   executeJumpNow: (trackIdx: number, secIdx: number, time: number, isInitialStart?: boolean) => void;
   localPresenceUserRef: React.MutableRefObject<any>;
   sendSupabaseBroadcast: (payload: any) => void;
-  updateMetronomeUI: (beat: number, isPlaying: boolean, measureLength?: number) => void;
+  updateMetronomeUI: (beat: number, isPlaying: boolean, measureLength?: number, absoluteBeat?: number) => void;
   activeLineIndexRef: React.MutableRefObject<number>;
   setActiveLineIndex: (idx: number) => void;
   handleAdvanceToNextSetlistTrack: () => void;
@@ -285,7 +285,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
       }
       if (currentVisualBeatPulse !== c.lastVisualBeatRef.current) {
         c.lastVisualBeatRef.current = currentVisualBeatPulse;
-        c.updateMetronomeUI(currentVisualBeatPulse, true, activeMeasureLength); 
+        c.updateMetronomeUI(currentVisualBeatPulse, true, activeMeasureLength, absoluteVisualBeatFloat);
       }
 
       const safeDuration = Math.max(1, totalDurationMs);

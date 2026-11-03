@@ -23,6 +23,8 @@ interface SettingsModalProps {
   setChordFormat: (val: "Key" | "Numbers") => void;
   isSimplifiedMode: boolean;
   setIsSimplifiedMode: (val: boolean) => void;
+  isTracksMode: boolean;
+  setIsTracksMode: (val: boolean) => void;
   isZenMode: boolean;
   setIsZenMode: (val: boolean) => void;
   lineSpacing: number;
@@ -137,7 +139,7 @@ export function SettingsModal(props: SettingsModalProps) {
   const {
     localPresenceUser, onlineUsers, handleToggleMusicDirectorMode,
     showChords, setShowChords, chordFormat, setChordFormat, isSimplifiedMode, setIsSimplifiedMode,
-    isZenMode, setIsZenMode, 
+    isZenMode,     setIsZenMode, isTracksMode, setIsTracksMode,
     lineSpacing, setLineSpacing, lyricsFontSize, setLyricsFontSize,
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled,
     metronomeSoundType, setMetronomeSoundType, 
@@ -269,10 +271,11 @@ export function SettingsModal(props: SettingsModalProps) {
                   <label className="text-[11px] font-bold text-on-surface-variant">View Mode</label>
                   <span className="px-1.5 py-0.5 rounded text-[8px] font-black bg-tertiary/15 text-tertiary uppercase tracking-widest">Experimental</span>
                 </div>
-                <div className="grid grid-cols-3 p-1 bg-surface-container rounded-lg gap-1 border border-outline-variant/20">
-                  <button onClick={() => { setIsZenMode(false); setIsSimplifiedMode(false); }} className={`py-2 rounded-md text-[12px] transition-all ${!isSimplifiedMode && !isZenMode ? btnActive : btnInactive}`}>Sheet</button>
-                  <button onClick={() => { setIsZenMode(false); setIsSimplifiedMode(true); }} className={`py-2 rounded-md text-[12px] transition-all ${isSimplifiedMode && !isZenMode ? btnActive : btnInactive}`}>Stack</button>
-                  <button onClick={() => { triggerClose(); setIsZenMode(true); }} className={`py-2 rounded-md text-[12px] transition-all ${isZenMode ? btnActive : btnInactive}`}>Zen</button>
+                <div className="grid grid-cols-4 p-1 bg-surface-container rounded-lg gap-1 border border-outline-variant/20">
+                  <button onClick={() => { setIsZenMode(false); setIsTracksMode(false); setIsSimplifiedMode(false); }} className={`py-2 rounded-md text-[12px] transition-all ${!isSimplifiedMode && !isZenMode && !isTracksMode ? btnActive : btnInactive}`}>Sheet</button>
+                  <button onClick={() => { setIsZenMode(false); setIsTracksMode(false); setIsSimplifiedMode(true); }} className={`py-2 rounded-md text-[12px] transition-all ${isSimplifiedMode && !isZenMode && !isTracksMode ? btnActive : btnInactive}`}>Stack</button>
+                  <button onClick={() => { setIsZenMode(false); setIsTracksMode(true); }} className={`py-2 rounded-md text-[12px] transition-all ${isTracksMode && !isZenMode ? btnActive : btnInactive}`}>Tracks</button>
+                  <button onClick={() => { triggerClose(); setIsTracksMode(false); setIsZenMode(true); }} className={`py-2 rounded-md text-[12px] transition-all ${isZenMode ? btnActive : btnInactive}`}>Zen</button>
                 </div>
               </div>
 

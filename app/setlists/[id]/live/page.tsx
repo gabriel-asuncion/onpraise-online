@@ -23,6 +23,7 @@ import { useHardwareClock } from "./hooks/useHardwareClock";
 import { LiveHeader } from "./components/LiveHeader";
 import { SimplifiedStackView } from "./components/SimplifiedStackView";
 import { StandardSheetView } from "./components/StandardSheetView";
+import { TracksView } from "./components/TracksView";
 import { SettingsModal } from "./components/SettingsModal";
 import { StructureEditorModal } from "./components/StructureEditorModal";
 import { AddBlockModal } from "./components/AddBlockModal";
@@ -116,7 +117,7 @@ export default function SetlistPerformanceRoomPage() {
 
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
-    isSimplifiedMode, setIsSimplifiedMode, lineSpacing, setLineSpacing,
+    isSimplifiedMode, setIsSimplifiedMode, isTracksMode, setIsTracksMode, lineSpacing, setLineSpacing,
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isMetronomeSoundEnabledRef,
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
@@ -410,6 +411,7 @@ export default function SetlistPerformanceRoomPage() {
   const [isPlayingFlow, setIsPlayingFlow] = useState(false);
   const [currentSectionIndex, setCurrentSectionIndex] = useState<number>(0);
   const [currentBeat, setCurrentBeat] = useState<number>(1);
+  const [tracksPlayheadBeat, setTracksPlayheadBeat] = useState(0);
   const [activeLineIndex, setActiveLineIndex] = useState<number>(0);
   const [showSyncBack, setShowSyncBack] = useState<boolean>(false);
 
@@ -708,7 +710,8 @@ export default function SetlistPerformanceRoomPage() {
     };
   }, [setlistId]);
 
-  const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4) => {
+  const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4, absoluteBeat?: number) => {
+    if (isTracksMode && absoluteBeat !== undefined) setTracksPlayheadBeat(absoluteBeat);
     // 1. Standard UI Metronome
     metronomeRefs.current.forEach((el, index) => {
       if (!el) return;
@@ -1848,6 +1851,59 @@ export default function SetlistPerformanceRoomPage() {
                   handleUserSelectTrackBadge={handleUserSelectTrackBadge}
                   showChords={showChords} lyricsFontSize={lyricsFontSize} lineSpacing={lineSpacing}
                 />
+             ) : isTracksMode ? (
+               (() => {
+                 const track = tracksList[idx];
+                 const trackSections: ArrangementSection[] = isActive
+                   ? sections
+                   : track?.custom_structure ?? trackAst.ast.map((section) => ({
+                       id: section.id,
+                       section_name: section.section_name,
+                       content: "",
+                     }));
+                 const trackSong = track?.songs;
+                 const sectionDurations = trackSections.map((section, sectionIndex) => {
+                   if (isActive) {
+                     const sectionStart = beatMapRef.current.sectionStartBeats[sectionIndex] ?? 0;
+                     const nextStart = beatMapRef.current.sectionStartBeats[sectionIndex + 1] ?? beatMapRef.current.totalBeats;
+                     return Math.max(0.5, nextStart - sectionStart);
+                   }
+                   if (section.section_name.toLowerCase().startsWith("spacer")) {
+                     return getTimelineDurationBeats(trackSong?.section_timings, sectionIndex, section.id, trackSong?.default_structure) ?? 0.5;
+                   }
+                   const timing = trackSong?.section_timings?.[section.section_name];
+                   return Math.max(1, ((Number(timing?.measures) || 4) * 4 + (Number(timing?.beats) || 0)) * ((Number(timing?.repeats) || 0) + 1) + (Number(timing?.head_m) || 0) * 4 + (Number(timing?.tail_m) || 0) * 4);
+                 });
+                 const sectionStarts = sectionDurations.map((_, sectionIndex) =>
+                   sectionDurations.slice(0, sectionIndex).reduce((sum, duration) => sum + duration, 0),
+                 );
+                 const totalBeats = sectionDurations.reduce((sum, duration) => sum + duration, 0);
+                 const isPlayingTrack = idx === playingTrackIndex;
+                 const viewSectionIndex = isPlayingTrack ? currentSectionIndex : 0;
+                 const viewQueuedSectionIndex = queuedTrackIndex === idx ? queuedSectionIndex : null;
+                 return (
+                   <TracksView
+                     sections={trackSections}
+                     songAst={isActive ? memoizedSongAstTree : trackAst.ast}
+                     sectionStarts={sectionStarts}
+                     sectionDurations={sectionDurations}
+                     totalBeats={totalBeats}
+                     activeSectionIndex={viewSectionIndex}
+                     queuedSectionIndex={viewQueuedSectionIndex}
+                     activeLineIndex={isPlayingTrack ? activeLineIndex : 0}
+                     playheadBeat={isPlayingTrack
+                       ? isPlayingFlow ? tracksPlayheadBeat : sectionStarts[viewSectionIndex] ?? 0
+                       : 0}
+                     isPlaying={isPlayingTrack && isPlayingFlow}
+                     tempo={trackSong?.tempo ?? trackAst.tempo ?? 75}
+                     showChords={showChords}
+                     lyricsFontSize={lyricsFontSize}
+                     lineSpacing={lineSpacing}
+                     chordFormat={chordFormat}
+                     activeDisplayKey={isActive ? activeDisplayKey : trackAst.displayKey}
+                   />
+                 );
+               })()
              ) : (
                 <StandardSheetView 
                   memoizedSongAstTree={isActive ? memoizedSongAstTree : trackAst.ast} 
@@ -1909,7 +1965,7 @@ export default function SetlistPerformanceRoomPage() {
 
       <SettingsModal
         isSettingsModalOpen={isSettingsModalOpen} setIsSettingsModalOpen={setIsSettingsModalOpen} localPresenceUser={localPresenceUser} onlineUsers={onlineUsers} handleToggleMusicDirectorMode={handleToggleMusicDirectorMode}
-        showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode}
+        showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode} isTracksMode={isTracksMode} setIsTracksMode={setIsTracksMode}
         isZenMode={isZenMode} setIsZenMode={setIsZenMode}
         metronomeSoundType={metronomeSoundType} 
         setMetronomeSoundType={setMetronomeSoundType}

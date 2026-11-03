@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 export interface TimelineSection {
@@ -14,6 +14,7 @@ export interface TimelineSection {
 export type TimelineSnap = "eighth" | "sixteenth" | "thirtysecond";
 
 export interface TimelineLyricPreview {
+  sectionId: string;
   sectionType: string;
   sectionLabel: string;
   rawText: string;
@@ -24,6 +25,9 @@ export interface TimelineLyricPreview {
 interface TimelineArrangementProps {
   sections: TimelineSection[];
   lineDurationsBySectionId: Record<string, number[]>;
+  repeatCountBySectionId: Record<string, number>;
+  paddingBeatsBySectionId: Record<string, number>;
+  headPaddingBeatsBySectionId: Record<string, number>;
   storageKey: string;
   durationOverrides: Record<string, number>;
   gapOverrides: Record<string, number>;
@@ -36,8 +40,11 @@ interface TimelineArrangementProps {
   playheadTime: number;
   isPlaying: boolean;
   lyricPreview: TimelineLyricPreview | null;
+  focusedSectionId: string | null;
+  isMetronomeMuted: boolean;
   onAddSection: (type: string, insertionIndex: number) => void;
-  onOpenAddSectionModal: () => void;
+  onOpenAddSectionModal: (insertionIndex?: number, sourceSectionId?: string, destinationSectionId?: string) => void;
+  onFocusedSectionHandled: () => void;
   onReorder: (sectionId: string, insertionIndex: number, gapBeforeBeats: number, consumedSpacerId?: string) => void;
   hasCutSection: boolean;
   onCut: (sectionId: string) => void;
@@ -47,6 +54,11 @@ interface TimelineArrangementProps {
   onMeterChange: (numerator: number, denominator: number) => void;
   onSnapChange: (snap: TimelineSnap) => void;
   onDownbeatOffsetChange: (offsetMs: number) => void;
+  onCaptureDownbeat: () => number | null;
+  onPlayFromDownbeat: () => void;
+  onSeekToZero: () => void;
+  onToggleMetronome: () => void;
+  onNavigateToContentSection: (sectionId: string) => void;
   onSeekTime: (time: number) => void;
   onUpdateLineDurations: (sectionId: string, sectionType: string, lineDurations: number[]) => void;
   canUndo: boolean;
@@ -85,10 +97,19 @@ const CLIP_COLORS = [
 ];
 
 const snapBeat = (beat: number, step: number) => Math.max(0, Math.round(beat / step) * step);
+const formatMeasureBeat = (beats: number) => {
+  const safeBeats = Math.max(0, beats);
+  const measures = Math.floor(safeBeats / 4);
+  const remainingBeats = Number((safeBeats - measures * 4).toFixed(3));
+  return `M${measures}, B${remainingBeats}`;
+};
 
 export default function TimelineArrangement({
   sections,
   lineDurationsBySectionId,
+  repeatCountBySectionId,
+  paddingBeatsBySectionId,
+  headPaddingBeatsBySectionId,
   storageKey,
   durationOverrides,
   gapOverrides,
@@ -101,8 +122,11 @@ export default function TimelineArrangement({
   playheadTime,
   isPlaying,
   lyricPreview,
+  focusedSectionId,
+  isMetronomeMuted,
   onAddSection,
   onOpenAddSectionModal,
+  onFocusedSectionHandled,
   onReorder,
   hasCutSection,
   onCut,
@@ -112,6 +136,11 @@ export default function TimelineArrangement({
   onMeterChange,
   onSnapChange,
   onDownbeatOffsetChange,
+  onCaptureDownbeat,
+  onPlayFromDownbeat,
+  onSeekToZero,
+  onToggleMetronome,
+  onNavigateToContentSection,
   onSeekTime,
   onUpdateLineDurations,
   canUndo,
@@ -126,10 +155,13 @@ export default function TimelineArrangement({
     startScrollLeft: number;
     hasMoved: boolean;
   } | null>(null);
-  const initialPinchRef = useRef<{ distance: number; zoom: number } | null>(null);
-  const activePointersRef = useRef(new Map<number, { x: number; y: number }>());
   const gestureRef = useRef<Gesture | null>(null);
   const insertHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sequenceHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sequencePointerRef = useRef<{ pointerId: number; sectionId: string; sourceIndex: number; startX: number; startY: number } | null>(null);
+  const sequenceDragRef = useRef<{ pointerId: number; sectionId: string; sourceIndex: number } | null>(null);
+  const sequenceDragJustFinishedRef = useRef(false);
+  const pendingZoomAnchorRef = useRef<number | null>(null);
   const draggedJustFinishedRef = useRef(false);
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
   const [selectedLaneType, setSelectedLaneType] = useState<string | null>(null);
@@ -139,6 +171,7 @@ export default function TimelineArrangement({
   const [insertionIndex, setInsertionIndex] = useState<number | null>(null);
   const [laneNamesCollapsed, setLaneNamesCollapsed] = useState(false);
   const [laneStateLoaded, setLaneStateLoaded] = useState(false);
+  const [isSingleLaneView, setIsSingleLaneView] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [followPlayhead, setFollowPlayhead] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(0);
@@ -147,7 +180,8 @@ export default function TimelineArrangement({
   const [resizePreview, setResizePreview] = useState<{ id: string; duration: number } | null>(null);
   const [partitionPreview, setPartitionPreview] = useState<{ sectionId: string; lineDurations: number[]; activeHandle: number; handleBeat: number } | null>(null);
   const [offsetDraft, setOffsetDraft] = useState((downbeatOffsetMs / 1000).toFixed(2));
-  const [isSectionDetailsOpen, setIsSectionDetailsOpen] = useState(false);
+  const [sequenceDraggingId, setSequenceDraggingId] = useState<string | null>(null);
+  const [sequenceDropIndex, setSequenceDropIndex] = useState<number | null>(null);
   const portalTarget = typeof document === "undefined" ? null : document.body;
 
   useEffect(() => {
@@ -174,7 +208,7 @@ export default function TimelineArrangement({
   }, [laneNamesCollapsed, laneStateLoaded, storageKey]);
 
   const snapStep = SNAP_BEATS[snap];
-  const quarterBeatsPerBar = meterNumerator * (4 / meterDenominator);
+  const quarterBeatsPerBar = 4;
   const pixelsPerBeat = 18 * zoom;
   const durations = useMemo(
     () => sections.map((section) => Math.max(0.001, resizePreview?.id === section.id
@@ -192,7 +226,65 @@ export default function TimelineArrangement({
   const totalBeats = sections.reduce((total, section, index) => total + (gapOverrides[section.id] ?? 0) + durations[index], 0);
   const laneTypes = Array.from(new Set(sections.map((section) => section.type)));
   if (movePreview && movePreview.gapBeforeBeats > 0 && !laneTypes.includes("Spacer")) laneTypes.push("Spacer");
+  const displayLaneTypes = isSingleLaneView ? ["All Sections"] : laneTypes;
   const playheadBeat = ((playheadTime - downbeatOffsetMs / 1000) * Math.max(1, tempo)) / 60;
+  const setZoomKeepingPlayheadVisible = useCallback((nextZoom: number) => {
+    const viewport = viewportRef.current;
+    if (viewport) {
+      const currentOffset = playheadBeat * pixelsPerBeat - viewport.scrollLeft;
+      pendingZoomAnchorRef.current = Math.max(8, Math.min(viewport.clientWidth - 8, currentOffset));
+    }
+    setZoom(Number(Math.max(0.1, Math.min(3, nextZoom)).toFixed(2)));
+  }, [pixelsPerBeat, playheadBeat]);
+  const getPlayingSectionIndex = useCallback(() => sections.findIndex((section, index) =>
+    playheadBeat >= starts[index] && playheadBeat < starts[index] + durations[index],
+  ), [durations, playheadBeat, sections, starts]);
+  const getInsertionAnchorIndex = useCallback(() => {
+    const playingIndex = getPlayingSectionIndex();
+    if (playingIndex >= 0) return playingIndex;
+    const selectedIndex = sections.findIndex((section) => section.id === selectedSectionId);
+    if (selectedIndex >= 0) return selectedIndex;
+    const laneIndices = sections
+      .map((section, index) => section.type === selectedLaneType ? index : -1)
+      .filter((index) => index >= 0);
+    if (laneIndices.length > 0) {
+      return laneIndices.reduce((closest, index) =>
+        Math.abs(starts[index] - playheadBeat) < Math.abs(starts[closest] - playheadBeat) ? index : closest,
+      );
+    }
+    return -1;
+  }, [getPlayingSectionIndex, playheadBeat, sections, selectedLaneType, selectedSectionId, starts]);
+  const getDuplicateSourceIndex = useCallback(() => {
+    const selectedIndex = sections.findIndex((section) => section.id === selectedSectionId);
+    if (selectedIndex >= 0) return selectedIndex;
+    const laneIndices = sections
+      .map((section, index) => section.type === selectedLaneType ? index : -1)
+      .filter((index) => index >= 0);
+    if (laneIndices.length > 0) {
+      return laneIndices.reduce((closest, index) =>
+        Math.abs(starts[index] - playheadBeat) < Math.abs(starts[closest] - playheadBeat) ? index : closest,
+      );
+    }
+    return getPlayingSectionIndex();
+  }, [getPlayingSectionIndex, playheadBeat, sections, selectedLaneType, selectedSectionId, starts]);
+
+  useEffect(() => {
+    if (!focusedSectionId) return;
+    const frameId = window.requestAnimationFrame(() => {
+      const section = sections.find((item) => item.id === focusedSectionId);
+      if (section) {
+        setSelectedSectionId(section.id);
+        setSelectedLaneType(section.type);
+        document.getElementById(`timeline-clip-${section.id}`)?.scrollIntoView({
+          behavior: "smooth",
+          block: "nearest",
+          inline: "center",
+        });
+      }
+      onFocusedSectionHandled();
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [focusedSectionId, onFocusedSectionHandled, sections]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -208,7 +300,104 @@ export default function TimelineArrangement({
 
   useEffect(() => () => {
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
+    if (sequenceHoldTimerRef.current) clearTimeout(sequenceHoldTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (!isSequenceOpen && !isSettingsOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setIsSequenceOpen(false);
+      setIsSettingsOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isSequenceOpen, isSettingsOpen]);
+
+  useEffect(() => {
+    const handleTimelineShortcuts = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable ||
+        document.querySelector('[role="dialog"][aria-modal="true"]')
+      ) return;
+
+      if (isSingleLaneView && ["+", "-", "[", "]", ";", "'"].includes(event.key)) {
+        event.preventDefault();
+        setIsSingleLaneView(false);
+        return;
+      }
+
+      if (selectedSectionId && ["+", "-", "[", "]"].includes(event.key)) {
+        event.preventDefault();
+        const sectionIndex = sections.findIndex((section) => section.id === selectedSectionId);
+        if (sectionIndex < 0) return;
+        const measureBeats = meterNumerator * (4 / meterDenominator);
+        const delta = event.key === "[" ? -measureBeats
+          : event.key === "]" ? measureBeats
+            : event.key === "-" ? -1 : 1;
+        onResize(selectedSectionId, Math.max(0.125, durations[sectionIndex] + delta));
+      } else if (event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setFollowPlayhead((following) => !following);
+      } else if (event.key === "=" || event.key === "+") {
+        event.preventDefault();
+        setZoomKeepingPlayheadVisible(zoom + 0.1);
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        setZoomKeepingPlayheadVisible(zoom - 0.1);
+      } else if (event.key === "[" || event.key === "]") {
+        event.preventDefault();
+        const anchorIndex = getInsertionAnchorIndex();
+        const insertionIndex = anchorIndex < 0
+          ? event.key === "[" ? 0 : sections.length
+          : anchorIndex + (event.key === "]" ? 1 : 0);
+        const sourceIndex = getDuplicateSourceIndex();
+        const source = sourceIndex >= 0 ? sections[sourceIndex] : undefined;
+        const destination = anchorIndex >= 0 ? sections[anchorIndex] : undefined;
+        onOpenAddSectionModal(insertionIndex, source?.id, destination?.id);
+      } else if (event.key === ";" || event.key === "'") {
+        event.preventDefault();
+        const anchorIndex = getInsertionAnchorIndex();
+        const insertionIndex = anchorIndex < 0
+          ? event.key === ";" ? 0 : sections.length
+          : anchorIndex + (event.key === "'" ? 1 : 0);
+        onAddSection("Spacer", insertionIndex);
+      }
+    };
+    window.addEventListener("keydown", handleTimelineShortcuts);
+    return () => window.removeEventListener("keydown", handleTimelineShortcuts);
+  }, [
+    durations,
+    isSingleLaneView,
+    meterDenominator,
+    meterNumerator,
+    onAddSection,
+    getDuplicateSourceIndex,
+    getInsertionAnchorIndex,
+    onOpenAddSectionModal,
+    onResize,
+    playheadBeat,
+    sections,
+    selectedLaneType,
+    selectedSectionId,
+    setZoomKeepingPlayheadVisible,
+    starts,
+    zoom,
+  ]);
+
+  useLayoutEffect(() => {
+    const playheadOffset = pendingZoomAnchorRef.current;
+    const viewport = viewportRef.current;
+    if (playheadOffset === null || !viewport) return;
+    pendingZoomAnchorRef.current = null;
+    const maxScroll = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    const nextScroll = playheadBeat * pixelsPerBeat - playheadOffset;
+    viewport.scrollLeft = Math.max(0, Math.min(maxScroll, nextScroll));
+  }, [pixelsPerBeat, playheadBeat]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -347,28 +536,10 @@ export default function TimelineArrangement({
   const canvasWidth = Math.max(320, canvasBeats * pixelsPerBeat + 36);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    
-    // ✅ SURGICAL ADDITION: Detect 2-finger pinch initiation
-    if (activePointersRef.current.size === 2) {
-      const pts = Array.from(activePointersRef.current.values());
-      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-      initialPinchRef.current = { distance: dist, zoom };
-      
-      // Cancel any single-finger gesture that might have started
-      if (gestureRef.current) {
-        try { event.currentTarget.releasePointerCapture(gestureRef.current.pointerId); } catch (_) {}
-        gestureRef.current = null;
-        setDraggingSectionId(null);
-        setMovePreview(null);
-        setInsertionLaneType(null);
-        setInsertionIndex(null);
-        setResizePreview(null);
-        setPartitionPreview(null);
-      }
+    if (isSingleLaneView) {
+      setIsSingleLaneView(false);
       return;
     }
-
     const target = event.target as HTMLElement;
     const partitionHandle = target.closest<HTMLElement>("[data-partition-handle]");
     const sectionId = target.closest<HTMLElement>("[data-section-id]")?.dataset.sectionId;
@@ -382,6 +553,7 @@ export default function TimelineArrangement({
       if (sectionIndex >= 0 && !isNaN(lineIndex) && partitionSectionId) {
         event.preventDefault();
         const currentLineDurations = lineDurationsBySectionId[partitionSectionId] ?? [];
+        const basePassBeats = currentLineDurations.reduce((total, duration) => total + duration, 0);
         gestureRef.current = {
           kind: "partition-resize",
           pointerId: event.pointerId,
@@ -389,8 +561,8 @@ export default function TimelineArrangement({
           sectionType: sections[sectionIndex].type,
           partitionIndex: lineIndex,
           initialLineDurations: [...currentLineDurations],
-          sectionStartBeat: layout.starts[sectionIndex],
-          totalSectionBeats: durations[sectionIndex],
+          sectionStartBeat: layout.starts[sectionIndex] + (headPaddingBeatsBySectionId[partitionSectionId] ?? 0),
+          totalSectionBeats: basePassBeats || durations[sectionIndex] / (Math.max(0, repeatCountBySectionId[partitionSectionId] ?? 0) + 1),
         };
         event.currentTarget.setPointerCapture(event.pointerId);
         return;
@@ -455,21 +627,6 @@ export default function TimelineArrangement({
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (activePointersRef.current.has(event.pointerId)) {
-      activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    }
-    
-    // ✅ SURGICAL ADDITION: Execute pinch scaling dynamically on timeline width only
-    if (activePointersRef.current.size === 2 && initialPinchRef.current) {
-      const pts = Array.from(activePointersRef.current.values());
-      // We only care about horizontal spread to zoom the timeline, not vertical pinch
-      const dist = Math.abs(pts[0].x - pts[1].x); 
-      const scale = dist / initialPinchRef.current.distance;
-      const newZoom = Math.max(0.1, Math.min(3, initialPinchRef.current.zoom * scale));
-      setZoom(Number(newZoom.toFixed(2)));
-      return;
-    }
-
     const gesture = gestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
@@ -495,7 +652,10 @@ export default function TimelineArrangement({
       const hasLines = lineDurs.length > 0;
       // When clip has lyrics lines, snap to integer beats with a floor of 1 beat per line
       const step = hasLines ? 1 : snapStep;
-      const minDuration = hasLines ? Math.max(1, lineDurs.length) : snapStep;
+      const minDuration = hasLines
+        ? Math.max(1, lineDurs.length) * (Math.max(0, repeatCountBySectionId[gesture.sectionId] ?? 0) + 1)
+          + (paddingBeatsBySectionId[gesture.sectionId] ?? 0)
+        : snapStep;
       const duration = Math.max(minDuration, snapBeat(getBeatAtX(event.clientX) - gesture.startBeat, step));
       setResizePreview({ id: gesture.sectionId, duration });
     } else if (gesture.kind === "partition-resize") {
@@ -585,12 +745,6 @@ export default function TimelineArrangement({
   };
 
   const cancelGesture = (event: React.PointerEvent<HTMLDivElement>) => {
-    // ✅ Release active pointers on cancel
-    activePointersRef.current.delete(event.pointerId);
-    if (activePointersRef.current.size < 2) {
-      initialPinchRef.current = null;
-    }
-
     if (gestureRef.current?.pointerId !== event.pointerId) return;
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
     gestureRef.current = null;
@@ -627,18 +781,15 @@ export default function TimelineArrangement({
   const timelineToolbar = (
     <div className="mb-2 flex h-9 items-center justify-between gap-2 rounded-lg border border-outline-variant/30 bg-surface-container-low px-2">
       <div className="flex items-center gap-2">
-        <button type="button" data-timeline-overlay onClick={onUndo} disabled={!canUndo} aria-label="Undo timeline change" title="Undo timeline change" className="flex h-7 w-7 items-center justify-center rounded-md border border-outline-variant/30 bg-surface-container-high text-on-surface hover:bg-surface-bright disabled:cursor-not-allowed disabled:opacity-40">
+        <button type="button" data-timeline-overlay onClick={() => { if (isSingleLaneView) setIsSingleLaneView(false); else onUndo(); }} disabled={!canUndo} aria-label="Undo timeline change" title="Undo timeline change" className="flex h-7 w-7 items-center justify-center rounded-md border border-outline-variant/30 bg-surface-container-high text-on-surface hover:bg-surface-bright disabled:cursor-not-allowed disabled:opacity-40">
           <span className="material-symbols-outlined !text-[18px]">undo</span>
         </button>
         {hasCutSection && (
-          <button type="button" data-timeline-overlay onClick={onPaste} aria-label="Paste cut section at end" title="Paste section at end" className="flex h-7 items-center gap-1 rounded-md border border-outline-variant/30 bg-surface-container-high px-2 text-[10px] font-bold text-on-surface hover:bg-surface-bright">
+          <button type="button" data-timeline-overlay onClick={() => { if (isSingleLaneView) setIsSingleLaneView(false); else onPaste(); }} aria-label="Paste cut section at end" title="Paste section at end" className="flex h-7 items-center gap-1 rounded-md border border-outline-variant/30 bg-surface-container-high px-2 text-[10px] font-bold text-on-surface hover:bg-surface-bright">
             <span className="material-symbols-outlined !text-[17px]">content_paste</span>
             Paste
           </button>
         )}
-      </div>
-      <div className="flex items-center gap-2">
-        <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Timeline</span>
         <button
           type="button"
           data-timeline-overlay
@@ -651,14 +802,28 @@ export default function TimelineArrangement({
           <span className="material-symbols-outlined !text-[18px]">my_location</span>
         </button>
       </div>
+
+      <div className="flex items-center gap-1">
+      <button
+        type="button"
+        data-timeline-overlay
+        onClick={() => setIsSingleLaneView((view) => !view)}
+        aria-label={isSingleLaneView ? "Show separate section lanes" : "Show all sections in one lane"}
+        aria-pressed={isSingleLaneView}
+        title={isSingleLaneView ? "Show separate section lanes" : "Show all sections in one lane"}
+        className={`flex h-7 w-7 items-center justify-center rounded-md border border-outline-variant/30 ${isSingleLaneView ? "bg-primary/20 text-primary" : "bg-surface-container-high text-on-surface"} hover:bg-surface-bright`}
+      >
+        <span className="material-symbols-outlined !text-[18px]">view_stream</span>
+      </button>
       <div data-timeline-overlay className="flex items-center gap-1 rounded-lg border border-outline-variant/30 bg-surface-container-high p-0.5">
-        <button type="button" onClick={() => setZoom((current) => Math.max(0.1, Number((current - 0.1).toFixed(2))))} disabled={zoom <= 0.1} aria-label="Zoom out" title="Zoom out" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
+        <button type="button" onClick={() => setZoomKeepingPlayheadVisible(zoom - 0.1)} disabled={zoom <= 0.1} aria-label="Zoom out" title="Zoom out" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
           <span className="material-symbols-outlined !text-[18px]">remove</span>
         </button>
         <span className="w-10 text-center font-mono text-[9px] font-bold text-on-surface-variant">{Math.round(zoom * 100)}%</span>
-        <button type="button" onClick={() => setZoom((current) => Math.min(3, Number((current + 0.1).toFixed(2))))} disabled={zoom >= 3} aria-label="Zoom in" title="Zoom in" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
+        <button type="button" onClick={() => setZoomKeepingPlayheadVisible(zoom + 0.1)} disabled={zoom >= 3} aria-label="Zoom in" title="Zoom in" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
           <span className="material-symbols-outlined !text-[18px]">add</span>
         </button>
+      </div>
       </div>
     </div>
   );
@@ -668,7 +833,7 @@ export default function TimelineArrangement({
   const movingSectionStartBeat = movingSectionIndex >= 0 ? layout.starts[movingSectionIndex] : null;
   const movingSectionBar = movingSectionStartBeat === null ? null : Math.floor(movingSectionStartBeat / quarterBeatsPerBar) + 1;
   const beatWithinBar = movingSectionStartBeat === null ? null : movingSectionStartBeat % quarterBeatsPerBar;
-  const meterBeatUnit = 4 / meterDenominator;
+  const meterBeatUnit = 1;
   const beatNumber = beatWithinBar === null ? null : Math.floor(beatWithinBar / meterBeatUnit) + 1;
   const beatSubdivision = beatWithinBar === null ? 0 : (beatWithinBar % meterBeatUnit) / meterBeatUnit;
   const subdivisionNumerator = Math.round(beatSubdivision * 8);
@@ -686,38 +851,154 @@ export default function TimelineArrangement({
   const movingLaneIndex = movingSectionIndex >= 0
     ? laneTypes.indexOf(sections[movingSectionIndex].type)
     : -1;
-  const snapGridWidth = Math.min(1, Math.max(0.5, snapStep * pixelsPerBeat * 0.18));
-  const meterBeatWidth = (4 / meterDenominator) * pixelsPerBeat;
+  const meterBeatWidth = pixelsPerBeat;
   const meterBeatGridWidth = Math.min(1, Math.max(0.5, meterBeatWidth * 0.12));
   const barGridWidth = Math.min(1.5, Math.max(0.75, quarterBeatsPerBar * pixelsPerBeat * 0.025));
+  const selectedSectionIndex = selectedSection ? sections.indexOf(selectedSection) : -1;
+  const selectedSectionDuration = selectedSection ? durations[selectedSectionIndex] : null;
+  const handleSequencePointerDown = (event: React.PointerEvent<HTMLButtonElement>, section: TimelineSection, sourceIndex: number) => {
+    if (isSingleLaneView) {
+      setIsSingleLaneView(false);
+      return;
+    }
+    sequenceDragJustFinishedRef.current = false;
+    sequencePointerRef.current = {
+      pointerId: event.pointerId,
+      sectionId: section.id,
+      sourceIndex,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (sequenceHoldTimerRef.current) clearTimeout(sequenceHoldTimerRef.current);
+    sequenceHoldTimerRef.current = setTimeout(() => {
+      const pointer = sequencePointerRef.current;
+      if (!pointer || pointer.pointerId !== event.pointerId) return;
+      sequenceDragRef.current = { pointerId: event.pointerId, sectionId: section.id, sourceIndex };
+      setSequenceDraggingId(section.id);
+      setSequenceDropIndex(sourceIndex);
+    }, 350);
+  };
+  const handleSequencePointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const pointer = sequencePointerRef.current;
+    if (!pointer || pointer.pointerId !== event.pointerId) return;
+    const drag = sequenceDragRef.current;
+    if (!drag) {
+      if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) > 8) {
+        if (sequenceHoldTimerRef.current) clearTimeout(sequenceHoldTimerRef.current);
+        sequencePointerRef.current = null;
+      }
+      return;
+    }
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-sequence-index]");
+    if (!target) return;
+    const targetIndex = Number(target.dataset.sequenceIndex);
+    const bounds = target.getBoundingClientRect();
+    setSequenceDropIndex(targetIndex + (event.clientY > bounds.top + bounds.height / 2 ? 1 : 0));
+  };
+  const finishSequencePointer = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (sequenceHoldTimerRef.current) clearTimeout(sequenceHoldTimerRef.current);
+    const drag = sequenceDragRef.current;
+    const pointer = sequencePointerRef.current;
+    if (drag && pointer?.pointerId === event.pointerId) {
+      const rawInsertionIndex = sequenceDropIndex ?? drag.sourceIndex;
+      const insertionIndex = rawInsertionIndex > drag.sourceIndex ? rawInsertionIndex - 1 : rawInsertionIndex;
+      if (insertionIndex !== drag.sourceIndex) {
+        onReorder(drag.sectionId, insertionIndex, 0);
+        sequenceDragJustFinishedRef.current = true;
+      }
+    }
+    sequencePointerRef.current = null;
+    sequenceDragRef.current = null;
+    setSequenceDraggingId(null);
+    setSequenceDropIndex(null);
+  };
+  const cancelSequencePointer = () => {
+    if (sequenceHoldTimerRef.current) clearTimeout(sequenceHoldTimerRef.current);
+    sequencePointerRef.current = null;
+    sequenceDragRef.current = null;
+    setSequenceDraggingId(null);
+    setSequenceDropIndex(null);
+  };
+  const openAddSectionPicker = () => {
+    if (isSingleLaneView) {
+      setIsSingleLaneView(false);
+      return;
+    }
+    const anchorIndex = getInsertionAnchorIndex();
+    const sourceIndex = getDuplicateSourceIndex();
+    const destinationSectionId = anchorIndex >= 0 ? sections[anchorIndex].id : undefined;
+    const sourceSectionId = sourceIndex >= 0 ? sections[sourceIndex].id : undefined;
+    onOpenAddSectionModal(anchorIndex >= 0 ? anchorIndex : undefined, sourceSectionId, destinationSectionId);
+  };
 
   return (
     <section
       className="relative min-h-[calc(100vh-13rem)] w-full min-w-0 max-w-full animate-in fade-in"
       onClick={(event) => {
         if ((event.target as HTMLElement).closest("[data-timeline-overlay]")) return;
+        if (isSingleLaneView) {
+          setIsSingleLaneView(false);
+          return;
+        }
         const laneType = (event.target as HTMLElement).closest<HTMLElement>("[data-lane-type]")?.dataset.laneType;
         if (laneType) {
           setSelectedLaneType(laneType);
           setSelectedSectionId(null);
-          setIsSectionDetailsOpen(false);
         } else if (!(event.target as HTMLElement).closest("[data-section-id]")) {
           setSelectedSectionId(null);
           setSelectedLaneType(null);
-          setIsSectionDetailsOpen(false);
         }
       }}
     >
-      <div className="sticky top-0 z-40 -mx-1 mb-2 space-y-2 border-b border-outline-variant/30 bg-surface/95 px-1 pb-2 pt-1 shadow-sm backdrop-blur">
+      <div className="sticky top-0 z-40 -mx-1 space-y-2 border-b border-outline-variant/30 bg-surface/95 px-1 pt-1 shadow-sm backdrop-blur">
         {timelineToolbar}
-        <div className="flex min-h-14 items-center gap-3 rounded-xl border border-outline-variant/30 border-l-4 border-l-primary bg-surface-container-low px-4 py-2 shadow-sm" aria-live="polite">
-        {lyricPreview ? (
+        <div data-timeline-overlay className="flex min-h-14 items-center gap-3 rounded-xl border border-outline-variant/30 border-l-4 border-l-primary bg-surface-container-low px-4 py-2 shadow-sm" aria-live="polite">
+        {selectedSection ? (
+          <>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1 flex items-center gap-2 truncate text-[9px] font-black uppercase tracking-widest text-primary">
+                <span className="shrink-0 font-mono">{formatMeasureBeat(selectedSectionDuration ?? 0)}</span>
+                <span className="truncate">{selectedSection.label}</span>
+              </div>
+              <div className="flex min-h-7 items-end gap-3 overflow-hidden">
+                {lyricPreview?.sectionId === selectedSection.id ? (
+                  <button type="button" onClick={() => onNavigateToContentSection(selectedSection.id)} className="group flex items-end gap-2 rounded-lg border border-primary/30 bg-primary/10 px-2 py-1 text-left transition-colors hover:border-primary hover:bg-primary/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" aria-label={`Click to open ${selectedSection.label} in Content`}>
+                    {Array.from(lyricPreview.rawText.matchAll(/(?:\[([^\]]+)\])?([^\[]*)/g))
+                      .filter((match) => match[1] || match[2])
+                      .map((match, index) => (
+                        <span key={`${index}-${match[1] ?? ""}`} className="flex shrink-0 flex-col justify-end">
+                          <span className="min-h-3 text-[10px] font-bold leading-none text-sky-400">{match[1] ?? ""}</span>
+                          <span className="whitespace-pre text-sm font-semibold leading-tight text-on-surface">{match[2] || " "}</span>
+                        </span>
+                      ))}
+                    <span className="flex shrink-0 items-center gap-1 self-center text-[9px] font-bold text-primary">
+                      <span className="material-symbols-outlined !text-[13px]">open_in_new</span>
+                    </span>
+                  </button>
+                ) : (
+                  <span className="text-xs text-on-surface-variant">
+                    {selectedSection.content.trim() ? "Seek to this section to preview its current lyric line." : "No lyrics in this section."}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="shrink-0 items-center gap-1">
+              <button type="button" aria-label={`Cut ${selectedSection.label}`} title="Cut section" onClick={() => { if (isSingleLaneView) setIsSingleLaneView(false); else onCut(selectedSection.id); }} className="flex h-8 w-8 items-center justify-center rounded-full text-primary hover:bg-primary/10">
+                <span className="material-symbols-outlined !text-[18px]">content_cut</span>
+              </button>
+              <button type="button" aria-label={`Remove ${selectedSection.label}`} title="Remove section" onClick={() => { if (isSingleLaneView) setIsSingleLaneView(false); else onRemove(selectedSection.id); }} className="flex h-8 w-8 items-center justify-center rounded-full text-error hover:bg-error/10">
+                <span className="material-symbols-outlined !text-[18px]">close</span>
+              </button>
+            </div>
+          </>
+        ) : lyricPreview ? (
           <>
             <div className="min-w-0 flex-1">
               <div className="mb-1 truncate text-[9px] font-black uppercase tracking-widest text-primary">
                 {lyricPreview.sectionLabel} · Line {lyricPreview.lineIndex + 1}/{lyricPreview.lineCount}
               </div>
-              <div className="flex min-h-7 items-end gap-3 overflow-hidden">
+              <button type="button" onClick={() => onNavigateToContentSection(lyricPreview.sectionId)} className="group flex min-h-7 items-end gap-2 overflow-hidden rounded-lg px-2 py-1 text-left transition-colors hover:border-primary hover:bg-primary/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" aria-label={`Click to open ${lyricPreview.sectionLabel} in Content`}>
                 {Array.from(lyricPreview.rawText.matchAll(/(?:\[([^\]]+)\])?([^\[]*)/g))
                   .filter((match) => match[1] || match[2])
                   .map((match, index) => (
@@ -726,8 +1007,11 @@ export default function TimelineArrangement({
                       <span className="whitespace-pre text-sm font-semibold leading-tight text-on-surface">{match[2] || " "}</span>
                     </span>
                   ))}
+                <span className="flex shrink-0 items-center gap-1 self-center text-[9px] font-bold text-primary">
+                  <span className="material-symbols-outlined !text-[13px]">open_in_new</span>
+                </span>
+              </button>
               </div>
-            </div>
           </>
         ) : (
           <span className="text-xs font-medium text-on-surface-variant">No lyric at the current playback position.</span>
@@ -767,7 +1051,7 @@ export default function TimelineArrangement({
                   <span className="absolute inset-y-0 left-0 border-l border-outline-variant/60 pl-1.5 pt-1 text-[9px] font-mono font-bold text-on-surface-variant">
                     {index + 1}
                   </span>
-                  {Array.from({ length: meterNumerator }, (_, beatIndex) => (
+                  {Array.from({ length: 4 }, (_, beatIndex) => (
                     <span
                       key={beatIndex}
                       aria-hidden="true"
@@ -795,7 +1079,7 @@ export default function TimelineArrangement({
       </div>
       <div
         ref={viewportRef}
-        className="relative h-[calc(100vh-14rem)] min-h-[360px] w-full min-w-0 max-w-full overflow-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-inner touch-pan-x touch-pan-y"
+        className="relative h-[calc(100vh-14rem)] min-h-[360px] w-full min-w-0 max-w-full overflow-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-inner touch-pan-x touch-pan-y [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
         onScroll={(e) => {
           if (rulerViewportRef.current) {
             rulerViewportRef.current.scrollLeft = e.currentTarget.scrollLeft;
@@ -812,13 +1096,17 @@ export default function TimelineArrangement({
             style={{ width: `${laneColumnWidth}px` }}
           >
             {/* Clicking any section in the column toggles expand/collapse */}
-            {laneTypes.map((type) => (
+            {displayLaneTypes.map((type) => (
               <button
                 key={type}
                 type="button"
                 data-lane-type={type}
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (isSingleLaneView) {
+                    setIsSingleLaneView(false);
+                    return;
+                  }
                   setLaneNamesCollapsed((collapsed) => !collapsed);
                   setSelectedLaneType(type);
                   setSelectedSectionId(null);
@@ -829,31 +1117,30 @@ export default function TimelineArrangement({
                 {laneNamesCollapsed ? abbreviateLane(type) : <span className="truncate">{type}</span>}
               </button>
             ))}
-            {laneTypes.length === 0 && (
+            {displayLaneTypes.length === 0 && (
               <div className="flex h-16 items-center justify-center px-2 text-center text-[10px] font-semibold text-on-surface-variant">
                 {laneNamesCollapsed ? "+" : "Add a section to start"}
               </div>
             )}
           </aside>
           <div ref={canvasRef} className="relative shrink-0" style={{ width: `${canvasWidth}px` }}>
-            {laneTypes.map((type, laneIndex) => (
+            {displayLaneTypes.map((type, laneIndex) => (
               <div
                 key={type}
-                data-lane-type={type}
+                data-lane-type={isSingleLaneView ? undefined : type}
                 data-lane-canvas
-                className={`relative h-10 border-b border-outline-variant/30 transition-colors ${laneIndex % 2 === 1 ? "bg-[#252529]" : "bg-[#111113]"} ${selectedLaneType === type ? "!bg-primary/15 ring-2 ring-inset ring-primary/70" : ""}`}
+                className={`relative border-b border-outline-variant/30 transition-colors ${isSingleLaneView ? "h-16" : "h-10"} ${laneIndex % 2 === 1 ? "bg-[#252529]" : "bg-[#111113]"} ${!isSingleLaneView && selectedLaneType === type ? "!bg-primary/15 ring-2 ring-inset ring-primary/70" : ""}`}
                 style={{
                   touchAction: "pan-x pan-y",
                   backgroundColor: laneIndex % 2 === 1 ? "#252529" : "#111113",
                   backgroundImage: [
-                    `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, snapStep * pixelsPerBeat - snapGridWidth)}px, rgba(220,220,230,0.18) ${Math.max(0, snapStep * pixelsPerBeat - snapGridWidth)}px, rgba(220,220,230,0.18) ${snapStep * pixelsPerBeat}px)`,
-                    `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(220,220,230,0.38) ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(220,220,230,0.38) ${meterBeatWidth}px)`,
+                    `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(220,220,230,0.32) ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(220,220,230,0.32) ${meterBeatWidth}px)`,
                     `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, quarterBeatsPerBar * pixelsPerBeat - barGridWidth)}px, rgba(255,255,255,0.68) ${Math.max(0, quarterBeatsPerBar * pixelsPerBeat - barGridWidth)}px, rgba(255,255,255,0.68) ${quarterBeatsPerBar * pixelsPerBeat}px)`,
                   ].join(", "),
                 }}
               >
                 {sections.map((section, index) => {
-                  if (section.type !== type) return null;
+                  if (!isSingleLaneView && section.type !== type) return null;
                   if (movePreview?.consumedSpacerId === section.id) return null;
                   const isSelected = selectedSectionId === section.id;
                   const isDragging = draggingSectionId === section.id;
@@ -862,14 +1149,11 @@ export default function TimelineArrangement({
                   const clipLabel = section.type.startsWith("Spacer")
                     ? `Spacer · ${durations[index]} beats`
                     : section.label;
-                  const lineDurations = lineDurationsBySectionId[section.id] ?? [];
-                  const totalLineDuration = lineDurations.reduce((total, lineDuration) => total + lineDuration, 0);
-                  let partitionCursor = 0;
                   return (
                     <div key={section.id}>
                       {gapBefore > 0 && (
                         <div
-                          className={`absolute top-1 h-8 border-y border-dashed border-primary/60 ${movePreview?.sectionId === section.id ? "bg-primary/20" : "bg-primary/10"}`}
+                          className={`absolute ${isSingleLaneView ? "top-1 h-14" : "top-1 h-8"} border-y border-dashed border-primary/60 ${movePreview?.sectionId === section.id ? "bg-primary/20" : "bg-primary/10"}`}
                           title={`${gapBefore} beat spacer`}
                           style={{ left: `${(layout.starts[index] - gapBefore) * pixelsPerBeat}px`, width: `${gapBefore * pixelsPerBeat}px` }}
                         />
@@ -879,22 +1163,19 @@ export default function TimelineArrangement({
                         data-section-id={section.id}
                         onClick={(event) => {
                           event.stopPropagation();
+                          if (isSingleLaneView) {
+                            setIsSingleLaneView(false);
+                            return;
+                          }
                           if (draggedJustFinishedRef.current) {
                             draggedJustFinishedRef.current = false;
                             return;
                           }
                           setSelectedSectionId(section.id);
                           setSelectedLaneType(section.type);
-                          setIsSectionDetailsOpen(false);
                         }}
-                        onDoubleClick={(event) => {
-                          event.stopPropagation();
-                          setSelectedSectionId(section.id);
-                          setSelectedLaneType(section.type);
-                          setIsSectionDetailsOpen(true);
-                        }}
-                        title={`${clipLabel} · ${((durations[index] / quarterBeatsPerBar)).toFixed(2)} bars`}
-                        className={`absolute top-1 flex h-8 select-none items-center rounded-md border px-2 shadow-sm ${isDragging ? "z-20 opacity-85 shadow-xl" : "transition-[left,width,background-color] duration-200 ease-out"} ${clipColor} ${isSelected ? "ring-2 ring-white ring-offset-1 ring-offset-primary" : "hover:brightness-110"} cursor-pointer`}
+                        title={`${clipLabel} · ${formatMeasureBeat(durations[index])}`}
+                        className={`absolute ${isSingleLaneView ? "top-1 h-14" : "top-1 h-8"} flex select-none items-center rounded-md border px-2 shadow-sm ${isDragging ? "z-20 opacity-85 shadow-xl" : "transition-[left,width,background-color] duration-200 ease-out"} ${clipColor} ${isSelected ? "ring-2 ring-white ring-offset-1 ring-offset-primary" : "hover:brightness-110"} cursor-pointer`}
                         style={{
                           left: `${layout.starts[index] * pixelsPerBeat + 2}px`,
                           width: `${Math.max(20, durations[index] * pixelsPerBeat - 4)}px`,
@@ -937,40 +1218,69 @@ export default function TimelineArrangement({
                             return durs;
                           };
 
+                          const repeatCount = Math.max(0, repeatCountBySectionId[section.id] ?? 0);
+                          const headPadding = Math.max(0, headPaddingBeatsBySectionId[section.id] ?? 0);
                           const activeLineDurations = (partitionPreview && partitionPreview.sectionId === section.id)
                             ? partitionPreview.lineDurations
                             : (resizePreview && resizePreview.id === section.id)
-                            ? getWaterfalledLineDurations(lineDurationsBySectionId[section.id] ?? [], resizePreview.duration)
+                            ? getWaterfalledLineDurations(
+                              lineDurationsBySectionId[section.id] ?? [],
+                              (resizePreview.duration - (paddingBeatsBySectionId[section.id] ?? 0)) / (repeatCount + 1),
+                            )
                             : (lineDurationsBySectionId[section.id] ?? []);
-                          const activeTotal = activeLineDurations.reduce((total, d) => total + d, 0);
+                          const activeTotal = headPadding + activeLineDurations.reduce((total, d) => total + d, 0);
 
-                          if (activeTotal <= 0 || activeLineDurations.length <= 1) return null;
+                          if (activeTotal <= 0) return null;
 
                           return (
                             <>
+                              {headPadding > 0 && (
+                                <div
+                                  aria-label="Head padding is not editable"
+                                  className="pointer-events-none absolute inset-y-0 z-10 border-r border-white/30 bg-black/20"
+                                  style={{
+                                    left: "0%",
+                                    width: `${(headPadding / durations[index]) * 100}%`,
+                                    backgroundImage: "repeating-linear-gradient(135deg, transparent 0, transparent 5px, rgba(255,255,255,0.12) 5px, rgba(255,255,255,0.12) 7px)",
+                                  }}
+                                />
+                              )}
                               {/* Background visible divider lines */}
                               <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-md">
                                 {(() => {
-                                  let cursor = 0;
+                                  let cursor = headPadding;
                                   return activeLineDurations.slice(0, -1).map((ld, lIdx) => {
                                     cursor += ld;
                                     return (
                                       <span
                                         key={`${section.id}-part-${lIdx}`}
                                         className="absolute bottom-0 top-0 border-l border-white/70 shadow-[0_0_2px_rgba(0,0,0,0.8)]"
-                                        style={{ left: `${(cursor / activeTotal) * 100}%` }}
+                                        style={{ left: `${(cursor / durations[index]) * 100}%` }}
                                       />
                                     );
                                   });
                                 })()}
                               </div>
+                              {repeatCount > 0 && activeTotal < durations[index] && (
+                                <div
+                                  aria-label={`${repeatCount} repeated passes are not independently editable`}
+                                  className="pointer-events-none absolute inset-y-0 z-10 flex items-center justify-center overflow-hidden border-l border-white/30 bg-black/20 text-[8px] font-black text-white/70"
+                                  style={{
+                                    left: `${(activeTotal / durations[index]) * 100}%`,
+                                    width: `${((durations[index] - activeTotal) / durations[index]) * 100}%`,
+                                    backgroundImage: "repeating-linear-gradient(135deg, transparent 0, transparent 5px, rgba(255,255,255,0.12) 5px, rgba(255,255,255,0.12) 7px)",
+                                  }}
+                                >
+                                  {repeatCount > 0 && durations[index] - activeTotal > 8 ? `REPEATS ×${repeatCount}` : null}
+                                </div>
+                              )}
 
                               {/* Interactive Draggable Handles when clip is selected */}
                               {isSelected && !section.type.startsWith("Spacer") && (() => {
-                                let cursor = 0;
+                                let cursor = headPadding;
                                 return activeLineDurations.slice(0, -1).map((ld, lIdx) => {
                                   cursor += ld;
-                                  const leftPercent = (cursor / activeTotal) * 100;
+                                  const leftPercent = (cursor / durations[index]) * 100;
                                   return (
                                     <div
                                       key={`${section.id}-handle-${lIdx}`}
@@ -992,7 +1302,7 @@ export default function TimelineArrangement({
                                 <div
                                   data-timeline-overlay
                                   className="pointer-events-none absolute -top-8 z-40 -translate-x-1/2 whitespace-nowrap rounded-md border border-amber-400 bg-surface-container-highest px-2 py-0.5 text-[10px] font-mono font-bold text-on-surface shadow-2xl backdrop-blur"
-                                  style={{ left: `${(partitionPreview.handleBeat / activeTotal) * 100}%` }}
+                                  style={{ left: `${((headPadding + partitionPreview.handleBeat) / durations[index]) * 100}%` }}
                                 >
                                   L{partitionPreview.activeHandle + 1}: {partitionPreview.lineDurations[partitionPreview.activeHandle]}b (M{Math.floor(partitionPreview.lineDurations[partitionPreview.activeHandle] / 4)}, B{partitionPreview.lineDurations[partitionPreview.activeHandle] % 4})
                                   {" · "}
@@ -1047,9 +1357,9 @@ export default function TimelineArrangement({
             >
               <button
                 type="button"
-                onClick={onOpenAddSectionModal}
-                aria-label="Add section after the last lane"
-                title="Add section after the last lane"
+                onClick={openAddSectionPicker}
+                aria-label="Add section relative to the selected section or lane"
+                title="Add section relative to selection"
                 className="flex h-11 w-11 items-center justify-center rounded-full bg-primary text-on-primary shadow-xl ring-4 ring-surface-container-lowest/80 transition-transform hover:scale-105 active:scale-95"
               >
                 <span className="material-symbols-outlined !text-[25px]">add</span>
@@ -1081,34 +1391,6 @@ export default function TimelineArrangement({
 
       {portalTarget && createPortal(
         <>
-          {selectedSection && isSectionDetailsOpen && (
-            <div data-timeline-overlay data-section-id={selectedSection.id} className="fixed left-1/2 top-20 z-[250001] flex -translate-x-1/2 items-center gap-2 rounded-full border border-primary/30 bg-surface-container-highest/95 px-3 py-1.5 shadow-lg backdrop-blur">
-              <span className="max-w-36 truncate text-[10px] font-black text-on-surface">{selectedSection.label}</span>
-              <span className="font-mono text-[10px] text-on-surface-variant">
-                {(durations[sections.findIndex((section) => section.id === selectedSection.id)] / quarterBeatsPerBar).toFixed(2)} bars
-              </span>
-              <button
-                type="button"
-                aria-label={`Cut ${selectedSection.label}`}
-                title="Cut section"
-                onClick={() => onCut(selectedSection.id)}
-                className="flex h-7 items-center gap-1 rounded-full px-2 text-primary hover:bg-primary/10"
-              >
-                <span className="material-symbols-outlined !text-[16px]">content_cut</span>
-                <span className="text-[9px] font-black uppercase">Cut</span>
-              </button>
-              <button
-                type="button"
-                aria-label={`Remove ${selectedSection.label}`}
-                title="Remove section"
-                onClick={() => onRemove(selectedSection.id)}
-                className="flex h-6 w-6 items-center justify-center rounded-full text-error hover:bg-error/10"
-              >
-                <span className="material-symbols-outlined !text-[16px]">close</span>
-              </button>
-            </div>
-          )}
-
           <div data-timeline-overlay className="fixed right-3 top-1/2 z-[250001] flex -translate-y-1/2 flex-col gap-2">
             <button
               type="button"
@@ -1134,14 +1416,14 @@ export default function TimelineArrangement({
           </div>
 
           {isSequenceOpen && (
-            <div data-timeline-overlay className="fixed inset-0 z-[250000] flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-center md:p-4" onMouseDown={(event) => {
+            <div data-timeline-overlay role="dialog" aria-modal="true" aria-labelledby="timeline-sequence-title" className="fixed inset-0 z-[250000] flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-center md:p-4" onMouseDown={(event) => {
               if (event.target === event.currentTarget) setIsSequenceOpen(false);
             }}>
               <aside className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-t-3xl border border-outline-variant/30 bg-surface-container shadow-2xl animate-in slide-in-from-bottom-full duration-300 md:rounded-3xl md:animate-in md:zoom-in-95">
                 <div className="flex items-center justify-between border-b border-outline-variant/30 p-5">
                   <div>
-                    <h3 className="text-base font-black text-on-surface">Timeline sequence</h3>
-                    <p className="mt-1 text-[10px] font-semibold text-on-surface-variant">{sections.length} sections · arrangement order</p>
+                    <h3 id="timeline-sequence-title" className="text-base font-black text-on-surface">Timeline sequence</h3>
+                    <p className="mt-1 text-[10px] font-semibold text-on-surface-variant">Hold and drag to rearrange · {sections.length} sections</p>
                   </div>
                   <button type="button" onClick={() => setIsSequenceOpen(false)} aria-label="Close timeline sequence" className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright">
                     <span className="material-symbols-outlined !text-[18px]">close</span>
@@ -1155,7 +1437,16 @@ export default function TimelineArrangement({
                       key={section.id}
                       type="button"
                       data-section-id={section.id}
+                      data-sequence-index={index}
+                      onPointerDown={(event) => handleSequencePointerDown(event, section, index)}
+                      onPointerMove={handleSequencePointerMove}
+                      onPointerUp={finishSequencePointer}
+                      onPointerCancel={cancelSequencePointer}
                       onClick={() => {
+                        if (sequenceDragJustFinishedRef.current) {
+                          sequenceDragJustFinishedRef.current = false;
+                          return;
+                        }
                         setSelectedSectionId(section.id);
                         setSelectedLaneType(section.type);
                         document.getElementById(`timeline-clip-${section.id}`)?.scrollIntoView({
@@ -1165,14 +1456,23 @@ export default function TimelineArrangement({
                         });
                         setIsSequenceOpen(false);
                       }}
-                      className={`flex w-full items-center gap-3 rounded-xl border px-3 py-3 text-left transition-colors ${selectedSectionId === section.id ? "border-primary/50 bg-primary/10" : "border-transparent bg-surface-container-lowest hover:bg-surface-container-high"}`}
+                      onKeyDown={(event) => {
+                        if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+                        event.preventDefault();
+                        const nextIndex = index + (event.key === "ArrowUp" ? -1 : 1);
+                        if (isSingleLaneView) {
+                          setIsSingleLaneView(false);
+                          return;
+                        }
+                        if (nextIndex >= 0 && nextIndex < sections.length) onReorder(section.id, nextIndex, 0);
+                      }}
+                      aria-label={`${section.label}, ${formatMeasureBeat(durations[index])}. Hold and drag to reorder. Use Alt+Arrow keys to move.`}
+                      className={`flex w-full items-center gap-3 rounded-xl border px-3 py-3 text-left touch-pan-y transition-colors ${sequenceDraggingId === section.id ? "border-primary bg-primary/15 opacity-70" : selectedSectionId === section.id ? "border-primary/50 bg-primary/10" : "border-transparent bg-surface-container-lowest hover:bg-surface-container-high"} ${sequenceDropIndex === index ? "ring-1 ring-inset ring-primary" : ""}`}
                     >
                       <span className="w-7 shrink-0 text-right font-mono text-[10px] font-bold text-on-surface-variant">{String(index + 1).padStart(2, "0")}</span>
                       <span className={`h-3 w-3 shrink-0 rounded-sm ${colorForSection(section.type).split(" ").find((className) => className.startsWith("bg-")) ?? "bg-primary"}`} />
                       <span className="min-w-0 flex-1 truncate text-xs font-black text-on-surface">{section.label}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-on-surface-variant">
-                        {(durations[index] / quarterBeatsPerBar).toFixed(1)} bars
-                      </span>
+                      <span className="shrink-0 font-mono text-[10px] text-on-surface-variant">{formatMeasureBeat(durations[index])}</span>
                     </button>
                   ))}
                 </div>
@@ -1219,6 +1519,34 @@ export default function TimelineArrangement({
                   Downbeat offset (seconds)
                   <input aria-label="Downbeat offset in seconds" type="number" step="0.01" value={offsetDraft} onChange={(event) => setOffsetDraft(event.target.value)} className="w-full rounded-lg border border-outline-variant/40 bg-surface-container-low px-3 py-2" />
                 </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={onPlayFromDownbeat} className="flex items-center justify-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-low px-3 py-2.5 text-xs font-bold text-on-surface hover:bg-surface-container-high">
+                    <span className="material-symbols-outlined !text-[16px]">play_arrow</span>
+                    Play from offset
+                  </button>
+                  <button type="button" onClick={() => {
+                    const capturedOffset = onCaptureDownbeat();
+                    if (capturedOffset !== null) setOffsetDraft((capturedOffset / 1000).toFixed(2));
+                  }} className="flex items-center justify-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-low px-3 py-2.5 text-xs font-bold text-on-surface hover:bg-surface-container-high">
+                    <span className="material-symbols-outlined !text-[16px]">pin_drop</span>
+                    Capture current time
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={onSeekToZero} className="flex items-center justify-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-low px-3 py-2.5 text-xs font-bold text-on-surface hover:bg-surface-container-high">
+                    <span className="material-symbols-outlined !text-[16px]">skip_previous</span>
+                    Seek to 0
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onToggleMetronome}
+                    aria-pressed={!isMetronomeMuted}
+                    className={`flex items-center justify-center gap-1 rounded-xl border px-3 py-2.5 text-xs font-bold ${isMetronomeMuted ? "border-error/30 bg-error/10 text-error hover:bg-error/20" : "border-emerald-500/30 bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20"}`}
+                  >
+                    <span className="material-symbols-outlined !text-[16px]">{isMetronomeMuted ? "volume_off" : "volume_up"}</span>
+                    {isMetronomeMuted ? "Metronome off" : "Metronome on"}
+                  </button>
+                </div>
                 <button type="button" onClick={() => {
                   onDownbeatOffsetChange(Math.round((Number(offsetDraft) || 0) * 1000));
                   setIsSettingsOpen(false);

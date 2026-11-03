@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
@@ -58,6 +58,7 @@ interface SectionTimingMap {
 
 interface TimelineUndoSnapshot {
   sections: SongSectionBlock[];
+  sectionTimings: SectionTimingMap;
   durations: Record<string, number>;
   gaps: Record<string, number>;
   meterNumerator: number;
@@ -70,6 +71,13 @@ interface TimelineUndoSnapshot {
 interface TimelineClipboardItem {
   section: SongSectionBlock;
   durationBeats: number;
+}
+
+interface SongMetadataResult {
+  title: string;
+  artist: string;
+  bpm: number;
+  key: string;
 }
 
 // ✅ SURGICAL FIX: Dark-mode ready section palette colors matching the dashboard aesthetic
@@ -102,6 +110,15 @@ const BASE_LETTER_ROOTS = ["C", "D", "E", "F", "G", "A", "B"];
 const normalizeKeyNote = (note: string): string => {
   const flatMap: { [key: string]: string } = { "Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#" };
   return flatMap[note] || note;
+};
+
+const normalizeMetadataKey = (key: string): string => {
+  const firstOption = key.replaceAll("♯", "#").replaceAll("♭", "b").split("/")[0].trim();
+  const match = firstOption.match(/^([A-G])([#b]?)(?:\s*(m|minor|major))?$/i);
+  if (!match) return "";
+  const root = `${match[1].toUpperCase()}${match[2] ?? ""}`;
+  const mode = match[3]?.toLowerCase();
+  return `${root}${mode === "m" || mode === "minor" ? "m" : ""}`;
 };
 
 const transposeBracketContent = (contentStr: string, semitones: number): string => {
@@ -283,6 +300,11 @@ export default function SongEditPage() {
   const [isConfirmExitModalOpen, setIsConfirmExitModalOpen] = useState(false);
   const [pendingNavigationUrl, setPendingNavigationUrl] = useState<string | null>(null); 
   const [editorActiveTab, setEditorActiveTab] = useState<"details" | "content" | "track" | "structure" | "timeline">("details");
+  const [pendingTimelineInsertionIndex, setPendingTimelineInsertionIndex] = useState<number | null>(null);
+  const [pendingTimelineAnchorSectionId, setPendingTimelineAnchorSectionId] = useState<string | null>(null);
+  const [pendingTimelineSourceSectionId, setPendingTimelineSourceSectionId] = useState<string | null>(null);
+  const [pendingTimelineFocusSectionId, setPendingTimelineFocusSectionId] = useState<string | null>(null);
+  const [pendingContentSectionScrollId, setPendingContentSectionScrollId] = useState<string | null>(null);
 
   const [formTitle, setFormTitle] = useState("");
   const [formTempo, setFormTempo] = useState("");
@@ -304,6 +326,15 @@ export default function SongEditPage() {
   const [timelineClipboard, setTimelineClipboard] = useState<TimelineClipboardItem | null>(null);
   const timelineUndoStackRef = useRef<TimelineUndoSnapshot[]>([]);
   const [timelineUndoCount, setTimelineUndoCount] = useState(0);
+  const [duplicateDurationPrompt, setDuplicateDurationPrompt] = useState<{
+    sectionId: string;
+    sectionType: string;
+    durationBeats?: number;
+    lineDurations?: number[];
+    timingChange?: { field: keyof SectionTimingMap[string]; value: number };
+    lineChange?: { sourceLineIndex: number; field: "measures" | "beats"; value: number };
+  } | null>(null);
+  const seekTimelineLineRef = useRef<(direction: "previous" | "next") => void>(() => {});
 
   // ✅ SURGICAL ADDITION: Track Markers Engine
   interface TrackMarker { id: string; sectionId: string; time: number; type: string; label: string; color: string; }
@@ -512,6 +543,40 @@ export default function SongEditPage() {
       commitSequence(trackMarkersRef.current);
     }
     setEditorActiveTab(nextTab);
+  };
+
+  useEffect(() => {
+    if (editorActiveTab !== "content" || !pendingContentSectionScrollId) return;
+    const frameId = window.requestAnimationFrame(() => {
+      document.getElementById(`song-content-section-${pendingContentSectionScrollId}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+      setPendingContentSectionScrollId(null);
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [editorActiveTab, pendingContentSectionScrollId, formSections]);
+
+  const navigateToContentSection = (sectionId: string) => {
+    setPendingContentSectionScrollId(sectionId);
+    handleEditorTabChange("content");
+  };
+
+  const navigateToTimelineSection = (sectionId: string) => {
+    setPendingTimelineFocusSectionId(sectionId);
+    handleEditorTabChange("timeline");
+  };
+
+  const clearPendingTimelineFocus = useCallback(() => {
+    setPendingTimelineFocusSectionId(null);
+  }, []);
+
+  const openTimelineSectionPicker = (insertionIndex: number) => {
+    setEditorActiveTab("timeline");
+    setPendingTimelineInsertionIndex(insertionIndex);
+    setSectionModalSearch("");
+    setSectionModalSelected(null);
+    setSectionModalConfig({ isOpen: true, mode: "add" });
   };
 
   const addTrackMarker = (sectionId: string, baseType: string, label: string, color: string) => {
@@ -821,11 +886,18 @@ export default function SongEditPage() {
   const ytTimeTrackerRef = useRef<number | null>(null);
 
   // ✅ SURGICAL ADDITION: Real-time Metronome Mute state
-  const [isMetronomeMuted, setIsMetronomeMuted] = useState(false);
+  const [metronomeMuteState, setMetronomeMuteState] = useState({ songId: editingSongId, muted: true });
+  const isMetronomeMuted = metronomeMuteState.songId === editingSongId ? metronomeMuteState.muted : true;
+  const setIsMetronomeMuted = (muted: boolean) => setMetronomeMuteState({ songId: editingSongId, muted });
   const isMetronomeMutedRef = useRef(false);
   useEffect(() => {
     isMetronomeMutedRef.current = isMetronomeMuted;
   }, [isMetronomeMuted]);
+
+  const [isSongMetadataModalOpen, setIsSongMetadataModalOpen] = useState(false);
+  const [isSongMetadataLoading, setIsSongMetadataLoading] = useState(false);
+  const [songMetadataError, setSongMetadataError] = useState<string | null>(null);
+  const [songMetadataResults, setSongMetadataResults] = useState<SongMetadataResult[]>([]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1039,7 +1111,7 @@ function formatTimeWithMs(seconds: number) {
   const [multiSelectedChords, setMultiSelectedChords] = useState<{sectionType: string, lineIdx: number, wordIdx: number}[]>([]);
   const [selectedStagedChordIndices, setSelectedStagedChordIndices] = useState<number[]>([]);
 
-  const [sectionAdjustmentsConfig, setSectionAdjustmentsConfig] = useState<{ isOpen: boolean; sectionType: string | null }>({ isOpen: false, sectionType: null });
+  const [sectionAdjustmentsConfig, setSectionAdjustmentsConfig] = useState<{ isOpen: boolean; sectionType: string | null; sectionId: string | null }>({ isOpen: false, sectionType: null, sectionId: null });
   const [adjustmentsModalTab, setAdjustmentsModalTab] = useState<"section" | "lines">("section"); 
   const [chordPickerConfig, setChordPickerConfig] = useState<{ isOpen: boolean; sectionType: string | null; lineIdx: number; wordIdx: number; cleanWord: string }>({ isOpen: false, sectionType: null, lineIdx: -1, wordIdx: -1, cleanWord: "" });
   const [pickerLayoutView, setPickerLayoutView] = useState<"family" | "manual">("family");
@@ -1047,6 +1119,7 @@ function formatTimeWithMs(seconds: number) {
   const [manualExtensionNumber, setManualExtensionNumber] = useState("");
 
   const [sectionModalConfig, setSectionModalConfig] = useState<{ isOpen: boolean, mode: "add" | "reassign", targetId?: string }>({ isOpen: false, mode: "add" });
+  const [pendingTimelineSectionType, setPendingTimelineSectionType] = useState<string | null>(null);
   const [sectionModalSearch, setSectionModalSearch] = useState("");
   const [sectionModalSelected, setSectionModalSelected] = useState<string | null>(null);
 
@@ -1124,6 +1197,57 @@ function formatTimeWithMs(seconds: number) {
     } finally {
       setIsFetchingLyrics(false);
     }
+  };
+
+  const handleSongMetadataLookup = async () => {
+    setIsSongMetadataModalOpen(true);
+    setIsSongMetadataLoading(true);
+    setSongMetadataError(null);
+    setSongMetadataResults([]);
+    if (!formTitle.trim() || !formArtist.trim()) {
+      setSongMetadataError("Enter both the song title and artist before searching.");
+      setIsSongMetadataLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/song-metadata", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: formTitle, artist: formArtist }),
+      });
+      const data = await response.json() as { error?: string; results?: unknown };
+      if (!response.ok) throw new Error(data.error || "Song metadata lookup failed.");
+      if (!Array.isArray(data.results)) throw new Error("SongBPM returned an invalid response.");
+
+      const results = data.results.flatMap((result): SongMetadataResult[] => {
+        if (!result || typeof result !== "object") return [];
+        const candidate = result as Partial<SongMetadataResult>;
+        const key = typeof candidate.key === "string" ? normalizeMetadataKey(candidate.key) : "";
+        if (
+          typeof candidate.title !== "string" ||
+          typeof candidate.artist !== "string" ||
+          typeof candidate.bpm !== "number" ||
+          !Number.isInteger(candidate.bpm) ||
+          !key
+        ) return [];
+        return [{ title: candidate.title, artist: candidate.artist, bpm: candidate.bpm, key }];
+      });
+      setSongMetadataResults(results);
+      if (results.length === 0) setSongMetadataError("No matching songs with BPM and key data were found.");
+    } catch (error) {
+      console.error("Failed to look up song BPM and key.", error);
+      setSongMetadataError(error instanceof Error ? error.message : "Song metadata lookup failed.");
+    } finally {
+      setIsSongMetadataLoading(false);
+    }
+  };
+
+  const handleSelectSongMetadata = (result: SongMetadataResult) => {
+    setFormTempo(String(result.bpm));
+    setFormKey(result.key);
+    setHasUnsavedChanges(true);
+    setIsSongMetadataModalOpen(false);
   };
 
   const handleSelectLyricsCard = async (opt: any) => {
@@ -1205,7 +1329,15 @@ function formatTimeWithMs(seconds: number) {
 
     if (sectionModalConfig.mode === "add") {
       if (editorActiveTab === "timeline") {
-        handleAddTimelineSection(tmpl.computedDisplay, formSections.length);
+        if (pendingTimelineAnchorSectionId !== null) {
+          setPendingTimelineSourceSectionId(null);
+          setPendingTimelineSectionType(tmpl.computedDisplay);
+        } else if (pendingTimelineInsertionIndex !== null) {
+          handleAddTimelineSection(tmpl.computedDisplay, pendingTimelineInsertionIndex);
+          setPendingTimelineInsertionIndex(null);
+        } else {
+          setPendingTimelineSectionType(tmpl.computedDisplay);
+        }
         setSectionModalConfig({ isOpen: false, mode: "add" });
         return;
       }
@@ -1225,6 +1357,8 @@ function formatTimeWithMs(seconds: number) {
           : item
       ));
     }
+    setPendingTimelineInsertionIndex(null);
+    setPendingTimelineAnchorSectionId(null);
     setSectionModalConfig({ isOpen: false, mode: "add" });
   };
 
@@ -1520,7 +1654,25 @@ function formatTimeWithMs(seconds: number) {
         return;
       }
 
-      if (isConfirmExitModalOpen || isImportModalOpen || isKeyPopupOpen || isTapBpmModalOpen) {
+      if (
+        isConfirmExitModalOpen ||
+        isImportModalOpen ||
+        isKeyPopupOpen ||
+        isTapBpmModalOpen ||
+        isSongMetadataModalOpen ||
+        isTimelineChaptersOpen ||
+        sectionModalConfig.isOpen ||
+        sectionAdjustmentsConfig.isOpen ||
+        chordPickerConfig.isOpen ||
+        pendingTimelineSectionType !== null
+      ) {
+        return;
+      }
+
+      if (e.key.toLowerCase() === "u" || e.key.toLowerCase() === "o") {
+        if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+        e.preventDefault();
+        seekTimelineLineRef.current(e.key.toLowerCase() === "u" ? "previous" : "next");
         return;
       }
 
@@ -1578,7 +1730,22 @@ function formatTimeWithMs(seconds: number) {
 
     window.addEventListener("keydown", handleMediaShortcuts);
     return () => window.removeEventListener("keydown", handleMediaShortcuts);
-  }, [ytPlaying, ytCurrentTime, ytDuration, initAudioContext, isConfirmExitModalOpen, isImportModalOpen, isKeyPopupOpen, isTapBpmModalOpen]);
+  }, [
+    ytPlaying,
+    ytCurrentTime,
+    ytDuration,
+    initAudioContext,
+    isConfirmExitModalOpen,
+    isImportModalOpen,
+    isKeyPopupOpen,
+    isTapBpmModalOpen,
+    isSongMetadataModalOpen,
+    isTimelineChaptersOpen,
+    sectionModalConfig.isOpen,
+    sectionAdjustmentsConfig.isOpen,
+    chordPickerConfig.isOpen,
+    pendingTimelineSectionType,
+  ]);
 
   useEffect(() => {
     if (!youtubeVideoId) {
@@ -1650,7 +1817,9 @@ function formatTimeWithMs(seconds: number) {
       chordMode !== "Off" || 
       chordPickerConfig.isOpen || 
       sectionAdjustmentsConfig.isOpen || 
-      sectionModalConfig.isOpen;
+      sectionModalConfig.isOpen ||
+      pendingTimelineSectionType !== null ||
+      isSongMetadataModalOpen;
     
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("onpraise-ui-focus", { detail: isEditingFocused }));
@@ -1661,16 +1830,25 @@ function formatTimeWithMs(seconds: number) {
         window.dispatchEvent(new CustomEvent("onpraise-ui-focus", { detail: false }));
       }
     };
-  }, [chordMode, chordPickerConfig.isOpen, sectionAdjustmentsConfig.isOpen, sectionModalConfig.isOpen]);
+  }, [chordMode, chordPickerConfig.isOpen, isSongMetadataModalOpen, pendingTimelineSectionType, sectionAdjustmentsConfig.isOpen, sectionModalConfig.isOpen]);
 
 
   const handleCaptureSyncPoint = () => {
     if (isYtPlayerReadyRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
-      try {
-        const currentTimeSecs = ytPlayerRef.current.getCurrentTime();
-        setFormYoutubeSyncOffset(Math.round(currentTimeSecs * 1000));
-        setHasUnsavedChanges(true);
-      } catch(e) {}
+      const currentTimeSecs = ytPlayerRef.current.getCurrentTime();
+      const offsetMs = Math.round(currentTimeSecs * 1000);
+      setFormYoutubeSyncOffset(offsetMs);
+      setHasUnsavedChanges(true);
+      return offsetMs;
+    }
+    return null;
+  };
+
+  const handlePlayFromSyncPoint = () => {
+    initAudioContext();
+    if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
+      ytPlayerRef.current.seekTo(formYoutubeSyncOffset / 1000, true);
+      ytPlayerRef.current.playVideo();
     }
   };
 
@@ -1717,8 +1895,12 @@ function formatTimeWithMs(seconds: number) {
 
   const getCentralizedMetricsTuple = (sectionType: string) => {
     const savedMetrics = sectionTimings[sectionType];
+    const sectionLineCount = formSections.find((section) => section.type === sectionType)?.content
+      .split("\n")
+      .filter((line) => line.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0)
+      .length ?? 0;
     return {
-      measures: savedMetrics?.measures ?? 4,
+      measures: savedMetrics?.measures ?? (sectionLineCount || 4),
       beats: savedMetrics?.beats ?? 0,
       repeats: savedMetrics?.repeats ?? 0,
       head_m: savedMetrics?.head_m ?? 0,
@@ -1732,11 +1914,109 @@ function formatTimeWithMs(seconds: number) {
       const currentTuple = prev[sectionType] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
       return { ...prev, [sectionType]: { ...currentTuple, [field]: value } };
     });
+    const sectionIds = new Set(formSections.filter((section) => section.type === sectionType).map((section) => section.id));
+    setTimelineDurationOverrides((previous) => Object.fromEntries(
+      Object.entries(previous).filter(([sectionId]) => !sectionIds.has(sectionId)),
+    ));
+  };
+
+  const isLaterDuplicateOccurrence = (sectionId: string, sectionType: string) => {
+    const firstOccurrence = formSections.find((section) => section.type === sectionType);
+    return Boolean(firstOccurrence && firstOccurrence.id !== sectionId);
+  };
+
+  const createSeparateSectionOccurrence = (sectionId: string, sectionType: string) => {
+    const section = formSections.find((item) => item.id === sectionId);
+    if (!section) return null;
+    const baseType = sectionType.replace(/\s+\d+$/, "");
+    const maxSuffix = formSections.reduce((max, item) => {
+      if (item.type === baseType) return Math.max(max, 1);
+      const match = item.type.match(new RegExp(`^${baseType.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+(\\d+)$`));
+      return match ? Math.max(max, Number(match[1])) : max;
+    }, 1);
+    const nextType = `${baseType} ${maxSuffix + 1}`;
+    setFormSections((previous) => previous.map((item) =>
+      item.id === sectionId ? { ...item, type: nextType, label: nextType } : item,
+    ));
+    setSectionTimings((previous) => ({
+      ...previous,
+      [nextType]: { ...(previous[sectionType] ?? { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 }) },
+    }));
+    setLineOverrides((previous) => previous
+      ? { ...previous, [nextType]: { ...(previous[sectionType] ?? {}) } }
+      : previous);
+    setHasUnsavedChanges(true);
+    return nextType;
+  };
+
+  const handleContentTimingChange = (
+    sectionId: string,
+    sectionType: string,
+    field: keyof SectionTimingMap[string],
+    value: number,
+  ) => {
+    if (isLaterDuplicateOccurrence(sectionId, sectionType)) {
+      setDuplicateDurationPrompt({ sectionId, sectionType, timingChange: { field, value } });
+      return;
+    }
+    handleUpdateCentralizedMetrics(sectionType, field, value);
+    setLineOverrides((previous) => {
+      if (!previous) return {};
+      const next = { ...previous };
+      delete next[sectionType];
+      return next;
+    });
+  };
+
+  const handleContentLineTimingChange = (
+    sectionId: string,
+    sectionType: string,
+    sourceLineIndex: number,
+    field: "measures" | "beats",
+    value: number,
+  ) => {
+    if (isLaterDuplicateOccurrence(sectionId, sectionType)) {
+      setDuplicateDurationPrompt({
+        sectionId,
+        sectionType,
+        lineChange: { sourceLineIndex, field, value },
+      });
+      return;
+    }
+    const section = formSections.find((item) => item.id === sectionId);
+    if (!section) return;
+    const lyricLines = section.content
+      .split("\n")
+      .map((rawText, lineIndex) => ({ rawText, lineIndex }))
+      .filter(({ rawText }) => rawText.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0);
+    const metrics = getCentralizedMetricsTuple(sectionType);
+    const lineCount = Math.max(1, lyricLines.length);
+    const spreadMeasures = Math.floor(metrics.measures / lineCount);
+    const remainderMeasures = metrics.measures % lineCount;
+    const spreadBeats = Math.floor(metrics.beats / lineCount);
+    const remainderBeats = metrics.beats % lineCount;
+    setLineOverrides((previous) => {
+      const sectionOverrides = { ...(previous?.[sectionType] ?? {}) };
+      lyricLines.forEach((line, ordinal) => {
+        if (sectionOverrides[line.lineIndex] === undefined) {
+          sectionOverrides[line.lineIndex] = {
+            measures: spreadMeasures + (ordinal < remainderMeasures ? 1 : 0),
+            beats: spreadBeats + (ordinal < remainderBeats ? 1 : 0),
+          };
+        }
+      });
+      sectionOverrides[sourceLineIndex] = {
+        ...sectionOverrides[sourceLineIndex],
+        [field]: value,
+      };
+      return { ...(previous ?? {}), [sectionType]: sectionOverrides };
+    });
+    setHasUnsavedChanges(true);
   };
 
   const getDefaultTimelineDuration = (sectionType: string) => {
     if (sectionType.startsWith("Spacer")) return 1;
-    const metrics = sectionTimings[sectionType] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
+    const metrics = getCentralizedMetricsTuple(sectionType);
     const quarterBeatsPerMeasure = timelineMeterNumerator * (4 / timelineMeterDenominator);
     const measures = Math.max(0, Number(metrics.measures ?? 4));
     const beats = Math.max(0, Number(metrics.beats ?? 0));
@@ -1749,6 +2029,7 @@ function formatTimeWithMs(seconds: number) {
   const recordTimelineUndo = () => {
     const snapshot: TimelineUndoSnapshot = {
       sections: formSections.map((section) => ({ ...section })),
+      sectionTimings: { ...sectionTimings },
       durations: { ...timelineDurationOverrides },
       gaps: { ...timelineGapOverrides },
       meterNumerator: timelineMeterNumerator,
@@ -1767,6 +2048,7 @@ function formatTimeWithMs(seconds: number) {
     timelineUndoStackRef.current = timelineUndoStackRef.current.slice(0, -1);
     setTimelineUndoCount(timelineUndoStackRef.current.length);
     setFormSections(previous.sections);
+    setSectionTimings(previous.sectionTimings);
     setTimelineDurationOverrides(previous.durations);
     setTimelineGapOverrides(previous.gaps);
     setTimelineMeterNumerator(previous.meterNumerator);
@@ -1780,11 +2062,14 @@ function formatTimeWithMs(seconds: number) {
     setHasUnsavedChanges(true);
   };
 
-  const handleTimelineUpdateLineDurations = (sectionId: string, sectionType: string, lineDurations: number[]) => {
-    recordTimelineUndo();
+  const applyTimelineLineDurations = (sectionId: string, sectionType: string, lineDurations: number[]) => {
     const newOverrides: Record<number, { measures: number; beats: number }> = {};
+    const section = formSections.find((item) => item.id === sectionId);
+    const lyricLines = section ? getTimelineLyrics(section) : [];
     lineDurations.forEach((duration, lineIndex) => {
-      newOverrides[lineIndex] = {
+      const sourceLineIndex = lyricLines[lineIndex]?.lineIndex;
+      if (sourceLineIndex === undefined) return;
+      newOverrides[sourceLineIndex] = {
         measures: Math.floor(duration / 4),
         beats: duration % 4,
       };
@@ -1793,7 +2078,30 @@ function formatTimeWithMs(seconds: number) {
       ...(prev || {}),
       [sectionType]: newOverrides,
     }));
+    const totalBeats = lineDurations.reduce((total, duration) => total + duration, 0);
+    setSectionTimings((previous) => ({
+      ...previous,
+      [sectionType]: {
+        ...(previous[sectionType] ?? { measures: 0, beats: 0, repeats: 0, head_m: 0, tail_m: 0 }),
+        measures: Math.floor(totalBeats / 4),
+        beats: totalBeats % 4,
+      },
+    }));
+    setTimelineDurationOverrides((previous) => Object.fromEntries(
+      Object.entries(previous).filter(([id]) =>
+        id !== sectionId && formSections.find((item) => item.id === id)?.type !== sectionType,
+      ),
+    ));
     setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineUpdateLineDurations = (sectionId: string, sectionType: string, lineDurations: number[]) => {
+    if (isLaterDuplicateOccurrence(sectionId, sectionType)) {
+      setDuplicateDurationPrompt({ sectionId, sectionType, lineDurations });
+      return;
+    }
+    recordTimelineUndo();
+    applyTimelineLineDurations(sectionId, sectionType, lineDurations);
   };
 
   const handleAddTimelineSection = (sectionType: string, insertionIndex: number) => {
@@ -1807,6 +2115,26 @@ function formatTimeWithMs(seconds: number) {
       next.splice(Math.max(0, Math.min(insertionIndex, next.length)), 0, newSection);
       return next;
     });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleDuplicateTimelineSection = (sectionId: string, insertionIndex: number) => {
+    const sourceSection = formSections.find((section) => section.id === sectionId);
+    if (!sourceSection) return;
+    recordTimelineUndo();
+    const duplicate: SongSectionBlock = {
+      ...sourceSection,
+      id: `sec-${crypto.randomUUID()}`,
+    };
+    setFormSections((previous) => {
+      const next = [...previous];
+      next.splice(Math.max(0, Math.min(insertionIndex, next.length)), 0, duplicate);
+      return next;
+    });
+    const sourceDuration = timelineDurationOverrides[sourceSection.id];
+    if (sourceDuration !== undefined) {
+      setTimelineDurationOverrides((previous) => ({ ...previous, [duplicate.id]: sourceDuration }));
+    }
     setHasUnsavedChanges(true);
   };
 
@@ -1874,18 +2202,25 @@ function formatTimeWithMs(seconds: number) {
     setHasUnsavedChanges(true);
   };
 
-  const handleTimelineResize = (sectionId: string, durationBeats: number) => {
-    recordTimelineUndo();
+  const applyTimelineResize = (
+    sectionId: string,
+    sectionType: string,
+    durationBeats: number,
+    currentLineDurs: number[],
+    sourceSectionType = sectionType,
+  ) => {
     const section = formSections.find((item) => item.id === sectionId);
 
     if (section && !section.type.toLowerCase().startsWith("spacer")) {
-      const currentLineDurs = [...(timelineLineDurationsBySectionId[sectionId] || [])];
+      const lyricLines = section ? getTimelineLyrics(section) : [];
 
       if (currentLineDurs.length > 0) {
+        const existingTiming = sectionTimings[sourceSectionType] ?? { repeats: 0, head_m: 0, tail_m: 0 };
+        const passes = Math.max(0, Number(existingTiming.repeats) || 0) + 1;
+        const paddingBeats = (Number(existingTiming.head_m) || 0) * 4 + (Number(existingTiming.tail_m) || 0) * 4;
         const currentTotal = currentLineDurs.reduce((sum, d) => sum + d, 0);
-        // Minimum section length is 1 beat per line
         const minPossibleTotal = currentLineDurs.length;
-        const targetTotal = Math.max(minPossibleTotal, Math.round(durationBeats));
+        const targetTotal = Math.max(minPossibleTotal, Math.round((durationBeats - paddingBeats) / passes));
         const delta = targetTotal - currentTotal;
 
         if (delta > 0) {
@@ -1905,45 +2240,132 @@ function formatTimeWithMs(seconds: number) {
         // Write to lineOverrides
         const newOverrides: Record<number, { measures: number; beats: number }> = {};
         currentLineDurs.forEach((d, lineIndex) => {
-          newOverrides[lineIndex] = {
+          const sourceLineIndex = lyricLines[lineIndex]?.lineIndex;
+          if (sourceLineIndex === undefined) return;
+          newOverrides[sourceLineIndex] = {
             measures: Math.floor(d / 4),
             beats: d % 4,
           };
         });
-        setLineOverrides((prev) => ({
-          ...(prev || {}),
-          [section.type]: newOverrides,
-        }));
+        setLineOverrides((prev) => ({ ...(prev || {}), [sectionType]: newOverrides }));
 
-        const finalSectionDuration = currentLineDurs.reduce((sum, d) => sum + d, 0);
-        setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: finalSectionDuration }));
+        const finalBasePassDuration = currentLineDurs.reduce((sum, d) => sum + d, 0);
 
-        // ✅ SURGICAL FIX: Save total duration locally but DO NOT force write to sectionTimings blindly
-        // The total beats includes the repeats. To extract the raw base measures/beats, we reverse the math:
-        setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: finalSectionDuration }));
-        
         setSectionTimings((prev) => {
-           const existing = prev[section.type] || { repeats: 0, head_m: 0, tail_m: 0 };
-           const mult = (Number(existing.repeats) || 0) + 1;
-           const paddingBeats = (Number(existing.head_m || 0) * 4) + (Number(existing.tail_m || 0) * 4);
-           // Calculate what the core pass should be to equal the final total
-           const baseCoreBeats = Math.max(0, Math.round((finalSectionDuration - paddingBeats) / mult));
+           const existing = prev[sourceSectionType] || { repeats: 0, head_m: 0, tail_m: 0 };
            return {
              ...prev,
-             [section.type]: {
+             [sectionType]: {
                ...existing,
-               measures: Math.floor(baseCoreBeats / 4),
-               beats: baseCoreBeats % 4,
+               measures: Math.floor(finalBasePassDuration / 4),
+               beats: finalBasePassDuration % 4,
              },
            };
         });
       } else {
-        setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: Math.max(1, Math.round(durationBeats)) }));
+        const timing = sectionTimings[sourceSectionType] ?? { repeats: 0, head_m: 0, tail_m: 0 };
+        const passes = Math.max(0, Number(timing.repeats) || 0) + 1;
+        const paddingBeats = ((Number(timing.head_m) || 0) + (Number(timing.tail_m) || 0)) * 4;
+        const baseDuration = Math.max(0, (durationBeats - paddingBeats) / passes);
+        setSectionTimings((previous) => ({
+          ...previous,
+          [sectionType]: {
+            ...(previous[sourceSectionType] ?? { measures: 0, beats: 0, repeats: 0, head_m: 0, tail_m: 0 }),
+            measures: Math.floor(baseDuration / 4),
+            beats: Number((baseDuration % 4).toFixed(3)),
+          },
+        }));
       }
+      setTimelineDurationOverrides((previous) => Object.fromEntries(
+        Object.entries(previous).filter(([id]) =>
+          id !== sectionId && formSections.find((item) => item.id === id)?.type !== sectionType,
+        ),
+      ));
     } else {
       setTimelineDurationOverrides((previous) => ({ ...previous, [sectionId]: Math.max(0.125, durationBeats) }));
     }
     setHasUnsavedChanges(true);
+  };
+
+  const handleTimelineResize = (sectionId: string, durationBeats: number) => {
+    const section = formSections.find((item) => item.id === sectionId);
+    if (!section) return;
+    if (!section.type.toLowerCase().startsWith("spacer") && isLaterDuplicateOccurrence(sectionId, section.type)) {
+      setDuplicateDurationPrompt({
+        sectionId,
+        sectionType: section.type,
+        durationBeats,
+      });
+      return;
+    }
+    recordTimelineUndo();
+    applyTimelineResize(
+      sectionId,
+      section.type,
+      durationBeats,
+      timelineLineDurationsBySectionId[sectionId] ?? [],
+    );
+  };
+
+  const createSeparateOccurrenceAndApplyDurationChange = () => {
+    const prompt = duplicateDurationPrompt;
+    if (!prompt) return;
+    const section = formSections.find((item) => item.id === prompt.sectionId);
+    if (!section) {
+      setDuplicateDurationPrompt(null);
+      return;
+    }
+
+    recordTimelineUndo();
+    const newType = createSeparateSectionOccurrence(prompt.sectionId, prompt.sectionType);
+    if (!newType) {
+      setDuplicateDurationPrompt(null);
+      return;
+    }
+
+    if (prompt.lineDurations) {
+      applyTimelineLineDurations(prompt.sectionId, newType, prompt.lineDurations);
+    } else if (prompt.durationBeats !== undefined) {
+      applyTimelineResize(
+        prompt.sectionId,
+        newType,
+        prompt.durationBeats,
+        timelineLineDurationsBySectionId[prompt.sectionId] ?? [],
+        prompt.sectionType,
+      );
+    } else if (prompt.timingChange) {
+      setSectionTimings((previous) => ({
+        ...previous,
+        [newType]: {
+          ...(previous[newType] ?? previous[prompt.sectionType] ?? { measures: 4, beats: 0 }),
+          [prompt.timingChange!.field]: prompt.timingChange!.value,
+        },
+      }));
+      setLineOverrides((previous) => {
+        if (!previous) return {};
+        const next = { ...previous };
+        delete next[newType];
+        return next;
+      });
+      setTimelineDurationOverrides((previous) => {
+        const next = { ...previous };
+        delete next[prompt.sectionId];
+        return next;
+      });
+    } else if (prompt.lineChange) {
+      setLineOverrides((previous) => {
+        const next = { ...(previous || {}) };
+        const sectionOverrides = { ...(next[newType] ?? next[prompt.sectionType] ?? {}) };
+        sectionOverrides[prompt.lineChange!.sourceLineIndex] = {
+          ...sectionOverrides[prompt.lineChange!.sourceLineIndex],
+          [prompt.lineChange!.field]: prompt.lineChange!.value,
+        };
+        next[newType] = sectionOverrides;
+        return next;
+      });
+    }
+    setHasUnsavedChanges(true);
+    setDuplicateDurationPrompt(null);
   };
 
   const handleTimelineRemove = (sectionId: string) => {
@@ -2175,14 +2597,14 @@ function formatTimeWithMs(seconds: number) {
         const remainderBeats = totalLines > 0 ? metrics.beats % totalLines : 0;
 
         let validLineCounter = 0;
-        const linesWithMetrics = lines.map((line) => {
+        const linesWithMetrics = lines.map((line, sourceLineIndex) => {
            const clean = line.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim();
            if (clean.length === 0) return line;
 
-           const override = (lineOverrides as any)?.[sec.type]?.[validLineCounter];
-           const m = override?.measures ?? (autoSpreadMeasures + (validLineCounter < remainderMeasures ? 1 : 0));
-           const b = override?.beats ?? (autoSpreadBeats + (validLineCounter < remainderBeats ? 1 : 0));
-           validLineCounter++;
+           const override = lineOverrides?.[sec.type]?.[sourceLineIndex];
+           const lineOrdinal = validLineCounter++;
+           const m = override?.measures ?? (autoSpreadMeasures + (lineOrdinal < remainderMeasures ? 1 : 0));
+           const b = override?.beats ?? (autoSpreadBeats + (lineOrdinal < remainderBeats ? 1 : 0));
 
            return `${line} (M: ${m}, B: ${b})`;
         });
@@ -2209,6 +2631,7 @@ function formatTimeWithMs(seconds: number) {
     const parsedBlocks: SongSectionBlock[] = [];
     let unassignedCounter = 1;
     const newExtractedTimings: SectionTimingMap = {};
+    let currentMeasureWasSpecified = false;
     
     const newLineOverrides: Record<string, Record<number, { measures: number; beats: number }>> = {};
 
@@ -2219,6 +2642,18 @@ function formatTimeWithMs(seconds: number) {
         finalType = `Unassigned ${unassignedCounter}`;
         unassignedCounter++;
       }
+      const lyricLineCount = currentBuffer.filter((line) =>
+        line.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0,
+      ).length;
+      const importedTiming = newExtractedTimings[finalType] ?? {
+        measures: Math.max(1, lyricLineCount),
+        beats: 0,
+        repeats: 0,
+        head_m: 0,
+        tail_m: 0,
+      };
+      if (!currentMeasureWasSpecified) importedTiming.measures = Math.max(1, lyricLineCount);
+      newExtractedTimings[finalType] = importedTiming;
       parsedBlocks.push({
         id: `sec-imp-${Date.now()}-${Math.random()}`,
         type: finalType,
@@ -2228,6 +2663,7 @@ function formatTimeWithMs(seconds: number) {
       });
       currentBuffer = [];
       currentSectionType = "";
+      currentMeasureWasSpecified = false;
     };
 
     cleanLines.forEach(line => {
@@ -2235,6 +2671,7 @@ function formatTimeWithMs(seconds: number) {
       if (match) {
         flushBuffer();
         currentSectionType = match[1].trim();
+        currentMeasureWasSpecified = false;
         if (match[2]) {
           const metricsStr = match[2];
           const extractedMetrics = { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
@@ -2244,7 +2681,10 @@ function formatTimeWithMs(seconds: number) {
           const hMatch = metricsStr.match(/H:\s*(\d+)/i);
           const tMatch = metricsStr.match(/T:\s*(\d+)/i);
 
-          if (mMatch) extractedMetrics.measures = parseInt(mMatch[1], 10);
+          if (mMatch) {
+            extractedMetrics.measures = parseInt(mMatch[1], 10);
+            currentMeasureWasSpecified = true;
+          }
           if (bMatch) extractedMetrics.beats = parseInt(bMatch[1], 10);
           if (rMatch) extractedMetrics.repeats = parseInt(rMatch[1], 10);
           if (hMatch) extractedMetrics.head_m = parseInt(hMatch[1], 10);
@@ -2269,8 +2709,7 @@ function formatTimeWithMs(seconds: number) {
            const b = parseInt(lineMetricMatch[3], 10);
            if (!newLineOverrides[currentSectionType]) newLineOverrides[currentSectionType] = {};
            
-           const currentLineIdx = currentBuffer.filter(l => l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0).length;
-           newLineOverrides[currentSectionType][currentLineIdx] = { measures: m, beats: b };
+           newLineOverrides[currentSectionType][currentBuffer.length] = { measures: m, beats: b };
         }
 
         currentBuffer.push(cleanLineForContent);
@@ -2287,16 +2726,17 @@ function formatTimeWithMs(seconds: number) {
         });
         return mergedTimings;
       });
-      
-      if (Object.keys(newLineOverrides).length > 0) {
-         setLineOverrides(prev => {
-            const merged = { ...(prev || {}) };
-            Object.keys(newLineOverrides).forEach(key => {
-               merged[key] = { ...(merged[key] || {}), ...newLineOverrides[key] };
-            });
-            return merged;
-         });
-      }
+      const importedTypes = new Set(parsedBlocks.map((section) => section.type));
+      setLineOverrides(prev => {
+        const merged = { ...(prev || {}) };
+        importedTypes.forEach((sectionType) => delete merged[sectionType]);
+        Object.keys(newLineOverrides).forEach(key => {
+          merged[key] = newLineOverrides[key];
+        });
+        return merged;
+      });
+      setTimelineDurationOverrides({});
+      setTimelineGapOverrides({});
     }
     setIsImportModalOpen(false); 
     setPastedRawLyricsText("");
@@ -2334,7 +2774,9 @@ function formatTimeWithMs(seconds: number) {
         let specificRowOverrides = lineOverrides?.[sec.type] || null;
 
         if (!specificRowOverrides) {
-          const processedLines = sec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim()).filter(l => l.length > 0);
+          const processedLines = sec.content.split("\n")
+            .map((line, lineIndex) => ({ lineIndex, cleanLine: line.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim() }))
+            .filter(({ cleanLine }) => cleanLine.length > 0);
           const totalLines = processedLines.length;
           
           const autoSpreadMeasures = totalLines > 0 ? Math.floor(metricsTuple.measures / totalLines) : 0;
@@ -2343,10 +2785,10 @@ function formatTimeWithMs(seconds: number) {
           const remainderBeats = totalLines > 0 ? metricsTuple.beats % totalLines : 0;
 
           specificRowOverrides = {};
-          processedLines.forEach((_, lIdx) => {
-            specificRowOverrides![lIdx] = {
-              measures: autoSpreadMeasures + (lIdx < remainderMeasures ? 1 : 0),
-              beats: autoSpreadBeats + (lIdx < remainderBeats ? 1 : 0)
+          processedLines.forEach(({ lineIndex }, ordinal) => {
+            specificRowOverrides![lineIndex] = {
+              measures: autoSpreadMeasures + (ordinal < remainderMeasures ? 1 : 0),
+              beats: autoSpreadBeats + (ordinal < remainderBeats ? 1 : 0)
             };
           });
         }
@@ -2463,11 +2905,15 @@ function formatTimeWithMs(seconds: number) {
   };
 
   const uniqueContentSectionsList = formSections.reduce((acc: SongSectionBlock[], curr) => { if (!acc.some(item => item.type === curr.type)) acc.push(curr); return acc; }, []);
+  const getTimelineLyrics = (section: SongSectionBlock) => section.content
+    .split("\n")
+    .map((rawText, lineIndex) => ({ rawText, lineIndex }))
+    .filter(({ rawText }) => rawText.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0);
+
   const timelineLineDurationsBySectionId = Object.fromEntries(formSections.map((section) => {
-    // ✅ SURGICAL FIX: Safely parse lines ignoring empty/comment rows
-    const lines = section.content.split("\n").filter(l => l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim().length > 0);
+    const lines = getTimelineLyrics(section);
     const lineCount = Math.max(1, lines.length);
-    const timing = sectionTimings[section.type] ?? { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
+    const timing = getCentralizedMetricsTuple(section.type);
     
     // ✅ SURGICAL FIX: The target must be the RAW base core duration WITHOUT repeats and padding!
     // The visual timeline automatically scales a single pass.
@@ -2481,7 +2927,7 @@ function formatTimeWithMs(seconds: number) {
     
     const sectionOverrides = lineOverrides?.[section.type];
     const durations = lines.map((line, lineIndex) => {
-      const saved = sectionOverrides?.[lineIndex];
+      const saved = sectionOverrides?.[line.lineIndex];
       const lineMeasures = Number(saved?.measures ?? autoSpreadMeasures + (lineIndex < remainderMeasures ? 1 : 0));
       const lineBeats = Number(saved?.beats ?? autoSpreadBeats + (lineIndex < remainderBeats ? 1 : 0));
       return Math.max(0, lineMeasures * 4 + lineBeats);
@@ -2489,6 +2935,18 @@ function formatTimeWithMs(seconds: number) {
     
     return [section.id, durations.some((duration) => duration > 0) ? durations : durations.map(() => 1)];
   }));
+  const timelineRepeatCountBySectionId = Object.fromEntries(formSections.map((section) => [
+    section.id,
+    Math.max(0, Number(sectionTimings[section.type]?.repeats) || 0),
+  ]));
+  const timelinePaddingBeatsBySectionId = Object.fromEntries(formSections.map((section) => [
+    section.id,
+    ((Number(sectionTimings[section.type]?.head_m) || 0) + (Number(sectionTimings[section.type]?.tail_m) || 0)) * 4,
+  ]));
+  const timelineHeadPaddingBeatsBySectionId = Object.fromEntries(formSections.map((section) => [
+    section.id,
+    (Number(sectionTimings[section.type]?.head_m) || 0) * 4,
+  ]));
   const timelineChapters = (() => {
     const bpm = parseInt(formTempo, 10) || 75;
     return formSections.reduce((result, section) => {
@@ -2516,39 +2974,30 @@ function formatTimeWithMs(seconds: number) {
       cursorBeat += duration;
       if (section.type.startsWith("Spacer") || currentBeat < sectionStart || currentBeat >= cursorBeat) continue;
 
-      const lines = section.content.split("\n");
-      const timing = sectionTimings[section.type] ?? { measures: 4, beats: 0, repeats: 0 };
-      const measureCount = Math.max(0, Number(timing.measures) || 0);
-      const beatCount = Math.max(0, Number(timing.beats) || 0);
-      const autoMeasures = lines.length > 0 ? Math.floor(measureCount / lines.length) : 0;
-      const remainderMeasures = lines.length > 0 ? measureCount % lines.length : 0;
-      const autoBeats = lines.length > 0 ? Math.floor(beatCount / lines.length) : 0;
-      const remainderBeats = lines.length > 0 ? beatCount % lines.length : 0;
-      const sectionOverrides = lineOverrides?.[section.type];
-      const lineEntries = lines.map((rawText, lineIndex) => {
-        const saved = sectionOverrides?.[lineIndex];
-        const lineMeasures = Number(saved?.measures ?? autoMeasures + (lineIndex < remainderMeasures ? 1 : 0));
-        const lineBeats = Number(saved?.beats ?? autoBeats + (lineIndex < remainderBeats ? 1 : 0));
-        return { rawText, lineIndex, beats: Math.max(0, lineMeasures * 4 + lineBeats) };
-      }).filter((line) => line.rawText.trim().length > 0);
+      const timing = getCentralizedMetricsTuple(section.type);
+      const lines = getTimelineLyrics(section);
+      const lineDurations = timelineLineDurationsBySectionId[section.id] ?? [];
+      const lineEntries = lines.map((line, index) => ({
+        ...line,
+        beats: lineDurations[index] ?? 0,
+      }));
       if (lineEntries.length === 0) return null;
 
       const repeats = Math.max(0, Number(timing.repeats) || 0);
       const passes = repeats + 1;
-      const lineBeatsTotal = lineEntries.reduce((total, line) => total + line.beats, 0) * passes;
-      const fallbackLineBeats = duration / (lineEntries.length * passes);
-      const lineScale = lineBeatsTotal > 0 ? duration / lineBeatsTotal : 0;
-      let lineCursor = sectionStart;
+      const headPaddingBeats = Math.max(0, Number(timing.head_m) || 0) * 4;
+      let lineCursor = sectionStart + headPaddingBeats;
       for (let pass = 0; pass < passes; pass += 1) {
         for (const line of lineEntries) {
-          const lineDuration = lineBeatsTotal > 0 ? line.beats * lineScale : fallbackLineBeats;
+          const lineDuration = line.beats;
           if (currentBeat >= lineCursor && currentBeat < lineCursor + lineDuration) {
             return {
+              sectionId: section.id,
               sectionType: section.type,
               sectionLabel: section.label,
               rawText: line.rawText,
               lineIndex: line.lineIndex,
-              lineCount: lines.filter((lineText) => lineText.trim().length > 0).length,
+              lineCount: lines.length,
             };
           }
           lineCursor += lineDuration;
@@ -2558,7 +3007,33 @@ function formatTimeWithMs(seconds: number) {
     }
     return null;
   })();
-  const seekToTimelineChapter = (time: number) => {
+  const timelineLineStartTimes = (() => {
+    const bpm = parseInt(formTempo, 10) || 75;
+    const lineStarts: number[] = [];
+    let cursorBeat = 0;
+    for (const section of formSections) {
+      cursorBeat += timelineGapOverrides[section.id] ?? 0;
+      const duration = timelineDurationOverrides[section.id] ?? getDefaultTimelineDuration(section.type);
+      if (!section.type.startsWith("Spacer")) {
+        const lines = getTimelineLyrics(section);
+        const lineDurations = timelineLineDurationsBySectionId[section.id] ?? [];
+        const repeats = timelineRepeatCountBySectionId[section.id] ?? 0;
+        const passes = repeats + 1;
+        const headPaddingBeats = timelineHeadPaddingBeatsBySectionId[section.id] ?? 0;
+        let lineCursorBeat = cursorBeat + headPaddingBeats;
+        for (let pass = 0; pass < passes; pass += 1) {
+          for (let index = 0; index < lines.length; index += 1) {
+            lineStarts.push(Math.max(0, formYoutubeSyncOffset / 1000 + lineCursorBeat * 60 / bpm));
+            const lineDuration = lineDurations[index] ?? 0;
+            lineCursorBeat += lineDuration;
+          }
+        }
+      }
+      cursorBeat += duration;
+    }
+    return lineStarts;
+  })();
+  const seekToTimelineChapter = useCallback((time: number) => {
     const seekTime = Math.max(0, Math.min(ytDuration || time, time));
     setYtCurrentTime(seekTime);
     initAudioContext();
@@ -2576,7 +3051,85 @@ function formatTimeWithMs(seconds: number) {
       }, 50);
     }
     setIsTimelineChaptersOpen(false);
-  };
+  }, [ytDuration, initAudioContext, ytPlaying]);
+
+  useEffect(() => {
+    seekTimelineLineRef.current = (direction) => {
+      const currentTime = ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function"
+        ? ytPlayerRef.current.getCurrentTime()
+        : ytCurrentTime;
+      const target = direction === "previous"
+        ? [...timelineLineStartTimes].reverse().find((time) => time < currentTime - 0.05)
+        : timelineLineStartTimes.find((time) => time > currentTime + 0.05);
+      if (target !== undefined) seekToTimelineChapter(target);
+    };
+  }, [seekToTimelineChapter, timelineLineStartTimes, ytCurrentTime]);
+
+  useEffect(() => {
+    const handleEditorShortcuts = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable ||
+        document.querySelector('[role="dialog"][aria-modal="true"]') ||
+        isConfirmExitModalOpen ||
+        isImportModalOpen ||
+        isKeyPopupOpen ||
+        isTapBpmModalOpen ||
+        isSongMetadataModalOpen ||
+        isTimelineChaptersOpen ||
+        chordPickerConfig.isOpen ||
+        chordMode === "Keyboard" && chordTargetCoordinate !== null
+      ) return;
+
+      if (event.key === "8" || event.key === "9" || event.key === "0") {
+        event.preventDefault();
+        handleEditorTabChange(event.key === "8" ? "details" : event.key === "9" ? "content" : "timeline");
+        return;
+      }
+
+      if (editorActiveTab === "timeline" && ["[", "]", ";", "'"].includes(event.key)) return;
+
+      const currentIndex = currentTimelineChapter
+        ? formSections.findIndex((section) => section.id === currentTimelineChapter.id)
+        : -1;
+      if (event.key === "[" || event.key === "]") {
+        event.preventDefault();
+        const insertionIndex = currentIndex < 0
+          ? event.key === "[" ? 0 : formSections.length
+          : currentIndex + (event.key === "]" ? 1 : 0);
+        openTimelineSectionPicker(insertionIndex);
+      } else if (event.key === ";" || event.key === "'") {
+        event.preventDefault();
+        const insertionIndex = event.key === ";"
+          ? Math.max(0, currentIndex)
+          : currentIndex >= 0 ? currentIndex + 1 : formSections.length;
+        setEditorActiveTab("timeline");
+        handleAddTimelineSection("Spacer", insertionIndex);
+      }
+    };
+
+    window.addEventListener("keydown", handleEditorShortcuts);
+    return () => window.removeEventListener("keydown", handleEditorShortcuts);
+  }, [
+    chordMode,
+    chordPickerConfig.isOpen,
+    chordTargetCoordinate,
+    currentTimelineChapter,
+    editorActiveTab,
+    formSections,
+    handleAddTimelineSection,
+    handleEditorTabChange,
+    isConfirmExitModalOpen,
+    isImportModalOpen,
+    isKeyPopupOpen,
+    isSongMetadataModalOpen,
+    isTapBpmModalOpen,
+    isTimelineChaptersOpen,
+    openTimelineSectionPicker,
+  ]);
   const filteredThemeCatalogSuggestions = CHRISTIAN_THEMES_PRESETS.filter(th => th.toLowerCase().includes(themeInputSearchValue.toLowerCase()) && !formThemes.includes(th));
   const isCommentInputBlank = customCommentInputValue.trim() === "";
 
@@ -2617,7 +3170,7 @@ function formatTimeWithMs(seconds: number) {
     if (checkSec.type.toLowerCase().startsWith("spacer")) return false; 
     
     const checkTuple = getCentralizedMetricsTuple(checkSec.type);
-    const checkLines = checkSec.content.split("\n").map(l => l.replace(/\[[^\]]+\]/g, "").trim()).filter(l => l.length > 0);
+    const checkLines = getTimelineLyrics(checkSec);
     if (checkLines.length === 0) return false;
     
     const basePassBeats = (Number(checkTuple.measures) * 4) + Number(checkTuple.beats);
@@ -2637,8 +3190,8 @@ function formatTimeWithMs(seconds: number) {
     const checkSpreadBeats = Math.floor(checkTuple.beats / checkLines.length);
     const checkRemainderBeats = checkTuple.beats % checkLines.length;
 
-    const calculatedBeatsSum = checkLines.reduce((sum, _, lineIndex) => {
-      const lineOverride = (lineOverrides as any)?.[checkSec.type]?.[lineIndex];
+    const calculatedBeatsSum = checkLines.reduce((sum, line, lineIndex) => {
+      const lineOverride = lineOverrides?.[checkSec.type]?.[line.lineIndex];
       const measures = lineOverride?.measures ?? (checkSpreadMeasures + (lineIndex < checkRemainderMeasures ? 1 : 0));
       const beats = lineOverride?.beats ?? (checkSpreadBeats + (lineIndex < checkRemainderBeats ? 1 : 0));
       return sum + (measures * 4) + beats;
@@ -2777,8 +3330,14 @@ function formatTimeWithMs(seconds: number) {
                 <div>
                   <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block mb-1">BPM Tempo Count</label>
                   <div className="relative flex items-center">
-                    <input type="number" value={formTempo} className="w-full border border-outline-variant/30 focus:border-primary rounded-xl p-2.5 text-xs outline-none pr-16 bg-surface-container text-on-surface" onChange={e => { setHasUnsavedChanges(true); setFormTempo(e.target.value); }} />
-                    <button type="button" onClick={() => { setTapTimestamps([]); setIsTapBpmModalOpen(true); }} className="absolute right-1.5 px-3 py-1.5 bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors shadow-sm">TAP</button>
+                    <input type="number" value={formTempo} className="w-full border border-outline-variant/30 focus:border-primary rounded-xl p-2.5 text-xs outline-none pr-28 bg-surface-container text-on-surface" onChange={e => { setHasUnsavedChanges(true); setFormTempo(e.target.value); }} />
+                    <div className="absolute right-1.5 flex items-center gap-1">
+                      <button type="button" onClick={handleSongMetadataLookup} disabled={isSongMetadataLoading} title="Find BPM and key from SongBPM" aria-label="Find BPM and key" className="flex items-center gap-1 rounded-lg bg-primary/10 px-2 py-1.5 text-primary hover:bg-primary/20 disabled:opacity-50">
+                        <span className="material-symbols-outlined !text-[14px]">search</span>
+                        <span className="text-[8px] font-black uppercase tracking-wide">Find</span>
+                      </button>
+                      <button type="button" onClick={() => { setTapTimestamps([]); setIsTapBpmModalOpen(true); }} className="rounded-lg bg-surface-container-highest px-3 py-1.5 text-[9px] font-black uppercase tracking-wider text-on-surface shadow-sm transition-colors hover:bg-surface-bright">TAP</button>
+                    </div>
                   </div>
                 </div>
                 <div>
@@ -2849,88 +3408,6 @@ function formatTimeWithMs(seconds: number) {
                     {formYoutubeUrl && !youtubeVideoId && <span className="text-[9px] font-bold text-error absolute top-1 right-2">Invalid Link</span>}
                   </div>
 
-                  {youtubeVideoId && (
-                    <div className="bg-surface-container-low border border-outline-variant/30 p-3 rounded-xl space-y-3 shadow-inner">
-                      <div className="flex flex-col sm:flex-row gap-2">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between mb-2 pr-1">
-                            <label className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest block">Downbeat Offset (ms)</label>
-                          </div>
-                          
-                          <div className="flex items-center gap-2">
-                            {/* 1. Combined Input + Play Offset Button */}
-                            <div className="flex items-center bg-surface-container border border-outline-variant/30 rounded-lg overflow-hidden flex-1 max-w-[140px] focus-within:border-primary focus-within:ring-1 focus-within:ring-primary transition-all shadow-sm">
-                              <input 
-                                type="number" 
-                                value={formYoutubeSyncOffset} 
-                                onChange={e => { setHasUnsavedChanges(true); setFormYoutubeSyncOffset(parseInt(e.target.value) || 0); }} 
-                                className="w-full bg-transparent p-2 text-xs font-black text-on-surface text-center outline-none" 
-                                title="Offset in milliseconds"
-                              />
-                              <button 
-                                type="button" 
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  initAudioContext();
-                                  if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-                                    ytPlayerRef.current.seekTo(formYoutubeSyncOffset / 1000, true);
-                                    ytPlayerRef.current.playVideo();
-                                  }
-                                }} 
-                                className="h-[32px] px-2.5 bg-primary-container/30 hover:bg-primary text-primary hover:text-on-primary transition-colors flex items-center justify-center border-l border-outline-variant/30 cursor-pointer"
-                                title="Play from Offset"
-                              >
-                                <span className="material-symbols-outlined !text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>play_arrow</span>
-                              </button>
-                            </div>
-
-                            {/* 2. Capture Button */}
-                            <button 
-                              type="button" 
-                              onClick={handleCaptureSyncPoint} 
-                              className="w-8 h-8 flex items-center justify-center bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg shrink-0 transition-colors border border-outline-variant/30 shadow-sm cursor-pointer"
-                              title="Capture Current Time"
-                            >
-                              <span className="material-symbols-outlined !text-[16px]">pin_drop</span>
-                            </button>
-
-                            {/* 3. Play from 0:00 */}
-                            <button 
-                              type="button" 
-                              onClick={() => {
-                                initAudioContext();
-                                if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-                                  ytPlayerRef.current.seekTo(0, true);
-                                  ytPlayerRef.current.playVideo();
-                                }
-                              }} 
-                              className="w-8 h-8 flex items-center justify-center bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded-lg shrink-0 transition-colors border border-outline-variant/30 shadow-sm cursor-pointer"
-                              title="Play from 0:00"
-                            >
-                              <span className="material-symbols-outlined !text-[16px]">skip_previous</span>
-                            </button>
-
-                            {/* 4. Metronome Toggle */}
-                            <button 
-                              type="button" 
-                              onClick={() => setIsMetronomeMuted(!isMetronomeMuted)} 
-                              className={`w-8 h-8 flex items-center justify-center rounded-lg shrink-0 transition-colors shadow-sm cursor-pointer border ${
-                                isMetronomeMuted 
-                                  ? 'bg-error/10 text-error border-error/30 hover:bg-error/20' 
-                                  : 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/20'
-                              }`}
-                              title={isMetronomeMuted ? "Unmute Clicks" : "Mute Clicks"}
-                            >
-                              <span className="material-symbols-outlined !text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>
-                                {isMetronomeMuted ? 'volume_off' : 'volume_up'}
-                              </span>
-                            </button>
-
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
@@ -2962,9 +3439,12 @@ function formatTimeWithMs(seconds: number) {
                   };
                 });
 
-                const totalLines = processedLines.length;
+                const lyricLineIndices = processedLines.reduce<number[]>((indices, line, lineIndex) => {
+                  if (line.cleanText.length > 0) indices.push(lineIndex);
+                  return indices;
+                }, []);
+                const totalLines = lyricLineIndices.length;
                 const sectionRepeats = timingTuple.repeats || 0;
-                const totalPasses = sectionRepeats + 1; 
                 const masterTotalAbsoluteBeats = (timingTuple.measures * 4) + timingTuple.beats;
 
                 const autoSpreadMeasures = totalLines > 0 ? Math.floor(timingTuple.measures / totalLines) : 0;
@@ -2972,12 +3452,14 @@ function formatTimeWithMs(seconds: number) {
                 const autoSpreadBeats = totalLines > 0 ? Math.floor(timingTuple.beats / totalLines) : 0;
                 const remainderBeats = totalLines > 0 ? timingTuple.beats % totalLines : 0;
 
-                const currentLinesMetrics = processedLines.map((_, lIdx) => {
-                  const explicitOverride = (lineOverrides as any)?.[sec.type]?.[lIdx];
+                const currentLinesMetrics = processedLines.map((line, lIdx) => {
+                  if (!line.cleanText) return { measures: 0, beats: 0 };
+                  const lineOrdinal = lyricLineIndices.indexOf(lIdx);
+                  const explicitOverride = lineOverrides?.[sec.type]?.[lIdx];
                   if (explicitOverride) return explicitOverride;
                   return {
-                    measures: autoSpreadMeasures + (lIdx < remainderMeasures ? 1 : 0),
-                    beats: autoSpreadBeats + (lIdx < remainderBeats ? 1 : 0)
+                    measures: autoSpreadMeasures + (lineOrdinal < remainderMeasures ? 1 : 0),
+                    beats: autoSpreadBeats + (lineOrdinal < remainderBeats ? 1 : 0)
                   };
                 });
 
@@ -2995,11 +3477,13 @@ function formatTimeWithMs(seconds: number) {
                   setLineOverrides(prev => {
                     const prevOverrides = prev || {};
                     const sectionMap = { ...(prevOverrides[sec.type] || {}) };
-                    processedLines.forEach((_, currentIdx) => {
+                    processedLines.forEach((line, currentIdx) => {
+                      if (!line.cleanText) return;
+                      const lineOrdinal = lyricLineIndices.indexOf(currentIdx);
                       if (sectionMap[currentIdx] === undefined) {
                         sectionMap[currentIdx] = {
-                          measures: autoSpreadMeasures + (currentIdx < remainderMeasures ? 1 : 0),
-                          beats: autoSpreadBeats + (currentIdx < remainderBeats ? 1 : 0)
+                          measures: autoSpreadMeasures + (lineOrdinal < remainderMeasures ? 1 : 0),
+                          beats: autoSpreadBeats + (lineOrdinal < remainderBeats ? 1 : 0)
                         };
                       } else {
                         sectionMap[currentIdx] = { ...sectionMap[currentIdx] };
@@ -3011,7 +3495,7 @@ function formatTimeWithMs(seconds: number) {
                 };
 
                 return (
-                  <div key={sec.id} className={`border rounded-xl p-3.5 space-y-2 relative transition-all shadow-sm ${isRealtimePreviewActive && isSectionMismatched ? "bg-error/10 border-error/30 ring-4 ring-error/5" : "bg-surface-container-low border-outline-variant/30"}`}>
+                  <div id={`song-content-section-${sec.id}`} key={sec.id} className={`border rounded-xl p-3.5 space-y-2 relative transition-all shadow-sm ${isRealtimePreviewActive && isSectionMismatched ? "bg-error/10 border-error/30 ring-4 ring-error/5" : "bg-surface-container-low border-outline-variant/30"}`}>
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex flex-wrap items-center gap-1.5 w-full justify-between sm:justify-start">
                         
@@ -3028,13 +3512,22 @@ function formatTimeWithMs(seconds: number) {
                             <span>{sec.type}</span>
                             <span className="text-[8px] opacity-60">▼</span>
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => navigateToTimelineSection(sec.id)}
+                            aria-label={`Show ${sec.type} on Timeline`}
+                            title="Show this section on Timeline"
+                            className="flex h-7 w-7 items-center justify-center rounded-full border border-outline-variant/40 bg-surface-container text-on-surface-variant transition-colors hover:border-primary/50 hover:bg-primary/10 hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                          >
+                            <span className="material-symbols-outlined !text-[16px]">timeline</span>
+                          </button>
                           
                           {isRealtimePreviewActive && (
                             <button
                               type="button"
                               onClick={() => { 
                                 setAdjustmentsModalTab("section"); 
-                                setSectionAdjustmentsConfig({ isOpen: true, sectionType: sec.type }); 
+                                setSectionAdjustmentsConfig({ isOpen: true, sectionType: sec.type, sectionId: sec.id });
                               }}
                               className="px-2.5 py-1 border border-outline-variant/30 bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface font-black text-[10px] rounded-lg tracking-wider shadow-sm flex items-center lg:hidden transition-all"
                             >
@@ -3072,23 +3565,23 @@ function formatTimeWithMs(seconds: number) {
                         <div className={`flex-wrap items-center gap-1.5 ${isRealtimePreviewActive ? "hidden lg:flex" : "flex"}`}>
                           <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
                             <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">M:</span>
-                            <input type="number" min={0} value={timingTuple.measures} className="w-6 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "measures", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                            <input type="number" min={0} value={timingTuple.measures} className="w-6 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => handleContentTimingChange(sec.id, sec.type, "measures", Math.max(0, parseInt(e.target.value, 10) || 0))} />
                           </div>
                           <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
                             <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">B:</span>
-                            <input type="number" min={0} max={3} value={timingTuple.beats} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "beats", Math.min(3, Math.max(0, parseInt(e.target.value, 10) || 0))); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                            <input type="number" min={0} max={3} value={timingTuple.beats} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => handleContentTimingChange(sec.id, sec.type, "beats", Math.min(3, Math.max(0, parseInt(e.target.value, 10) || 0)))} />
                           </div>
                           <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
                             <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">R:</span>
-                            <input type="number" min={0} value={sectionRepeats} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "repeats", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                            <input type="number" min={0} value={sectionRepeats} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => handleContentTimingChange(sec.id, sec.type, "repeats", Math.max(0, parseInt(e.target.value, 10) || 0))} />
                           </div>
                           <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
                             <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">H:</span>
-                            <input type="number" min={0} value={timingTuple.head_m} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "head_m", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                            <input type="number" min={0} value={timingTuple.head_m} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => handleContentTimingChange(sec.id, sec.type, "head_m", Math.max(0, parseInt(e.target.value, 10) || 0))} />
                           </div>
                           <div className="flex items-center gap-1 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-0.5 text-[10px] font-bold text-on-surface-variant shadow-inner">
                             <span className="text-[8px] font-black uppercase text-on-surface-variant opacity-60">T:</span>
-                            <input type="number" min={0} value={timingTuple.tail_m} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => { handleUpdateCentralizedMetrics(sec.type, "tail_m", Math.max(0, parseInt(e.target.value, 10) || 0)); setLineOverrides(prev => { if (!prev) return {}; const newPrev = { ...prev }; delete newPrev[sec.type]; return newPrev; }); }} />
+                            <input type="number" min={0} value={timingTuple.tail_m} className="w-5 bg-transparent text-center font-black text-on-surface outline-none" onChange={(e) => handleContentTimingChange(sec.id, sec.type, "tail_m", Math.max(0, parseInt(e.target.value, 10) || 0))} />
                           </div>
                         </div>
                         )}
@@ -3253,7 +3746,7 @@ function formatTimeWithMs(seconds: number) {
               })}
             </div>
             {activeRole === "admin" && (
-              <button type="button" className="w-full border border-dashed border-outline-variant/50 py-3.5 text-center rounded-2xl text-primary hover:text-primary/80 font-black text-xs uppercase tracking-wider block hover:bg-surface-container-high transition-colors shadow-sm bg-surface-container-low flex items-center justify-center gap-1 cursor-pointer" onClick={() => { setSectionModalSearch(""); setSectionModalSelected(null); setSectionModalConfig({ isOpen: true, mode: "add" }); }}>
+              <button type="button" className="w-full border border-dashed border-outline-variant/50 py-3.5 text-center rounded-2xl text-primary hover:text-primary/80 font-black text-xs uppercase tracking-wider block hover:bg-surface-container-high transition-colors shadow-sm bg-surface-container-low flex items-center justify-center gap-1 cursor-pointer" onClick={() => { setPendingTimelineInsertionIndex(null); setPendingTimelineAnchorSectionId(null); setSectionModalSearch(""); setSectionModalSelected(null); setSectionModalConfig({ isOpen: true, mode: "add" }); }}>
                 <span className="material-symbols-outlined !text-[18px]">add_circle</span> Add New Section Enclosures
               </button>
             )}
@@ -3265,6 +3758,9 @@ function formatTimeWithMs(seconds: number) {
             key={editingSongId}
             sections={formSections}
             lineDurationsBySectionId={timelineLineDurationsBySectionId}
+            repeatCountBySectionId={timelineRepeatCountBySectionId}
+            paddingBeatsBySectionId={timelinePaddingBeatsBySectionId}
+            headPaddingBeatsBySectionId={timelineHeadPaddingBeatsBySectionId}
             storageKey={editingSongId}
             durationOverrides={timelineDurationOverrides}
             gapOverrides={timelineGapOverrides}
@@ -3277,9 +3773,31 @@ function formatTimeWithMs(seconds: number) {
             playheadTime={ytCurrentTime}
             isPlaying={ytPlaying}
             lyricPreview={timelineLyricPreview}
+            focusedSectionId={pendingTimelineFocusSectionId}
+            onFocusedSectionHandled={clearPendingTimelineFocus}
+            isMetronomeMuted={isMetronomeMuted}
+            onSeekToZero={() => {
+              setYtCurrentTime(0);
+              if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === "function") {
+                ytPlayerRef.current.seekTo(0, true);
+              }
+            }}
+            onToggleMetronome={() => setIsMetronomeMuted(!isMetronomeMuted)}
+            onNavigateToContentSection={navigateToContentSection}
             onSeekTime={seekToTimelineChapter}
             onAddSection={handleAddTimelineSection}
-            onOpenAddSectionModal={() => {
+            onOpenAddSectionModal={(insertionIndex, sourceSectionId, destinationSectionId) => {
+              const sourceSection = sourceSectionId
+                ? formSections.find((section) => section.id === sourceSectionId)
+                : undefined;
+              if (sourceSectionId && !sourceSection) return;
+              setPendingTimelineInsertionIndex(insertionIndex ?? null);
+              setPendingTimelineAnchorSectionId(destinationSectionId ?? null);
+              setPendingTimelineSourceSectionId(sourceSection?.id ?? null);
+              if (sourceSection) {
+                setPendingTimelineSectionType(sourceSection.type);
+                return;
+              }
               setSectionModalSearch("");
               setSectionModalSelected(null);
               setSectionModalConfig({ isOpen: true, mode: "add" });
@@ -3293,6 +3811,8 @@ function formatTimeWithMs(seconds: number) {
             onMeterChange={handleTimelineMeterChange}
             onSnapChange={handleTimelineSnapChange}
             onDownbeatOffsetChange={handleTimelineDownbeatOffsetChange}
+            onCaptureDownbeat={handleCaptureSyncPoint}
+            onPlayFromDownbeat={handlePlayFromSyncPoint}
             onUpdateLineDurations={handleTimelineUpdateLineDurations}
             canUndo={timelineUndoCount > 0}
             onUndo={handleTimelineUndo}
@@ -3879,7 +4399,7 @@ function formatTimeWithMs(seconds: number) {
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[250000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-200">
           <div className="w-full bg-surface-container-low rounded-t-3xl md:rounded-3xl h-[85vh] md:h-[600px] max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
             <div className="relative flex items-center justify-center p-4 md:p-5 border-b border-outline-variant/30 bg-surface-container shrink-0">
-              <button type="button" onClick={() => setSectionModalConfig({ isOpen: false, mode: "add" })} className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
+              <button type="button" onClick={() => { setPendingTimelineInsertionIndex(null); setPendingTimelineAnchorSectionId(null); setPendingTimelineSourceSectionId(null); setSectionModalConfig({ isOpen: false, mode: "add" }); }} className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
                 <span className="material-symbols-outlined !text-[16px]">close</span>
               </button>
               <h3 className="text-base font-black text-on-surface tracking-tight">{sectionModalConfig.mode === "add" ? "Add New Sections" : "Reassign Section"}</h3>
@@ -3908,6 +4428,102 @@ function formatTimeWithMs(seconds: number) {
         </div>
       )}
 
+      {pendingTimelineSectionType && (
+        <div className="fixed inset-0 z-[250001] flex items-end justify-center bg-black/60 backdrop-blur-sm md:items-center md:p-4">
+          {(() => {
+            const anchor = formSections.find((section) => section.id === pendingTimelineAnchorSectionId);
+            const source = formSections.find((section) => section.id === pendingTimelineSourceSectionId);
+            const currentIndex = anchor
+              ? formSections.findIndex((section) => section.id === anchor.id)
+              : currentTimelineChapter
+                ? formSections.findIndex((section) => section.id === currentTimelineChapter.id)
+                : -1;
+            const addAt = (index: number) => {
+              if (source) handleDuplicateTimelineSection(source.id, index);
+              else handleAddTimelineSection(pendingTimelineSectionType, index);
+              setPendingTimelineSectionType(null);
+              setPendingTimelineAnchorSectionId(null);
+              setPendingTimelineSourceSectionId(null);
+              setPendingTimelineInsertionIndex(null);
+            };
+            return (
+          <div role="dialog" aria-modal="true" aria-labelledby="timeline-insert-title" className="w-full max-w-sm space-y-4 rounded-t-3xl border border-outline-variant/30 bg-surface-container p-5 shadow-2xl md:rounded-2xl">
+            <div>
+              <h3 id="timeline-insert-title" className="text-sm font-black text-on-surface">Where should this section go?</h3>
+              <p className="mt-1 text-xs text-on-surface-variant">
+                {source
+                  ? `Place ${source.label} around ${anchor?.label ?? currentTimelineChapter?.label ?? "the selected position"}.`
+                  : `Add ${pendingTimelineSectionType} before or after the current section${currentTimelineChapter ? ` (${currentTimelineChapter.label})` : ""}.`}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (currentIndex < 0) {
+                    if (source && anchor) return;
+                    addAt(0);
+                  } else {
+                    addAt(currentIndex);
+                  }
+                }}
+                className="w-full rounded-xl bg-primary px-4 py-3 text-center text-xs font-black text-on-primary hover:bg-primary/90"
+              >
+                {anchor ? `Before ${anchor.label}` : currentTimelineChapter ? "Before current section" : "Add at the beginning"}
+              </button>
+              <button
+                type="button"
+                onClick={() => addAt(currentIndex < 0 ? formSections.length : currentIndex + 1)}
+                className="w-full rounded-xl bg-primary px-4 py-3 text-center text-xs font-black text-on-primary hover:bg-primary/90"
+              >
+                {anchor ? `After ${anchor.label}` : currentTimelineChapter ? "After current section" : "Add at the end"}
+              </button>
+              {source && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingTimelineSourceSectionId(null);
+                    setPendingTimelineSectionType(null);
+                    setSectionModalSearch("");
+                    setSectionModalSelected(null);
+                    setSectionModalConfig({ isOpen: true, mode: "add" });
+                  }}
+                  className="col-span-2 w-full rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-xs font-bold text-on-surface hover:bg-surface-container-high"
+                >
+                  Add a new section instead
+                </button>
+              )}
+              <button type="button" onClick={() => { setPendingTimelineSectionType(null); setPendingTimelineAnchorSectionId(null); setPendingTimelineSourceSectionId(null); setPendingTimelineInsertionIndex(null); }} className="col-span-2 w-full rounded-xl px-4 py-2 text-xs font-bold text-on-surface-variant hover:bg-surface-container-high">
+                Cancel
+              </button>
+            </div>
+          </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {duplicateDurationPrompt && (
+        <div className="fixed inset-0 z-[250002] flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm md:items-center">
+          <div role="dialog" aria-modal="true" aria-labelledby="duplicate-duration-title" className="w-full max-w-sm space-y-4 rounded-2xl border border-outline-variant/30 bg-surface-container p-5 shadow-2xl">
+            <div>
+              <h3 id="duplicate-duration-title" className="text-sm font-black text-on-surface">This section is duplicated</h3>
+              <p className="mt-2 text-xs leading-relaxed text-on-surface-variant">
+                This duration is already shared with the first {duplicateDurationPrompt.sectionType} iteration. Choose how to continue.
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <button type="button" onClick={() => setDuplicateDurationPrompt(null)} className="w-full rounded-xl border border-outline-variant/40 bg-surface-container-low px-4 py-3 text-xs font-bold text-on-surface hover:bg-surface-container-high">
+                Keep Duration
+              </button>
+              <button type="button" onClick={createSeparateOccurrenceAndApplyDurationChange} className="w-full rounded-xl bg-primary px-4 py-3 text-xs font-black text-on-primary hover:bg-primary/90">
+                Create new section
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {sectionAdjustmentsConfig.isOpen && sectionAdjustmentsConfig.sectionType && (
         // ✅ SURGICAL FIX: Bumped from z-[13000] to z-[250000]
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[250000] flex items-end justify-center animate-in fade-in duration-200">
@@ -3915,8 +4531,10 @@ function formatTimeWithMs(seconds: number) {
             const sType = sectionAdjustmentsConfig.sectionType!;
             const timingTuple = getCentralizedMetricsTuple(sType);
             
-            const sec = formSections.find(s => s.type === sType);
-            const processedLines = sec ? sec.content.split("\n").map(l => ({ rawText: l, cleanText: l.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim() })).filter(l => l.cleanText.length > 0) : [];
+            const sec = formSections.find(s => s.id === sectionAdjustmentsConfig.sectionId);
+            const processedLines = sec ? sec.content.split("\n")
+              .map((rawText, sourceLineIndex) => ({ rawText, sourceLineIndex, cleanText: rawText.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim() }))
+              .filter(l => l.cleanText.length > 0) : [];
             const totalLines = processedLines.length;
             
             const autoSpreadMeasures = totalLines > 0 ? Math.floor(timingTuple.measures / totalLines) : 0;
@@ -3924,8 +4542,8 @@ function formatTimeWithMs(seconds: number) {
             const autoSpreadBeats = totalLines > 0 ? Math.floor(timingTuple.beats / totalLines) : 0;
             const remainderBeats = totalLines > 0 ? timingTuple.beats % totalLines : 0;
 
-            const currentLinesMetrics = processedLines.map((_, lIdx) => {
-              const explicitOverride = (lineOverrides as any)?.[sType]?.[lIdx];
+            const currentLinesMetrics = processedLines.map((line, lIdx) => {
+              const explicitOverride = lineOverrides?.[sType]?.[line.sourceLineIndex];
               if (explicitOverride) return explicitOverride;
               return {
                 measures: autoSpreadMeasures + (lIdx < remainderMeasures ? 1 : 0),
@@ -3938,30 +4556,22 @@ function formatTimeWithMs(seconds: number) {
               const proposedVal = Math.max(0, currentVal + delta);
               if (field === "beats" && proposedVal > 3) return;
 
-              setHasUnsavedChanges(true);
-              setLineOverrides(prev => {
-                const prevOverrides = prev || {};
-                const sectionMap = { ...(prevOverrides[sType] || {}) };
-                processedLines.forEach((_, currentIdx) => {
-                  if (sectionMap[currentIdx] === undefined) {
-                    sectionMap[currentIdx] = {
-                      measures: autoSpreadMeasures + (currentIdx < remainderMeasures ? 1 : 0),
-                      beats: autoSpreadBeats + (currentIdx < remainderBeats ? 1 : 0)
-                    };
-                  } else {
-                    sectionMap[currentIdx] = { ...sectionMap[currentIdx] };
-                  }
-                });
-                sectionMap[lineIdx] = { ...sectionMap[lineIdx], [field]: proposedVal };
-                return { ...prevOverrides, [sType]: sectionMap };
-              });
+              const targetSectionId = sectionAdjustmentsConfig.sectionId;
+              if (!targetSectionId) return;
+              handleContentLineTimingChange(
+                targetSectionId,
+                sType,
+                processedLines[lineIdx].sourceLineIndex,
+                field,
+                proposedVal,
+              );
             };
 
             return (
               <div className="w-full bg-surface-container-low rounded-t-3xl max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
                 <div className="relative flex flex-col items-center justify-center pt-4 border-b border-outline-variant/30 bg-surface-container shrink-0">
                   <div className="flex w-full px-4 items-center justify-center mb-4 relative">
-                    <button type="button" onClick={() => setSectionAdjustmentsConfig({ isOpen: false, sectionType: null })} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright font-bold transition-colors cursor-pointer">
+                    <button type="button" onClick={() => setSectionAdjustmentsConfig({ isOpen: false, sectionType: null, sectionId: null })} className="absolute left-4 w-7 h-7 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright font-bold transition-colors cursor-pointer">
                       <span className="material-symbols-outlined !text-[16px]">close</span>
                     </button>
                     <h3 className="text-[14px] font-black text-on-surface tracking-tight uppercase">{sType} Adjustments</h3>
@@ -3986,9 +4596,9 @@ function formatTimeWithMs(seconds: number) {
                         <div key={item.field} className="flex items-center justify-between p-3.5 bg-surface-container border border-outline-variant/30 rounded-2xl shadow-sm">
                           <span className="text-xs font-black text-on-surface">{item.label}</span>
                           <div className="flex items-center bg-surface-container-highest rounded-xl overflow-hidden border border-outline-variant/40 h-9 transition-colors focus-within:border-primary focus-within:ring-1 focus-within:ring-primary">
-                            <button type="button" onClick={() => handleUpdateCentralizedMetrics(sType, item.field, Math.max(0, (timingTuple[item.field] || 0) - 1))} className="w-10 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright hover:text-primary transition-colors cursor-pointer">－</button>
+                            <button type="button" onClick={() => sectionAdjustmentsConfig.sectionId && handleContentTimingChange(sectionAdjustmentsConfig.sectionId, sType, item.field, Math.max(0, (timingTuple[item.field] || 0) - 1))} className="w-10 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright hover:text-primary transition-colors cursor-pointer">－</button>
                             <span className="w-10 text-center font-mono font-black text-on-surface text-xs">{timingTuple[item.field] || 0}</span>
-                            <button type="button" onClick={() => handleUpdateCentralizedMetrics(sType, item.field, Math.min(item.max ?? 999, (timingTuple[item.field] || 0) + 1))} className="w-10 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright hover:text-primary transition-colors cursor-pointer">＋</button>
+                            <button type="button" onClick={() => sectionAdjustmentsConfig.sectionId && handleContentTimingChange(sectionAdjustmentsConfig.sectionId, sType, item.field, Math.min(item.max ?? 999, (timingTuple[item.field] || 0) + 1))} className="w-10 h-full flex items-center justify-center text-on-surface-variant font-bold hover:bg-surface-bright hover:text-primary transition-colors cursor-pointer">＋</button>
                           </div>
                         </div>
                       ))}
@@ -4027,7 +4637,7 @@ function formatTimeWithMs(seconds: number) {
                 </div>
 
                 <div className="p-4 border-t border-outline-variant/30 bg-surface-container shrink-0 pb-safe">
-                  <button type="button" onClick={() => { setSectionAdjustmentsConfig({ isOpen: false, sectionType: null }); }} className="w-full py-3.5 bg-primary text-on-primary hover:bg-primary/90 rounded-xl font-black text-[14px] shadow-md tracking-wide active:scale-[0.98] transition-all cursor-pointer">
+                  <button type="button" onClick={() => { setSectionAdjustmentsConfig({ isOpen: false, sectionType: null, sectionId: null }); }} className="w-full py-3.5 bg-primary text-on-primary hover:bg-primary/90 rounded-xl font-black text-[14px] shadow-md tracking-wide active:scale-[0.98] transition-all cursor-pointer">
                     Apply Adjustments
                   </button>
                 </div>
@@ -4352,6 +4962,45 @@ function formatTimeWithMs(seconds: number) {
         </div>
       )}
 
+      {isSongMetadataModalOpen && (
+        <div className="fixed inset-0 z-[200000] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div role="dialog" aria-modal="true" aria-labelledby="song-metadata-title" className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-outline-variant/30 bg-surface-container shadow-2xl">
+            <div className="flex items-start justify-between border-b border-outline-variant/30 p-5">
+              <div>
+                <h3 id="song-metadata-title" className="text-base font-black text-on-surface">Choose BPM and key</h3>
+                <p className="mt-1 text-[10px] font-semibold text-on-surface-variant">
+                  Results scraped from <a href="https://songbpm.com/" target="_blank" rel="noreferrer" className="text-primary underline">SongBPM.com</a> · {formTitle} — {formArtist}
+                </p>
+              </div>
+              <button type="button" onClick={() => setIsSongMetadataModalOpen(false)} aria-label="Close BPM and key results" className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant hover:bg-surface-container-high">
+                <span className="material-symbols-outlined !text-[18px]">close</span>
+              </button>
+            </div>
+            <div className="space-y-2 overflow-y-auto p-4">
+              {isSongMetadataLoading ? (
+                <p role="status" className="py-8 text-center text-sm font-bold text-on-surface-variant">Searching SongBPM.com…</p>
+              ) : songMetadataError ? (
+                <p role="alert" className="py-8 text-center text-sm font-bold text-error">{songMetadataError}</p>
+              ) : songMetadataResults.map((result, index) => (
+                <button key={`${result.title}-${result.artist}-${result.bpm}-${index}`} type="button" onClick={() => handleSelectSongMetadata(result)} className="flex w-full items-center gap-3 rounded-xl border border-outline-variant/30 bg-surface-container-lowest p-3 text-left hover:border-primary/40 hover:bg-primary/5">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 font-mono text-sm font-black text-primary">{result.bpm}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-black text-on-surface">{result.title}</span>
+                    <span className="block truncate text-[11px] font-semibold text-on-surface-variant">{result.artist}</span>
+                  </span>
+                  <span className="shrink-0 rounded-lg bg-surface-container-high px-3 py-1.5 text-xs font-black text-on-surface">{result.key}</span>
+                </button>
+              ))}
+            </div>
+            <div className="border-t border-outline-variant/30 p-4">
+              <button type="button" onClick={() => setIsSongMetadataModalOpen(false)} className="w-full rounded-xl bg-surface-container-high px-4 py-3 text-xs font-black uppercase tracking-wide text-on-surface hover:bg-surface-bright">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {saveStatus !== "idle" && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300000] flex items-center justify-center p-4 select-none">
           <style dangerouslySetInnerHTML={{__html: `
@@ -4438,7 +5087,7 @@ function formatTimeWithMs(seconds: number) {
               onClick={() => setIsPlayerExpanded(true)}
               // ✅ SURGICAL FIX: Added dynamic translate-y-full based on modal visibility
               className={`flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-[0_-4px_20px_rgba(0,0,0,0.4)] transition-transform duration-300 ease-in-out border-t border-outline-variant/10 ${
-                (chordPickerConfig.isOpen || sectionAdjustmentsConfig.isOpen || sectionModalConfig.isOpen || isKeyPopupOpen || isTapBpmModalOpen || isImportModalOpen) 
+                (chordPickerConfig.isOpen || sectionAdjustmentsConfig.isOpen || sectionModalConfig.isOpen || pendingTimelineSectionType !== null || isKeyPopupOpen || isTapBpmModalOpen || isSongMetadataModalOpen || isImportModalOpen)
                   ? "translate-y-full pointer-events-none" 
                   : "translate-y-0 active:scale-[0.99]"
               }`}

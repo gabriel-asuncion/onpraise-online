@@ -39,6 +39,7 @@ export function useLocalPreferences() {
   const [showChords, setShowChords] = useState<boolean>(true); 
   const [chordFormat, setChordFormat] = useState<"Key" | "Numbers">("Key");
   const [isSimplifiedMode, setIsSimplifiedMode] = useState<boolean>(false);
+  const [isTracksMode, setIsTracksMode] = useState<boolean>(false);
   const [lineSpacing, setLineSpacing] = useState<number>(16); 
   
   const [isMetronomeSoundEnabled, setIsMetronomeSoundEnabled] = useState<boolean>(false);
@@ -66,6 +67,8 @@ export function useLocalPreferences() {
       if (savedChordFormat) setChordFormat(savedChordFormat as "Key" | "Numbers");
       const savedMode = localStorage.getItem("wm_prefs_simplifiedMode");
       if (savedMode) setIsSimplifiedMode(savedMode === "true");
+      const savedTracksMode = localStorage.getItem("wm_prefs_tracksMode");
+      if (savedTracksMode) setIsTracksMode(savedTracksMode === "true");
       const savedSpacing = localStorage.getItem("wm_prefs_lineSpacing");
       if (savedSpacing) setLineSpacing(Number(savedSpacing));
       const savedVolume = localStorage.getItem("wm_prefs_clickVolume");
@@ -92,6 +95,7 @@ export function useLocalPreferences() {
       localStorage.setItem("wm_prefs_showChords", showChords.toString());
       localStorage.setItem("wm_prefs_chordFormat", chordFormat);
       localStorage.setItem("wm_prefs_simplifiedMode", isSimplifiedMode.toString());
+      localStorage.setItem("wm_prefs_tracksMode", isTracksMode.toString());
       localStorage.setItem("wm_prefs_lineSpacing", lineSpacing.toString());
       localStorage.setItem("wm_prefs_clickVolume", localClickVolume.toString());
       localStorage.setItem("wm_prefs_ytVolume", youtubeVolume.toString());
@@ -99,13 +103,14 @@ export function useLocalPreferences() {
       localStorage.setItem("wm_prefs_youtubeSync", isYoutubeSyncEnabled.toString());
       localStorage.setItem("wm_prefs_metronome", isMetronomeSoundEnabled.toString()); // ✅ SURGICAL FIX: Actually saves the click toggle!
     }
-  }, [lyricsFontSize, showChords, chordFormat, isSimplifiedMode, lineSpacing, localClickVolume, youtubeVolume, isDoubleMetronomeEnabled, isMetronomeSoundEnabled, isYoutubeSyncEnabled]);
+  }, [lyricsFontSize, showChords, chordFormat, isSimplifiedMode, isTracksMode, lineSpacing, localClickVolume, youtubeVolume, isDoubleMetronomeEnabled, isMetronomeSoundEnabled, isYoutubeSyncEnabled]);
 
   return {
     lyricsFontSize, setLyricsFontSize,
     showChords, setShowChords,
     chordFormat, setChordFormat,
     isSimplifiedMode, setIsSimplifiedMode,
+    isTracksMode, setIsTracksMode,
     lineSpacing, setLineSpacing,
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isMetronomeSoundEnabledRef,
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
