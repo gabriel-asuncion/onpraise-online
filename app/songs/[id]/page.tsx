@@ -12,6 +12,7 @@ import { useWebAudioEngine } from "../../setlists/[id]/live/hooks/useWebAudioEng
 import { useLocalPreferences } from "../../setlists/[id]/live/hooks/useLocalPreferences";
 import { useYouTubeSync } from "../../setlists/[id]/live/hooks/useYouTubeSync";
 import { useHardwareClock } from "../../setlists/[id]/live/hooks/useHardwareClock";
+import { useKeyboardMidiControls } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
 
 import { LiveHeader } from "../../setlists/[id]/live/components/LiveHeader";
 import { SimplifiedStackView } from "../../setlists/[id]/live/components/SimplifiedStackView";
@@ -25,6 +26,7 @@ import { ZenMovableFAB } from "../../setlists/[id]/live/components/ZenMovableFAB
 import { CompiledSectionToken, CompiledBeatMap, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "../../setlists/[id]/live/types/setlist";
 import {
   compileTimelineBeatMap,
+  getTimelineLineStartBeat,
   getTimelineMeter,
   getYoutubeTimeForTimeline
 } from "../../setlists/[id]/live/utils/timeline";
@@ -72,7 +74,7 @@ export default function SoloPracticeRoomPage() {
   const { activeRole } = useEngine(); 
   useWakeLock();
   
-  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext, setAudioPanRight } = useWebAudioEngine();
+  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
   
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
@@ -80,7 +82,9 @@ export default function SoloPracticeRoomPage() {
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isMetronomeSoundEnabledRef,
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
+    guideVolume, setGuideVolume, guideVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
+    mixerMutes, setMixerMutes, mixerSolos, setMixerSolos,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
     isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   } = useLocalPreferences();
@@ -88,6 +92,10 @@ export default function SoloPracticeRoomPage() {
   useEffect(() => {
     setAudioPanRight(isClickGuideHardPannedRight);
   }, [isClickGuideHardPannedRight, setAudioPanRight]);
+
+  useEffect(() => {
+    setGuideCueVolume(guideVolumeRef.current);
+  }, [guideVolume, mixerMutes, mixerSolos, guideVolumeRef, setGuideCueVolume]);
 
   const [loading, setLoading] = useState(true);
   const [activeSong, setActiveSong] = useState<SongRecord | null>(null);
@@ -912,6 +920,93 @@ export default function SoloPracticeRoomPage() {
     return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
   };
 
+  function navigateSoloSection(direction: -1 | 1) {
+    let targetIndex = currentSectionIndexRef.current + direction;
+    while (
+      targetIndex >= 0 &&
+      targetIndex < sectionsRef.current.length &&
+      sectionsRef.current[targetIndex].section_name.toLowerCase().startsWith("spacer")
+    ) targetIndex += direction;
+    if (targetIndex >= 0 && targetIndex < sectionsRef.current.length) {
+      handleSectionInteractiveSelection(targetIndex);
+      if (!isPlayingRef.current) {
+        activeLineIndexRef.current = 0;
+        setActiveLineIndex(0);
+      }
+    }
+  }
+
+  function navigateSoloLine(direction: -1 | 1) {
+    if (!activeSongRef.current || sectionsRef.current.length === 0) return;
+    let targetSectionIndex = currentSectionIndexRef.current;
+    let targetLineIndex = activeLineIndexRef.current + direction;
+    while (targetSectionIndex >= 0 && targetSectionIndex < sectionsRef.current.length) {
+      const section = sectionsRef.current[targetSectionIndex];
+      const lineCount = memoizedSongAstTree[targetSectionIndex]?.lines.length ?? 0;
+      if (!section.section_name.toLowerCase().startsWith("spacer") && lineCount > 0) {
+        if (targetLineIndex >= 0 && targetLineIndex < lineCount) break;
+        targetSectionIndex += direction;
+        if (targetSectionIndex < 0 || targetSectionIndex >= sectionsRef.current.length) return;
+        const nextLineCount = memoizedSongAstTree[targetSectionIndex]?.lines.length ?? 0;
+        targetLineIndex = direction > 0 ? 0 : nextLineCount - 1;
+      } else {
+        targetSectionIndex += direction;
+        if (targetSectionIndex < 0 || targetSectionIndex >= sectionsRef.current.length) return;
+        const nextLineCount = memoizedSongAstTree[targetSectionIndex]?.lines.length ?? 0;
+        targetLineIndex = direction > 0 ? 0 : nextLineCount - 1;
+      }
+    }
+    if (targetSectionIndex < 0 || targetSectionIndex >= sectionsRef.current.length) return;
+
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[targetSectionIndex] || 0;
+    const beatInSection = getTimelineLineStartBeat(
+      activeSongRef.current.section_timings,
+      sectionsRef.current[targetSectionIndex].section_name,
+      memoizedSongAstTree[targetSectionIndex]?.lines.length ?? 1,
+      targetLineIndex
+    );
+    const targetAbsoluteBeat = sectionStartBeat + beatInSection;
+    const beatDurationMs = 60000 / (activeSongRef.current.tempo || 75);
+    const jumpTime = getGlobalTime() - (targetAbsoluteBeat - sectionStartBeat) * beatDurationMs;
+
+    setExplicitScrubBeat(targetAbsoluteBeat);
+    executeJumpNow(0, targetSectionIndex, jumpTime, false, "explicit-jump", targetAbsoluteBeat);
+    activeLineIndexRef.current = targetLineIndex;
+    setActiveLineIndex(targetLineIndex);
+  }
+
+  function cycleSoloView() {
+    const modes = ["sheet", "tracks"] as const;
+    const current = isTracksMode ? "tracks" : "sheet";
+    const next = modes[(modes.indexOf(current) + 1) % modes.length];
+    setIsZenMode(false);
+    setIsTracksMode(next === "tracks");
+    setIsSimplifiedMode(false);
+  }
+
+  const keyboardMidiControls = useKeyboardMidiControls(supabase, {
+    playStop: handleToggleFlowPlaybackState,
+    previousSection: () => navigateSoloSection(-1),
+    nextSection: () => navigateSoloSection(1),
+    previousLine: () => navigateSoloLine(-1),
+    nextLine: () => navigateSoloLine(1),
+    viewMode: cycleSoloView,
+    chordNotation: () => setShowChords(!showChords),
+    chordFormat: () => setChordFormat(chordFormat === "Key" ? "Numbers" : "Key"),
+    lineSpacing: () => setLineSpacing(lineSpacing === 16 ? 24 : lineSpacing === 24 ? 32 : 16),
+    lyricsSize: () => setLyricsFontSize(lyricsFontSize === 14 ? 16 : lyricsFontSize === 16 ? 20 : lyricsFontSize === 20 ? 24 : 14),
+    youtubeSync: () => setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled),
+    clickMute: () => setMixerMutes((current) => ({ ...current, click: !current.click })),
+    clickSolo: () => setMixerSolos((current) => ({ ...current, click: !current.click })),
+    guideMute: () => setMixerMutes((current) => ({ ...current, guide: !current.guide })),
+    guideSolo: () => setMixerSolos((current) => ({ ...current, guide: !current.guide })),
+    youtubeMute: () => setMixerMutes((current) => ({ ...current, yt: !current.yt })),
+    youtubeSolo: () => setMixerSolos((current) => ({ ...current, yt: !current.yt })),
+    clickVolume: (value) => { if (typeof value === "number") setLocalClickVolume(value); },
+    guideVolume: (value) => { if (typeof value === "number") setGuideVolume(value); },
+    youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
+  });
+
   if (loading) return <PageSkeleton message="LOADING SONG..." variant="live" />;
 
   return (
@@ -1032,7 +1127,11 @@ export default function SoloPracticeRoomPage() {
         isZenMode={isZenMode} setIsZenMode={setIsZenMode} metronomeSoundType={metronomeSoundType} setMetronomeSoundType={setMetronomeSoundType}
         lineSpacing={lineSpacing} setLineSpacing={setLineSpacing} lyricsFontSize={lyricsFontSize} setLyricsFontSize={setLyricsFontSize}
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}
-        localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume} audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
+        localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume}
+        guideVolume={guideVolume} setGuideVolume={setGuideVolume}
+        mixerMutes={mixerMutes} setMixerMutes={setMixerMutes}
+        mixerSolos={mixerSolos} setMixerSolos={setMixerSolos}
+        audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
         isYoutubeSyncEnabled={isYoutubeSyncEnabled} setIsYoutubeSyncEnabled={setIsYoutubeSyncEnabled} youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}
         isClickGuideHardPannedRight={isClickGuideHardPannedRight} setIsClickGuideHardPannedRight={setIsClickGuideHardPannedRight}
@@ -1040,6 +1139,23 @@ export default function SoloPracticeRoomPage() {
         isRecording={false}
         setIsRecordModalOpen={() => {}} 
         isPlayingFlow={isPlayingFlow} router={router as any} handleOpenTransposerModal={() => setIsTransposerOpen(true)} setIsStructureModalOpen={() => {}}
+        midiSetup={{
+          preferences: keyboardMidiControls.preferences,
+          devices: keyboardMidiControls.devices,
+          isLoading: keyboardMidiControls.isLoading,
+          isSaving: keyboardMidiControls.isSaving,
+          isMidiSupported: keyboardMidiControls.isMidiSupported,
+          preferenceError: keyboardMidiControls.preferenceError,
+          midiError: keyboardMidiControls.midiError,
+          learningAction: keyboardMidiControls.learningAction,
+          unavailableActions: ["previousSong", "nextSong", "mdTakeover"],
+          onScan: () => { void keyboardMidiControls.scanMidiDevices(); },
+          onPairDevice: keyboardMidiControls.pairDevice,
+          onLearn: keyboardMidiControls.learnMidiAction,
+          onClearMapping: keyboardMidiControls.clearMidiMapping,
+          onClearAll: keyboardMidiControls.clearAllMidiMappings,
+          onCancelLearn: keyboardMidiControls.cancelMidiLearn,
+        }}
       />
 
       <TransposerModal 

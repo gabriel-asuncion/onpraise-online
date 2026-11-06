@@ -14,6 +14,7 @@ import {
   compileTimelineBeatMap,
   getNextTimelineBeat,
   getTimelineDurationBeats,
+  getTimelineLineStartBeat,
   getTimelineMeter,
   getYoutubeTimeForTimeline
 } from "./utils/timeline";
@@ -25,6 +26,7 @@ import { useSetlistData } from "./hooks/useSetlistData";
 import { useLivePresence } from "./hooks/useLivePresence";
 import { useYouTubeSync } from "./hooks/useYouTubeSync";
 import { useHardwareClock } from "./hooks/useHardwareClock";
+import { useKeyboardMidiControls } from "./hooks/useKeyboardMidiControls";
 
 import { LiveHeader } from "./components/LiveHeader";
 import { SimplifiedStackView } from "./components/SimplifiedStackView";
@@ -65,6 +67,7 @@ interface PlaybackStatePayload {
   mdSectionStartTime?: number | null;
   mdAbsoluteBeat?: number;
   mdGlobalBeatTime?: number;
+  exactBeat?: number;
   isYtSource?: boolean;
   is_recording?: boolean;
   is_paused?: boolean;
@@ -148,7 +151,7 @@ export default function SetlistPerformanceRoomPage() {
   useWakeLock();
 
   // ✅ SURGICAL FIX: Bring back fetchAndDecodeAudio
-  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio, setAudioPanRight } = useWebAudioEngine();
+  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
 
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
@@ -156,7 +159,9 @@ export default function SetlistPerformanceRoomPage() {
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isMetronomeSoundEnabledRef,
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
+    guideVolume, setGuideVolume, guideVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
+    mixerMutes, setMixerMutes, mixerSolos, setMixerSolos,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
     isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   } = useLocalPreferences();
@@ -164,6 +169,10 @@ export default function SetlistPerformanceRoomPage() {
   useEffect(() => {
     setAudioPanRight(isClickGuideHardPannedRight);
   }, [isClickGuideHardPannedRight, setAudioPanRight]);
+
+  useEffect(() => {
+    setGuideCueVolume(guideVolumeRef.current);
+  }, [guideVolume, mixerMutes, mixerSolos, guideVolumeRef, setGuideCueVolume]);
 
   const {
     loading, loadState, loadingStatus, retryLoad, setlistName, setlistEventName, setlistTeamId, setlistTrackTitles, tracksList, setTracksList, tracksListRef,
@@ -583,6 +592,22 @@ export default function SetlistPerformanceRoomPage() {
     return hours === "00" ? `${minutes}:${seconds}` : `${hours}:${minutes}:${seconds}`;
   }
 
+  function formatTelemetryError(error: unknown) {
+    if (error instanceof Error) return `${error.name}: ${error.message}`;
+    if (error && typeof error === "object") {
+      const fields = Object.fromEntries(
+        Object.getOwnPropertyNames(error).map((key) => {
+          const value = (error as Record<string, unknown>)[key];
+          return [key, value === undefined ? "<undefined>" : value];
+        })
+      );
+      return Object.keys(fields).length > 0
+        ? JSON.stringify(fields)
+        : `Empty error object (${Object.prototype.toString.call(error)})`;
+    }
+    return String(error);
+  }
+
   async function persistTelemetryUpdate(update: TelemetryUpdate, targetSetlistId = setlistId) {
     if (!targetSetlistId) {
       setTelemetrySaveError("Telemetry could not be saved because the setlist is unavailable.");
@@ -594,8 +619,16 @@ export default function SetlistPerformanceRoomPage() {
     }
 
     const write = telemetryWriteQueueRef.current.catch(() => undefined).then(async () => {
-      const { error } = await supabase.from("setlists").update(update).eq("id", targetSetlistId);
+      const { data, error } = await supabase
+        .from("setlists")
+        .update(update)
+        .eq("id", targetSetlistId)
+        .select("id")
+        .maybeSingle();
       if (error) throw error;
+      if (!data) {
+        throw new Error("No setlist row was updated; the setlist may be missing or the current role may not have UPDATE permission.");
+      }
     });
     telemetryWriteQueueRef.current = write;
 
@@ -603,15 +636,7 @@ export default function SetlistPerformanceRoomPage() {
       await write;
       setTelemetrySaveError(null);
     } catch (error) {
-      const details = error && typeof error === "object"
-        ? error as { message?: unknown; code?: unknown; details?: unknown; hint?: unknown }
-        : null;
-      console.error("Failed to save rehearsal telemetry:", {
-        message: details?.message ?? (error instanceof Error ? error.message : String(error)),
-        code: details?.code,
-        details: details?.details,
-        hint: details?.hint
-      });
+      console.error(`Failed to save rehearsal telemetry: ${formatTelemetryError(error)}`);
       setTelemetrySaveError("Lobby telemetry is synced, but rehearsal history could not be saved for later sessions.");
     }
   }
@@ -1152,7 +1177,8 @@ export default function SetlistPerformanceRoomPage() {
           payload.sectionIndex,
           jumpTime,
           false,
-          "explicit-jump"
+          "explicit-jump",
+          payload.exactBeat
         );
       }
     }
@@ -2272,6 +2298,143 @@ export default function SetlistPerformanceRoomPage() {
     return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
   };
 
+  function navigateLiveSection(direction: -1 | 1) {
+    if (!hasCurrentPlaybackAuthority()) return;
+    const targetTrackIndex = isPlayingRef.current
+      ? playingTrackIndexRef.current
+      : currentTrackIndexRef.current;
+    const currentSections = isPlayingRef.current
+      ? playingSectionsRef.current
+      : sectionsRef.current;
+    let targetIndex = currentSectionIndexRef.current + direction;
+    while (
+      targetIndex >= 0 &&
+      targetIndex < currentSections.length &&
+      currentSections[targetIndex].section_name.toLowerCase().startsWith("spacer")
+    ) targetIndex += direction;
+    if (targetIndex >= 0 && targetIndex < currentSections.length) {
+      handleSectionInteractiveSelection(targetIndex, targetTrackIndex);
+      if (!isPlayingRef.current) {
+        activeLineIndexRef.current = 0;
+        setActiveLineIndex(0);
+      }
+    }
+  }
+
+  function navigateLiveLine(direction: -1 | 1) {
+    if (!hasCurrentPlaybackAuthority()) return;
+    const targetTrackIndex = isPlayingRef.current
+      ? playingTrackIndexRef.current
+      : currentTrackIndexRef.current;
+    const targetSections = isPlayingRef.current
+      ? playingSectionsRef.current
+      : sectionsRef.current;
+    const targetSong = isPlayingRef.current
+      ? playingSongRef.current
+      : activeSongRef.current;
+    if (!targetSong || targetSections.length === 0) return;
+    const targetAstTree = isPlayingRef.current
+      ? memoizedSetlistAst[targetTrackIndex]?.ast ?? []
+      : astTreeRef.current;
+    const targetBeatMap = isPlayingRef.current
+      ? compileTimelineBeatMap(
+          targetSections,
+          targetSong.section_timings,
+          targetAstTree.map((section) => section.lines.length),
+          targetSong.default_structure
+        )
+      : beatMapRef.current;
+
+    let targetSectionIndex = currentSectionIndexRef.current;
+    let targetLineIndex = activeLineIndexRef.current + direction;
+    while (targetSectionIndex >= 0 && targetSectionIndex < targetSections.length) {
+      const section = targetSections[targetSectionIndex];
+      const lineCount = targetAstTree[targetSectionIndex]?.lines.length ?? 0;
+      if (!section.section_name.toLowerCase().startsWith("spacer") && lineCount > 0) {
+        if (targetLineIndex >= 0 && targetLineIndex < lineCount) break;
+        targetSectionIndex += direction;
+        if (targetSectionIndex < 0 || targetSectionIndex >= targetSections.length) return;
+        const nextLineCount = targetAstTree[targetSectionIndex]?.lines.length ?? 0;
+        targetLineIndex = direction > 0 ? 0 : nextLineCount - 1;
+      } else {
+        targetSectionIndex += direction;
+        if (targetSectionIndex < 0 || targetSectionIndex >= targetSections.length) return;
+        const nextLineCount = targetAstTree[targetSectionIndex]?.lines.length ?? 0;
+        targetLineIndex = direction > 0 ? 0 : nextLineCount - 1;
+      }
+    }
+    if (targetSectionIndex < 0 || targetSectionIndex >= targetSections.length) return;
+
+    const sectionStartBeat = targetBeatMap.sectionStartBeats[targetSectionIndex] || 0;
+    const beatInSection = getTimelineLineStartBeat(
+      targetSong.section_timings,
+      targetSections[targetSectionIndex].section_name,
+      targetAstTree[targetSectionIndex]?.lines.length ?? 1,
+      targetLineIndex
+    );
+    const targetAbsoluteBeat = sectionStartBeat + beatInSection;
+    const beatDurationMs = 60000 / (targetSong.tempo || 75);
+    const jumpTime = getGlobalTime() - (targetAbsoluteBeat - sectionStartBeat) * beatDurationMs;
+
+    setExplicitScrubBeat(targetAbsoluteBeat);
+    executeJumpNow(targetTrackIndex, targetSectionIndex, jumpTime, false, "explicit-jump", targetAbsoluteBeat);
+    activeLineIndexRef.current = targetLineIndex;
+    setActiveLineIndex(targetLineIndex);
+    sendSupabaseBroadcast({
+      action: "JUMP",
+      trackIndex: targetTrackIndex,
+      sectionIndex: targetSectionIndex,
+      mdSectionStartTime: jumpTime,
+      exactBeat: targetAbsoluteBeat
+    });
+  }
+
+  function navigateLiveTrack(direction: -1 | 1) {
+    if (!hasCurrentPlaybackAuthority()) return;
+    const currentTrackIndex = isPlayingRef.current
+      ? playingTrackIndexRef.current
+      : currentTrackIndexRef.current;
+    const targetTrackIndex = currentTrackIndex + direction;
+    if (targetTrackIndex < 0 || targetTrackIndex >= tracksListRef.current.length) return;
+    if (isPlayingRef.current) handleSectionInteractiveSelection(0, targetTrackIndex);
+    else handleUserSelectTrackBadge(targetTrackIndex);
+  }
+
+  function cycleLiveView() {
+    const modes = ["sheet", "stack", "tracks"] as const;
+    const current = isTracksMode ? "tracks" : isSimplifiedMode ? "stack" : "sheet";
+    const next = modes[(modes.indexOf(current) + 1) % modes.length];
+    setIsZenMode(false);
+    setIsTracksMode(next === "tracks");
+    setIsSimplifiedMode(next === "stack");
+  }
+
+  const keyboardMidiControls = useKeyboardMidiControls(supabase, {
+    playStop: handleToggleFlowPlaybackState,
+    previousSong: () => navigateLiveTrack(-1),
+    nextSong: () => navigateLiveTrack(1),
+    previousSection: () => navigateLiveSection(-1),
+    nextSection: () => navigateLiveSection(1),
+    previousLine: () => navigateLiveLine(-1),
+    nextLine: () => navigateLiveLine(1),
+    viewMode: cycleLiveView,
+    chordNotation: () => setShowChords(!showChords),
+    chordFormat: () => setChordFormat(chordFormat === "Key" ? "Numbers" : "Key"),
+    lineSpacing: () => setLineSpacing(lineSpacing === 16 ? 24 : lineSpacing === 24 ? 32 : 16),
+    lyricsSize: () => setLyricsFontSize(lyricsFontSize === 14 ? 16 : lyricsFontSize === 16 ? 20 : lyricsFontSize === 20 ? 24 : 14),
+    youtubeSync: () => handleSetYoutubeSync(!isYoutubeSyncEnabled),
+    clickMute: () => setMixerMutes((current) => ({ ...current, click: !current.click })),
+    clickSolo: () => setMixerSolos((current) => ({ ...current, click: !current.click })),
+    guideMute: () => setMixerMutes((current) => ({ ...current, guide: !current.guide })),
+    guideSolo: () => setMixerSolos((current) => ({ ...current, guide: !current.guide })),
+    youtubeMute: () => setMixerMutes((current) => ({ ...current, yt: !current.yt })),
+    youtubeSolo: () => setMixerSolos((current) => ({ ...current, yt: !current.yt })),
+    mdTakeover: handleTogglePlaybackAuthority,
+    clickVolume: (value) => { if (typeof value === "number") setLocalClickVolume(value); },
+    guideVolume: (value) => { if (typeof value === "number") setGuideVolume(value); },
+    youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
+  });
+
   if (loading) return <PageSkeleton message="LOADING SETLIST..." variant="live" />;
 
   return (
@@ -2435,7 +2598,11 @@ export default function SetlistPerformanceRoomPage() {
         setMetronomeSoundType={setMetronomeSoundType}
         lineSpacing={lineSpacing} setLineSpacing={setLineSpacing} lyricsFontSize={lyricsFontSize} setLyricsFontSize={setLyricsFontSize}
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}
-        localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume} audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
+        localClickVolume={localClickVolume} setLocalClickVolume={setLocalClickVolume}
+        guideVolume={guideVolume} setGuideVolume={setGuideVolume}
+        mixerMutes={mixerMutes} setMixerMutes={setMixerMutes}
+        mixerSolos={mixerSolos} setMixerSolos={setMixerSolos}
+        audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
         isYoutubeSyncEnabled={localPresenceUser?.isMD === true && isYoutubeSyncEnabled}
         setIsYoutubeSyncEnabled={handleSetYoutubeSync}
@@ -2448,6 +2615,22 @@ export default function SetlistPerformanceRoomPage() {
         isPaused={isPaused} recordingAccumulatedMs={recordingAccumulatedMs}
         getGlobalTime={getGlobalTime}
         isPlayingFlow={isPlayingFlow} router={router} handleOpenTransposerModal={() => setIsTransposerOpen(true)} setIsStructureModalOpen={setIsStructureModalOpen}
+        midiSetup={{
+          preferences: keyboardMidiControls.preferences,
+          devices: keyboardMidiControls.devices,
+          isLoading: keyboardMidiControls.isLoading,
+          isSaving: keyboardMidiControls.isSaving,
+          isMidiSupported: keyboardMidiControls.isMidiSupported,
+          preferenceError: keyboardMidiControls.preferenceError,
+          midiError: keyboardMidiControls.midiError,
+          learningAction: keyboardMidiControls.learningAction,
+          onScan: () => { void keyboardMidiControls.scanMidiDevices(); },
+          onPairDevice: keyboardMidiControls.pairDevice,
+          onLearn: keyboardMidiControls.learnMidiAction,
+          onClearMapping: keyboardMidiControls.clearMidiMapping,
+          onClearAll: keyboardMidiControls.clearAllMidiMappings,
+          onCancelLearn: keyboardMidiControls.cancelMidiLearn,
+        }}
       />
 
       <StructureEditorModal

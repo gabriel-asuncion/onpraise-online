@@ -4,6 +4,7 @@ import { SongRecord } from "../types/setlist";
 
 // ✅ Import the Mixer Component
 import { VolumeMixerModal } from "./VolumeMixerModal";
+import { MidiSetupModal, MidiSetupModalProps } from "./MidiSetupModal";
 
 interface LivePresenceUser {
   id: string;
@@ -37,6 +38,8 @@ interface SettingsModalProps {
   setIsDoubleMetronomeEnabled: (val: boolean) => void;
   localClickVolume: number;
   setLocalClickVolume: (val: number) => void;
+  guideVolume: number;
+  setGuideVolume: (val: number) => void;
   audioLatencyOffsetMs: number;
   setAudioLatencyOffsetMs: (val: number) => void;
   isTestingSync: boolean;
@@ -47,6 +50,11 @@ interface SettingsModalProps {
   setIsYoutubeSyncEnabled: (val: boolean) => void;
   youtubeVolume: number;
   setYoutubeVolume: (val: number) => void;
+  mixerMutes: { click: boolean; guide: boolean; yt: boolean };
+  setMixerMutes: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
+  mixerSolos: { click: boolean; guide: boolean; yt: boolean };
+  setMixerSolos: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
+  midiSetup: Omit<MidiSetupModalProps, "onClose">;
   isClickGuideHardPannedRight: boolean;
   setIsClickGuideHardPannedRight: (val: boolean) => void;
   canEditSong: boolean;
@@ -67,6 +75,7 @@ interface SettingsModalProps {
 export function SettingsModal(props: SettingsModalProps) {
   const [elapsedStr, setElapsedStr] = React.useState("00:00:00");
   const [isMixerOpen, setIsMixerOpen] = React.useState(false);
+  const [isMidiSetupOpen, setIsMidiSetupOpen] = React.useState(false);
 
   // --- FLUID DISMISS ENGINE ---
   const [dragY, setDragY] = React.useState(0);
@@ -143,7 +152,9 @@ export function SettingsModal(props: SettingsModalProps) {
     lineSpacing, setLineSpacing, lyricsFontSize, setLyricsFontSize,
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled,
     metronomeSoundType, setMetronomeSoundType, 
-    localClickVolume, setLocalClickVolume, audioLatencyOffsetMs, setAudioLatencyOffsetMs,
+    localClickVolume, setLocalClickVolume, guideVolume, setGuideVolume,
+    mixerMutes, setMixerMutes, mixerSolos, setMixerSolos,
+    audioLatencyOffsetMs, setAudioLatencyOffsetMs,
     isTestingSync, setIsTestingSync, testVisualBeat, activeSong,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
     youtubeVolume, setYoutubeVolume, canEditSong, isPlayingFlow, router, handleOpenTransposerModal, setIsStructureModalOpen,
@@ -158,7 +169,7 @@ export function SettingsModal(props: SettingsModalProps) {
   const btnInactive = "text-on-surface-variant hover:text-on-surface font-semibold";
 
   return (
-    <div className={`fixed inset-0 z-[200000] flex items-end sm:items-center justify-center select-none transition-opacity duration-250 ${isClosing ? "opacity-0" : "animate-in fade-in"} bg-surface text-on-surface font-sans`}>
+    <div data-shortcuts-disabled="true" className={`fixed inset-0 z-[200000] flex items-end sm:items-center justify-center select-none transition-opacity duration-250 ${isClosing ? "opacity-0" : "animate-in fade-in"} bg-surface text-on-surface font-sans`}>
       {/* Clickable Backdrop */}
       <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={triggerClose} />
       
@@ -381,6 +392,21 @@ export function SettingsModal(props: SettingsModalProps) {
                 </button>
               )}
 
+              <button
+                type="button"
+                onClick={() => setIsMidiSetupOpen(true)}
+                className="w-full flex items-center justify-between border-t border-outline-variant/10 px-1 pt-3 text-left"
+              >
+                <span className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-[20px] text-primary">piano</span>
+                  <span className="flex flex-col">
+                    <span className="text-[13px] font-bold text-on-surface">MIDI Setup</span>
+                    <span className="text-[11px] text-on-surface-variant">Pair a controller and learn controls</span>
+                  </span>
+                </span>
+                <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
+              </button>
+
             </div>
           </div>
 
@@ -433,13 +459,25 @@ export function SettingsModal(props: SettingsModalProps) {
         onClose={() => setIsMixerOpen(false)}
         localClickVolume={localClickVolume} 
         setLocalClickVolume={setLocalClickVolume}
+        guideVolume={guideVolume}
+        setGuideVolume={setGuideVolume}
         youtubeVolume={youtubeVolume} 
         setYoutubeVolume={setYoutubeVolume}
+        mixerMutes={mixerMutes}
+        setMixerMutes={setMixerMutes}
+        mixerSolos={mixerSolos}
+        setMixerSolos={setMixerSolos}
         isClickGuideHardPannedRight={props.isClickGuideHardPannedRight}
         setIsClickGuideHardPannedRight={props.setIsClickGuideHardPannedRight}
         metronomeSoundType={metronomeSoundType}
         setMetronomeSoundType={setMetronomeSoundType}
       />
+      {isMidiSetupOpen && (
+        <MidiSetupModal
+          {...props.midiSetup}
+          onClose={() => setIsMidiSetupOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -51,8 +51,13 @@ export function useLocalPreferences() {
   const [localClickVolume, setLocalClickVolume] = useState<number>(1.0);
   const localClickVolumeRef = useRef<number>(1.0);
 
+  const [guideVolume, setGuideVolume] = useState<number>(0.8);
+  const guideVolumeRef = useRef<number>(0.8);
+
   const [youtubeVolume, setYoutubeVolume] = useState<number>(0.8);
   const youtubeVolumeRef = useRef<number>(0.8);
+  const [mixerMutes, setMixerMutes] = useState({ click: false, guide: false, yt: false });
+  const [mixerSolos, setMixerSolos] = useState({ click: false, guide: false, yt: false });
 
   const [isYoutubeSyncEnabled, setIsYoutubeSyncEnabled] = useState<boolean>(false); // ✅ Added
   const [isClickGuideHardPannedRight, setIsClickGuideHardPannedRight] = useHardPanRightPreference();
@@ -73,6 +78,8 @@ export function useLocalPreferences() {
       if (savedSpacing) setLineSpacing(Number(savedSpacing));
       const savedVolume = localStorage.getItem("wm_prefs_clickVolume");
       if (savedVolume) setLocalClickVolume(Number(savedVolume));
+      const savedGuideVolume = localStorage.getItem("wm_prefs_guideVolume");
+      if (savedGuideVolume) setGuideVolume(Number(savedGuideVolume));
       const savedYtVolume = localStorage.getItem("wm_prefs_ytVolume");
       if (savedYtVolume) setYoutubeVolume(Number(savedYtVolume));
       const savedDouble = localStorage.getItem("wm_prefs_doubleMetronome");
@@ -87,8 +94,11 @@ export function useLocalPreferences() {
   useEffect(() => {
     isMetronomeSoundEnabledRef.current = isMetronomeSoundEnabled;
     isDoubleMetronomeEnabledRef.current = isDoubleMetronomeEnabled;
-    localClickVolumeRef.current = localClickVolume;
-    youtubeVolumeRef.current = youtubeVolume;
+    guideVolumeRef.current = guideVolume;
+    const anySoloActive = mixerSolos.click || mixerSolos.guide || mixerSolos.yt;
+    localClickVolumeRef.current = mixerMutes.click || (anySoloActive && !mixerSolos.click) ? 0 : localClickVolume;
+    guideVolumeRef.current = mixerMutes.guide || (anySoloActive && !mixerSolos.guide) ? 0 : guideVolume;
+    youtubeVolumeRef.current = mixerMutes.yt || (anySoloActive && !mixerSolos.yt) ? 0 : youtubeVolume;
 
     if (typeof window !== "undefined") {
       localStorage.setItem("wm_prefs_fontSize", lyricsFontSize.toString());
@@ -98,12 +108,13 @@ export function useLocalPreferences() {
       localStorage.setItem("wm_prefs_tracksMode", isTracksMode.toString());
       localStorage.setItem("wm_prefs_lineSpacing", lineSpacing.toString());
       localStorage.setItem("wm_prefs_clickVolume", localClickVolume.toString());
+      localStorage.setItem("wm_prefs_guideVolume", guideVolume.toString());
       localStorage.setItem("wm_prefs_ytVolume", youtubeVolume.toString());
       localStorage.setItem("wm_prefs_doubleMetronome", isDoubleMetronomeEnabled.toString());
       localStorage.setItem("wm_prefs_youtubeSync", isYoutubeSyncEnabled.toString());
       localStorage.setItem("wm_prefs_metronome", isMetronomeSoundEnabled.toString()); // ✅ SURGICAL FIX: Actually saves the click toggle!
     }
-  }, [lyricsFontSize, showChords, chordFormat, isSimplifiedMode, isTracksMode, lineSpacing, localClickVolume, youtubeVolume, isDoubleMetronomeEnabled, isMetronomeSoundEnabled, isYoutubeSyncEnabled]);
+  }, [lyricsFontSize, showChords, chordFormat, isSimplifiedMode, isTracksMode, lineSpacing, localClickVolume, guideVolume, youtubeVolume, mixerMutes, mixerSolos, isDoubleMetronomeEnabled, isMetronomeSoundEnabled, isYoutubeSyncEnabled]);
 
   return {
     lyricsFontSize, setLyricsFontSize,
@@ -115,7 +126,10 @@ export function useLocalPreferences() {
     isMetronomeSoundEnabled, setIsMetronomeSoundEnabled, isMetronomeSoundEnabledRef,
     isDoubleMetronomeEnabled, setIsDoubleMetronomeEnabled, isDoubleMetronomeEnabledRef,
     localClickVolume, setLocalClickVolume, localClickVolumeRef,
+    guideVolume, setGuideVolume, guideVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
+    mixerMutes, setMixerMutes,
+    mixerSolos, setMixerSolos,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
     isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   };

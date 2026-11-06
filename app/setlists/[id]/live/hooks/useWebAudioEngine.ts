@@ -4,6 +4,7 @@ import { normalizeSectionNameToAudioFile } from "../utils/setlist-helpers";
 let globalAudioContext: AudioContext | null = null;
 const audioBufferCache: Record<string, AudioBuffer> = {};
 let isHardPanRightEnabled = false;
+let guideCueVolume = 0.8;
 const activePanners = new Set<StereoPannerNode>();
 
 // ✅ SURGICAL FIX: Track scheduled nodes so we can kill ghost beats on jumps
@@ -14,6 +15,10 @@ export const setAudioPanRight = (enabled: boolean) => {
   activePanners.forEach((panner) => {
     panner.pan.value = enabled ? 1 : 0;
   });
+};
+
+export const setGuideCueVolume = (volume: number) => {
+  guideCueVolume = Math.max(0, Math.min(1, volume));
 };
 
 export const initAudioContext = () => {
@@ -77,7 +82,7 @@ export const playZeroLatencyAudio = (key: string, volume: number = 1.0, time: nu
 export const playGuideCue = (rawSectionName: string) => {
   if (!rawSectionName) return;
   const cleanName = normalizeSectionNameToAudioFile(rawSectionName);
-  if (cleanName) playZeroLatencyAudio(cleanName, 0.85);
+  if (cleanName) playZeroLatencyAudio(cleanName, guideCueVolume);
 };
 
 export const getAudioContext = () => globalAudioContext;
@@ -104,6 +109,7 @@ export function useWebAudioEngine() {
     playGuideCue, 
     getAudioContext,
     setAudioPanRight,
+    setGuideCueVolume,
     cancelFutureAudio // ✅ Exported for the Live Page to use
   };
 }

@@ -7,8 +7,14 @@ interface VolumeMixerModalProps {
   onClose: () => void;
   localClickVolume: number;
   setLocalClickVolume: (val: number) => void;
+  guideVolume: number;
+  setGuideVolume: (val: number) => void;
   youtubeVolume: number;
   setYoutubeVolume: (val: number) => void;
+  mixerMutes: { click: boolean; guide: boolean; yt: boolean };
+  setMixerMutes: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
+  mixerSolos: { click: boolean; guide: boolean; yt: boolean };
+  setMixerSolos: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
   isClickGuideHardPannedRight: boolean;
   setIsClickGuideHardPannedRight: (val: boolean) => void;
   // ✅ SURGICAL FIX: Match the strict types here too
@@ -111,7 +117,9 @@ const FaderChannel = ({
 
 export function VolumeMixerModal({
   isOpen, onClose, localClickVolume, setLocalClickVolume,
-  youtubeVolume, setYoutubeVolume, isClickGuideHardPannedRight, setIsClickGuideHardPannedRight,
+  guideVolume, setGuideVolume, youtubeVolume, setYoutubeVolume,
+  mixerMutes: mutes, setMixerMutes: setMutes, mixerSolos: solos, setMixerSolos: setSolos,
+  isClickGuideHardPannedRight, setIsClickGuideHardPannedRight,
   metronomeSoundType, setMetronomeSoundType
 }: VolumeMixerModalProps) {
   
@@ -133,21 +141,7 @@ export function VolumeMixerModal({
   };
   const handleTouchEnd = () => { dragY > 100 ? handleClose() : setDragY(0); };
 
-  // --- MUTE & SOLO ENGINE ---
-  const [mutes, setMutes] = useState({ click: false, yt: false, guide: false });
-  const [solos, setSolos] = useState({ click: false, yt: false, guide: false });
-  const [sliderVals, setSliderVals] = useState({ click: localClickVolume, yt: youtubeVolume, guide: 0.8 });
   const anySoloActive = solos.click || solos.yt || solos.guide;
-
-  useEffect(() => {
-    const calcOutput = (id: 'click' | 'yt' | 'guide', rawVol: number) => {
-      if (mutes[id]) return 0;
-      if (anySoloActive && !solos[id]) return 0;
-      return rawVol;
-    };
-    setLocalClickVolume(calcOutput('click', sliderVals.click));
-    setYoutubeVolume(calcOutput('yt', sliderVals.yt));
-  }, [mutes, solos, sliderVals, setLocalClickVolume, setYoutubeVolume]);
 
   if (!isOpen) return null;
 
@@ -194,17 +188,17 @@ export function VolumeMixerModal({
           </div>
 
           <FaderChannel 
-            id="click" label="Click" val={sliderVals.click} setVal={(v) => setSliderVals(p => ({...p, click: v}))}
+            id="click" label="Click" val={localClickVolume} setVal={setLocalClickVolume}
             isMuted={mutes.click} isSoloed={solos.click} anySoloActive={anySoloActive}
             toggleMute={() => setMutes(p => ({...p, click: !p.click}))} toggleSolo={() => setSolos(p => ({...p, click: !p.click}))}
           />
           <FaderChannel 
-            id="guide" label="Guides" val={sliderVals.guide} setVal={(v) => setSliderVals(p => ({...p, guide: v}))}
+            id="guide" label="Guides" val={guideVolume} setVal={setGuideVolume}
             isMuted={mutes.guide} isSoloed={solos.guide} anySoloActive={anySoloActive}
             toggleMute={() => setMutes(p => ({...p, guide: !p.guide}))} toggleSolo={() => setSolos(p => ({...p, guide: !p.guide}))}
           />
           <FaderChannel 
-            id="yt" label="YT Sync" val={sliderVals.yt} setVal={(v) => setSliderVals(p => ({...p, yt: v}))}
+            id="yt" label="YT Sync" val={youtubeVolume} setVal={setYoutubeVolume}
             isMuted={mutes.yt} isSoloed={solos.yt} anySoloActive={anySoloActive}
             toggleMute={() => setMutes(p => ({...p, yt: !p.yt}))} toggleSolo={() => setSolos(p => ({...p, yt: !p.yt}))}
           />

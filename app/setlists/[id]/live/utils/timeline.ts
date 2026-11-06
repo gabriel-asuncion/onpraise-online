@@ -160,6 +160,39 @@ export function compileTimelineBeatMap(
   return { totalBeats: currentAbsoluteBeat, nodes, sectionStartBeats };
 }
 
+export function getTimelineLineStartBeat(
+  sectionTimings: unknown,
+  sectionName: string,
+  lineCount: number,
+  lineIndex: number
+) {
+  const safeLineCount = Math.max(1, Math.floor(lineCount));
+  const safeLineIndex = Math.max(0, Math.min(safeLineCount - 1, Math.floor(lineIndex)));
+  const meter = getTimelineMeter(sectionTimings);
+  const timingRoot = parseRecord(sectionTimings);
+  const timings = parseRecord(timingRoot[sectionName]);
+  const headBeats = getNonNegativeNumber(timings, "head_m", 0) * meter.quarterBeatsPerMeasure;
+  const baseLoopBeats =
+    getNonNegativeNumber(timings, "measures", 4) * meter.quarterBeatsPerMeasure +
+    getNonNegativeNumber(timings, "beats", 0);
+  const lineTimings = parseRecord(timings.line_timings);
+  const hasLineOverrides = Object.keys(lineTimings).length > 0;
+  const lineBeats = Array.from({ length: safeLineCount }, (_, index) => {
+    const line = parseRecord(lineTimings[String(index)]);
+    const repeats = Math.max(0, Number(line.repeats) || 0);
+    return (
+      getNonNegativeNumber(line, "measures", 0) * meter.quarterBeatsPerMeasure +
+      getNonNegativeNumber(line, "beats", 0)
+    ) * (repeats + 1);
+  });
+
+  if (!hasLineOverrides || lineBeats.every((beats) => beats <= 0)) {
+    return headBeats + (baseLoopBeats / safeLineCount) * safeLineIndex;
+  }
+
+  return headBeats + lineBeats.slice(0, safeLineIndex).reduce((total, beats) => total + beats, 0);
+}
+
 function parseRecord(value: unknown): Record<string, unknown> {
   let parsed = value;
   if (typeof parsed === "string") {
