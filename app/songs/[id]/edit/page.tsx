@@ -7,6 +7,7 @@ import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
+import { getYoutubeTimeForTimeline } from "../../../setlists/[id]/live/utils/timeline";
 import TimelineArrangement, { type TimelineSection, type TimelineLyricPreview, type TimelineSnap } from "./TimelineArrangement";
 
 // =======================================================
@@ -1847,7 +1848,10 @@ function formatTimeWithMs(seconds: number) {
   const handlePlayFromSyncPoint = () => {
     initAudioContext();
     if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
-      ytPlayerRef.current.seekTo(formYoutubeSyncOffset / 1000, true);
+      ytPlayerRef.current.seekTo(
+        getYoutubeTimeForTimeline(0, 0, parseInt(formTempo, 10) || 75, formYoutubeSyncOffset),
+        true
+      );
       ytPlayerRef.current.playVideo();
     }
   };
@@ -3023,7 +3027,7 @@ function formatTimeWithMs(seconds: number) {
         let lineCursorBeat = cursorBeat + headPaddingBeats;
         for (let pass = 0; pass < passes; pass += 1) {
           for (let index = 0; index < lines.length; index += 1) {
-            lineStarts.push(Math.max(0, formYoutubeSyncOffset / 1000 + lineCursorBeat * 60 / bpm));
+            lineStarts.push(getYoutubeTimeForTimeline(lineCursorBeat, 0, bpm, formYoutubeSyncOffset));
             const lineDuration = lineDurations[index] ?? 0;
             lineCursorBeat += lineDuration;
           }

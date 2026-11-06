@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useRef, useMemo } from "react";
+import React, { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext"; 
@@ -22,7 +22,12 @@ import { SettingsModal } from "../../setlists/[id]/live/components/SettingsModal
 import { TransposerModal } from "../../setlists/[id]/live/components/TransposerModal";
 import { ZenMovableFAB } from "../../setlists/[id]/live/components/ZenMovableFAB";
 
-import { CompiledSectionToken, CompiledBeatMap, BeatNode, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "../../setlists/[id]/live/types/setlist";
+import { CompiledSectionToken, CompiledBeatMap, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "../../setlists/[id]/live/types/setlist";
+import {
+  compileTimelineBeatMap,
+  getTimelineMeter,
+  getYoutubeTimeForTimeline
+} from "../../setlists/[id]/live/utils/timeline";
 import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote } from "../../setlists/[id]/live/utils/music-math";
 import { normalizeSectionNameToAudioFile } from "../../setlists/[id]/live/utils/setlist-helpers"; 
 
@@ -124,8 +129,6 @@ export default function SoloPracticeRoomPage() {
   
   const [isTestingSync, setIsTestingSync] = useState<boolean>(false);
   const [testVisualBeat, setTestVisualBeat] = useState<number>(1);
-  const [countdownValue, setCountdownValue] = useState<number | null>(null);
-  const countdownValueRef = useRef<number | null>(null);
 
   const [currentMeasureLength, setCurrentMeasureLength] = useState<number>(4);
   const lastVisualMeasureLengthRef = useRef<number>(4);
@@ -142,6 +145,7 @@ export default function SoloPracticeRoomPage() {
   const [currentSectionIndex, setCurrentSectionIndex] = useState<number>(0);
   const [currentBeat, setCurrentBeat] = useState<number>(1);
   const [tracksPlayheadBeat, setTracksPlayheadBeat] = useState(0);
+  const [explicitScrubBeat, setExplicitScrubBeat] = useState<number | null>(null);
   const [activeLineIndex, setActiveLineIndex] = useState<number>(0);
   const [showSyncBack, setShowSyncBack] = useState<boolean>(false);
 
@@ -163,7 +167,6 @@ export default function SoloPracticeRoomPage() {
   const queuedTrackIndexRef = useRef<number | null>(null);
   const queuedSectionIndexRef = useRef<number | null>(null);
   const clickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const playClickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pendingQuantizedJumpRef = useRef<{ trackIndex: number; sectionIndex: number; jumpTime: number } | null>(null);
   const isYtBackingTrackStartRef = useRef<boolean>(false);
   const activeLineIndexRef = useRef<number>(0);
@@ -175,6 +178,16 @@ export default function SoloPracticeRoomPage() {
   const audioContextStartTimeRef = useRef<number | null>(null);
   const astTreeRef = useRef<CompiledSectionToken[]>([]);
   const mdSectionStartTimeRef = useRef<number | null>(null);
+  const youtubeStartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingYoutubeSyncRef = useRef<{
+    sectionIndex: number;
+    sectionStartTime: number;
+    mode: "start" | "explicit-jump";
+  } | null>(null);
+  const pendingYoutubeStartRef = useRef<{ sectionIndex: number; exactBeat: number | null } | null>(null);
+  const youtubePlaybackStartedHandlerRef = useRef<(currentTimeSeconds: number) => void>(() => {});
+  const youtubePlaybackErrorHandlerRef = useRef<() => void>(() => {});
+  const beginYoutubeBackedStartRef = useRef<() => void>(() => {});
   const lastBeatRef = useRef<number>(1);
 
   const backdropProgressRef = useRef<HTMLDivElement | null>(null);
@@ -267,11 +280,6 @@ export default function SoloPracticeRoomPage() {
 
         if (song.youtube_url && song.youtube_url.trim() !== "") {
           setIsYoutubeSyncEnabled(true);
-        }
-        
-        // ✅ SURGICAL ADDITION: Pass global sync offset down to latency state so the UI scrubs at the proper time offset
-        if (typeof song.youtube_sync_offset_ms === 'number') {
-           setAudioLatencyOffsetMs(song.youtube_sync_offset_ms);
         }
         
         setLoading(false);
@@ -384,34 +392,201 @@ export default function SoloPracticeRoomPage() {
 
   const beatMapRef = useRef<CompiledBeatMap>({ totalBeats: 0, nodes: [], sectionStartBeats: [] });
 
-  function executeStartSequence(useCountdown: boolean, forcedStartTimestamp?: number, isYtSource: boolean = false) {
+  function executeStartSequence(isYtSource: boolean = false) {
+    if (isPlayingRef.current || pendingYoutubeStartRef.current) return;
     isYtBackingTrackStartRef.current = isYtSource; 
     playingTrackIndexRef.current = 0;
     setPlayingTrackIndex(0);
     playingSongRef.current = activeSongRef.current;
     playingSectionsRef.current = sectionsRef.current;
+    const sectionIndex = currentSectionIndexRef.current;
+    const exactBeat = explicitScrubBeat;
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
+    const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+    const startTimestamp = exactBeat === null
+      ? getGlobalTime()
+      : getGlobalTime() - (exactBeat - sectionStartBeat) * beatDurationMs;
+    setExplicitScrubBeat(null);
+
+    if (isYtSource) {
+      pendingYoutubeStartRef.current = { sectionIndex, exactBeat };
+      beginYoutubeBackedStart();
+      return;
+    }
+
+    completeSoloStart(sectionIndex, startTimestamp, false, exactBeat);
+  }
+
+  function completeSoloStart(
+    sectionIndex: number,
+    startTimestamp: number,
+    isYtSource: boolean,
+    exactStartBeat?: number | null
+  ) {
+    pendingYoutubeStartRef.current = null;
+    setExplicitScrubBeat(null);
+    isYtBackingTrackStartRef.current = isYtSource;
+    playingTrackIndexRef.current = 0;
+    setPlayingTrackIndex(0);
+    playingSongRef.current = activeSongRef.current;
+    playingSectionsRef.current = sectionsRef.current;
+    mdSectionStartTimeRef.current = startTimestamp;
     isPlayingRef.current = true;
     setIsPlayingFlow(true);
+    executeJumpNow(0, sectionIndex, startTimestamp, true, "start", exactStartBeat);
+  }
 
-    const delayMs = useCountdown ? 3150 : 150; 
-    const startTimestamp = forcedStartTimestamp ?? (getGlobalTime() + delayMs);
-    mdSectionStartTimeRef.current = startTimestamp;
+  function beginYoutubeBackedStart() {
+    if (!pendingYoutubeStartRef.current || !isYtPlayerReadyRef.current) return;
+    const player = ytPlayerRef.current;
+    if (!player || typeof player.seekTo !== "function" || typeof player.playVideo !== "function") return;
+    const pendingStart = pendingYoutubeStartRef.current;
+    try {
+      const { sectionIndex, exactBeat } = pendingStart;
+      const song = activeSongRef.current;
+      const offsetMs = song?.youtube_sync_offset_ms || 0;
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
+      const expectedYoutubeTime = exactBeat !== null
+        ? getYoutubeTimeForTimeline(exactBeat, 0, song?.tempo || 75, offsetMs)
+        : sectionIndex === 0
+          ? 0
+          : getYoutubeTimeForTimeline(sectionStartBeat, 0, song?.tempo || 75, offsetMs);
+      player.seekTo(expectedYoutubeTime, true);
+      player.playVideo();
+    } catch (error) {
+      console.warn("Could not start the optional YouTube player.", error);
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+      const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+      const now = getGlobalTime();
+      const startTimestamp = pendingStart.exactBeat == null
+        ? now
+        : now - (pendingStart.exactBeat - sectionStartBeat) * beatDurationMs;
+      completeSoloStart(pendingStart.sectionIndex, startTimestamp, false, pendingStart.exactBeat);
+    }
+  }
 
-    executeJumpNow(0, currentSectionIndexRef.current, startTimestamp, true);
+  function handleYoutubePlaybackStarted(currentTimeSeconds: number) {
+    const pendingStart = pendingYoutubeStartRef.current;
+    if (!pendingStart) return;
+    const song = activeSongRef.current;
+    const offsetMs = song?.youtube_sync_offset_ms || 0;
+    const beatDurationMs = 60000 / (song?.tempo || 75);
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+    const expectedYoutubeTime = pendingStart.exactBeat !== null
+      ? getYoutubeTimeForTimeline(pendingStart.exactBeat, 0, song?.tempo || 75, offsetMs)
+      : pendingStart.sectionIndex === 0
+        ? 0
+        : getYoutubeTimeForTimeline(sectionStartBeat, 0, song?.tempo || 75, offsetMs);
+    const actualYoutubeTime = Math.abs(currentTimeSeconds - expectedYoutubeTime) <= 2
+      ? currentTimeSeconds
+      : expectedYoutubeTime;
+    const sectionElapsedMs = (actualYoutubeTime * 1000 - offsetMs) - sectionStartBeat * beatDurationMs;
+    const startTimestamp = getGlobalTime() - sectionElapsedMs;
+    completeSoloStart(pendingStart.sectionIndex, startTimestamp, true, pendingStart.exactBeat);
+  }
+
+  function handleYoutubePlaybackError() {
+    const pendingStart = pendingYoutubeStartRef.current;
+    if (pendingStart) {
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+      const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+      const now = getGlobalTime();
+      const startTimestamp = pendingStart.exactBeat == null
+        ? now
+        : now - (pendingStart.exactBeat - sectionStartBeat) * beatDurationMs;
+      completeSoloStart(pendingStart.sectionIndex, startTimestamp, false, pendingStart.exactBeat);
+    }
   }
 
   const {
-    youtubeVideoId, isYtBuffering, setIsYtBuffering,
-    ytPlayerRef, isYtPlayerReadyRef, ytSyncPendingRef, isYtBufferingRef
+    youtubeVideoId, isYtPlayerReady,
+    ytPlayerRef, isYtPlayerReadyRef, isYtBufferingRef
   } = useYouTubeSync({
     activeSong, activeSongRef, beatMapRef, currentSectionIndexRef,
-    getGlobalTime, youtubeVolumeRef, isYoutubeSyncEnabled
+    getGlobalTime, youtubeVolumeRef, isYoutubeSyncEnabled,
+    onPlaybackStarted: (currentTimeSeconds) => youtubePlaybackStartedHandlerRef.current(currentTimeSeconds),
+    onPlaybackError: () => youtubePlaybackErrorHandlerRef.current()
   });
+  useEffect(() => {
+    youtubePlaybackStartedHandlerRef.current = handleYoutubePlaybackStarted;
+    youtubePlaybackErrorHandlerRef.current = handleYoutubePlaybackError;
+    beginYoutubeBackedStartRef.current = beginYoutubeBackedStart;
+  });
+
+  const syncYoutubeToTimeline = useCallback((
+    sectionIndex: number,
+    sectionStartTime: number,
+    mode: "start" | "explicit-jump"
+  ) => {
+    if (youtubeStartTimeoutRef.current) {
+      clearTimeout(youtubeStartTimeoutRef.current);
+      youtubeStartTimeoutRef.current = null;
+    }
+
+    if (!isYtBackingTrackStartRef.current) {
+      pendingYoutubeSyncRef.current = null;
+      return;
+    }
+    pendingYoutubeSyncRef.current = { sectionIndex, sectionStartTime, mode };
+
+    const song = activeSongRef.current;
+    const player = ytPlayerRef.current;
+    if (!song || !player || !isYtPlayerReadyRef.current || typeof player.seekTo !== "function") return;
+
+    const now = getGlobalTime();
+    const elapsedTimelineMs = now - sectionStartTime;
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
+    const beatDurationMs = 60000 / (song.tempo || 75);
+    const theoreticalYoutubeTimeMs =
+      sectionStartBeat * beatDurationMs +
+      elapsedTimelineMs +
+      (song.youtube_sync_offset_ms || 0);
+    const expectedYoutubeTime = Math.max(0, theoreticalYoutubeTimeMs / 1000);
+
+    try {
+      player.seekTo(expectedYoutubeTime, true);
+      pendingYoutubeSyncRef.current = null;
+
+      const ensurePlaying = () => {
+        if (isPlayingRef.current && player.getPlayerState?.() !== 1) {
+          player.playVideo?.();
+        }
+      };
+
+      if (mode === "start" && theoreticalYoutubeTimeMs < 0) {
+        player.pauseVideo?.();
+        youtubeStartTimeoutRef.current = setTimeout(() => {
+          youtubeStartTimeoutRef.current = null;
+          if (isPlayingRef.current && isYtBackingTrackStartRef.current) {
+            player.playVideo?.();
+          }
+        }, Math.abs(theoreticalYoutubeTimeMs));
+      } else {
+        ensurePlaying();
+      }
+    } catch (error) {
+      console.warn("Could not synchronize the optional YouTube player.", error);
+    }
+  }, [getGlobalTime]);
+
+  useEffect(() => {
+    if (isYtPlayerReady && pendingYoutubeStartRef.current) {
+      beginYoutubeBackedStartRef.current();
+    }
+    const pendingSync = pendingYoutubeSyncRef.current;
+    if (isYtPlayerReady && pendingSync && isYtBackingTrackStartRef.current) {
+      syncYoutubeToTimeline(
+        pendingSync.sectionIndex,
+        pendingSync.sectionStartTime,
+        pendingSync.mode
+      );
+    }
+  }, [isYtPlayerReady, syncYoutubeToTimeline]);
 
   useHardwareClock({
     isPlayingFlow, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
-    audioLatencyOffsetMs, isYtBackingTrackStartRef, countdownValueRef, setCountdownValue,
+    audioLatencyOffsetMs, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
     queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
@@ -441,7 +616,14 @@ export default function SoloPracticeRoomPage() {
     sectionStartTimeRef, pauseOffsetMsRef, animationFrameRef, playingTrackIndexRef
   });
 
-  function executeJumpNow(targetTrackIdx: number, targetSectionIdx: number, jumpTime: number, isInitialStart: boolean = false) {
+  function executeJumpNow(
+    targetTrackIdx: number,
+    targetSectionIdx: number,
+    jumpTime: number,
+    isInitialStart: boolean = false,
+    youtubeSyncMode?: "start" | "explicit-jump",
+    exactStartBeat?: number | null
+  ) {
     playingTrackIndexRef.current = 0;
     setPlayingTrackIndex(0);
     playingSongRef.current = activeSongRef.current;
@@ -458,34 +640,20 @@ export default function SoloPracticeRoomPage() {
         const beatSpeedSecs = 60 / (activeSongRef.current?.tempo || 75);
         const theoreticalSongStartOffset = targetAbsoluteBeat * beatSpeedSecs;
         
-        // ✅ SURGICAL FIX: Calculate correct seek target and hardware baseline using youtube_sync_offset_ms
-        const ytOffsetSecs = (activeSongRef.current?.youtube_sync_offset_ms || 0) / 1000;
-        const ytSeekTargetSecs = ytOffsetSecs + theoreticalSongStartOffset;
-
-        if (isYtBackingTrackStartRef.current) {
-          audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
-        } else {
-          audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
-        }
-        
-        console.log(`🕒 [Clock Sync] Ctx State: ${audioCtx?.state} | StartTimeRef: ${audioContextStartTimeRef.current} | Offset: ${ytOffsetSecs}s`);
-
-        if (isYtBackingTrackStartRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-          try { 
-            ytPlayerRef.current.seekTo(ytSeekTargetSecs, true); 
-            ytPlayerRef.current.pauseVideo();
-            
-            const timeUntilPlayMs = Math.max(0, jumpTime - getGlobalTime());
-            setTimeout(() => {
-              if (isPlayingRef.current) ytPlayerRef.current.playVideo();
-            }, timeUntilPlayMs);
-          } catch(e) {}
-        }
-        
+        audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
+      }
+      if (youtubeSyncMode) {
+        syncYoutubeToTimeline(targetSectionIdx, jumpTime, youtubeSyncMode);
       }
     }
     currentSectionIndexRef.current = targetSectionIdx; setCurrentSectionIndex(targetSectionIdx);
-    lastAudioBeatRef.current = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0; 
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
+    const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+    const exactBeat = exactStartBeat ?? sectionStartBeat;
+    lastAudioBeatRef.current = Math.max(sectionStartBeat, exactBeat);
+    setTracksPlayheadBeat(isPlayingRef.current
+      ? sectionStartBeat + (getGlobalTime() - jumpTime) / beatDurationMs
+      : exactBeat);
     lastBeatRef.current = 0; lastVisualBeatRef.current = 0;
     setQueuedSectionIndex(null); pendingQuantizedJumpRef.current = null;
     
@@ -501,9 +669,17 @@ export default function SoloPracticeRoomPage() {
 
   function executeLocalResetSequence() {
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
+    pendingYoutubeStartRef.current = null;
+    if (youtubeStartTimeoutRef.current) {
+      clearTimeout(youtubeStartTimeoutRef.current);
+      youtubeStartTimeoutRef.current = null;
+    }
+    pendingYoutubeSyncRef.current = null;
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
     currentSectionIndexRef.current = 0; lastBeatRef.current = 0; activeLineIndexRef.current = 0;
+    setExplicitScrubBeat(null);
+    setTracksPlayheadBeat(0);
     setCurrentSectionIndex(0); updateMetronomeUI(1, false); setActiveLineIndex(0);
     setQueuedSectionIndex(null);
     setShowSyncBack(false);
@@ -514,23 +690,18 @@ export default function SoloPracticeRoomPage() {
 
   function handleToggleFlowPlaybackState() {
     initAudioContext();
+    if (pendingYoutubeStartRef.current) {
+      pendingYoutubeStartRef.current = null;
+      isYtBackingTrackStartRef.current = false;
+      ytPlayerRef.current?.pauseVideo?.();
+      return;
+    }
     if (isPlayingFlow) {
-      if (playClickTimeoutRef.current) { clearTimeout(playClickTimeoutRef.current); playClickTimeoutRef.current = null; }
       if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
       handleResetFlowTrigger();
     } else {
       if (sections.length === 0 || !activeSong) return;
-      if (playClickTimeoutRef.current) {
-        clearTimeout(playClickTimeoutRef.current); playClickTimeoutRef.current = null;
-        if (isYoutubeSyncEnabled && youtubeVideoId) executeStartSequence(true, undefined, true); 
-        else executeStartSequence(true); 
-      } else {
-        playClickTimeoutRef.current = setTimeout(() => {
-          playClickTimeoutRef.current = null;
-          if (isYoutubeSyncEnabled && youtubeVideoId) executeStartSequence(true, undefined, true); 
-          else executeStartSequence(false);
-        }, 250);
-      }
+      executeStartSequence(isYoutubeSyncEnabled && !!youtubeVideoId);
     }
   }
 
@@ -546,11 +717,16 @@ export default function SoloPracticeRoomPage() {
     return -1;
   }
 
-  function handleSectionInteractiveSelection(index: number) {
+  function handleSectionInteractiveSelection(index: number, _trackIndex?: number, exactBeat?: number) {
     const playableIndex = resolvePlayableSectionIndex(index);
     if (playableIndex < 0) return;
     if (!isPlayingFlow) {
-      const jumpTime = getGlobalTime() + 150; executeJumpNow(0, playableIndex, jumpTime);
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[playableIndex] || 0;
+      const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+      const jumpTime = getGlobalTime() + 150 -
+        (exactBeat === undefined ? 0 : (exactBeat - sectionStartBeat) * beatDurationMs);
+      setExplicitScrubBeat(exactBeat ?? null);
+      executeJumpNow(0, playableIndex, jumpTime, false, "explicit-jump", exactBeat);
       return;
     }
     if (clickTimeoutRef.current) {
@@ -568,7 +744,7 @@ export default function SoloPracticeRoomPage() {
           setQueuedSectionIndex(playableIndex);
           if (sectionsRef.current[playableIndex]) playGuideCue(sectionsRef.current[playableIndex].section_name);
           hasPlayedCueRef.current = true; 
-        } else { executeJumpNow(0, playableIndex, jumpTime); }
+        } else { executeJumpNow(0, playableIndex, jumpTime, false, "explicit-jump"); }
       }, 250);
     }
   }
@@ -602,62 +778,17 @@ export default function SoloPracticeRoomPage() {
   }, [sections, runtimeSemitoneDelta]);
 
   const beatMap = useMemo(() => {
-    const map: BeatNode[] = []; const sectionStartBeats: number[] = []; let currentAbsoluteBeat = 0;
     if (!activeSong || sections.length === 0) return { totalBeats: 0, nodes: [], sectionStartBeats: [] };
-
-    sections.forEach((section, sIdx) => {
-      sectionStartBeats.push(currentAbsoluteBeat);
-      const stampBeats = (totalBeatsToStamp: number) => {
-          let remaining = totalBeatsToStamp;
-          while (remaining > 0) {
-            const mLen = remaining >= 4 ? 4 : remaining;
-            for (let b = 1; b <= mLen; b++) {
-              map.push({ absoluteBeatIndex: currentAbsoluteBeat, measureBeatIndex: b, measureLength: mLen, sectionIndex: sIdx, isDownbeat: b === 1 });
-              currentAbsoluteBeat++;
-            }
-            remaining -= mLen;
-          }
-      };
-      if (section.section_name.toLowerCase().startsWith("spacer")) {
-        currentAbsoluteBeat += timelineDurationsBySectionId[section.id] ?? 0.5;
-        return;
-      }
-      const timings = activeSong.section_timings?.[section.section_name] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
-      const sectionMultiplier = (timings.repeats || 0) + 1;
-      const headBeats = (timings.head_m || 0) * 4;
-      const tailBeats = (timings.tail_m || 0) * 4;
-      
-      const totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
-      let baseLoopBeats = totalCoreBeats / sectionMultiplier;
-      
-      const parsedLinesCount = memoizedSongAstTree[sIdx]?.lines.length || 1;
-      let hasLineOverrides = false; 
-      const lineBeatsMap: number[] = [];
-      
-      if (timings.line_timings && Object.keys(timings.line_timings).length > 0) {
-        let sumBaseLoopBeats = 0;
-        for (let i = 0; i < parsedLinesCount; i++) {
-          const t = timings.line_timings[String(i)] || { measures: 0, beats: 0 };
-          const lineMult = (t.repeats || 0) + 1; 
-          const lineBeats = ((t.measures * 4) + (t.beats || 0)) * lineMult;
-          lineBeatsMap.push(lineBeats); 
-          sumBaseLoopBeats += lineBeats;
-        }
-        if (sumBaseLoopBeats > 0) { hasLineOverrides = true; baseLoopBeats = sumBaseLoopBeats; }
-      }
-
-      stampBeats(headBeats);
-      for (let r = 0; r < sectionMultiplier; r++) { 
-        if (hasLineOverrides) { lineBeatsMap.forEach(b => stampBeats(b)); } 
-        else { stampBeats(baseLoopBeats); } 
-      }
-      stampBeats(tailBeats);
-    });
-
-    return { totalBeats: currentAbsoluteBeat, nodes: map, sectionStartBeats };
+    return compileTimelineBeatMap(
+      sections,
+      activeSong.section_timings,
+      memoizedSongAstTree.map((section) => section.lines.length),
+      activeSong.default_structure,
+      timelineDurationsBySectionId
+    );
   }, [activeSong, sections, memoizedSongAstTree, timelineDurationsBySectionId]);
   const timelineSectionDurations = useMemo(
-    () => sections.map((_, index) => Math.max(0.5, (beatMap.sectionStartBeats[index + 1] ?? beatMap.totalBeats) - (beatMap.sectionStartBeats[index] ?? 0))),
+    () => sections.map((_, index) => Math.max(0.125, (beatMap.sectionStartBeats[index + 1] ?? beatMap.totalBeats) - (beatMap.sectionStartBeats[index] ?? 0))),
     [beatMap, sections],
   );
 
@@ -746,77 +877,38 @@ export default function SoloPracticeRoomPage() {
   };
 
   const songSegments = useMemo(() => {
-    const segments: SongSegment[] = [];
-    if (!activeSong || sections.length === 0) return segments;
-    
+    if (!activeSong || sections.length === 0) return [];
+
     const offsetSec = (activeSong.youtube_sync_offset_ms || 0) / 1000;
     const tempo = activeSong.tempo || 120;
     const secPerBeat = 60 / tempo;
-    
-    let currentStartTime = offsetSec;
-    
-    sections.forEach((sec, idx) => {
-      let rawTimings = activeSong?.section_timings?.[sec.section_name];
-      if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
-      const timings = rawTimings || {};
-      
-      const isSpacer = sec.section_name.toLowerCase().startsWith("spacer");
-      const savedSpacerDuration = timelineDurationsBySectionId[sec.id] ?? 0.5;
-      const beatsPerMeasure = 4; // Standardized for live
-      const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
-      const basePassBeats = ((Number(timings.measures) || 4) * beatsPerMeasure) + (Number(timings.beats) || 0);
-      const totalCoreBeats = basePassBeats * sectionMultiplier;
-      const headBeats = (Number(timings.head_m) || 0) * beatsPerMeasure;
-      const tailBeats = (Number(timings.tail_m) || 0) * beatsPerMeasure;
-      
-      let totalBeats = isSpacer ? savedSpacerDuration : totalCoreBeats + headBeats + tailBeats;
-      if (!isSpacer && totalBeats <= 0) totalBeats = 16;
-      
-      const durationSec = totalBeats * secPerBeat;
-      if (!isSpacer) {
-        segments.push({
-          label: sec.section_name,
-          start: currentStartTime,
-          end: currentStartTime + durationSec,
-          duration: durationSec,
-          color: getSectionColor(sec.section_name),
-          sectionIndex: idx,
-        });
-      }
-      currentStartTime += durationSec;
+    return sections.flatMap((section, index) => {
+      if (section.section_name.toLowerCase().startsWith("spacer")) return [];
+      const startBeat = beatMap.sectionStartBeats[index] ?? 0;
+      const endBeat = beatMap.sectionStartBeats[index + 1] ?? beatMap.totalBeats;
+      const start = offsetSec + startBeat * secPerBeat;
+      const duration = Math.max(0, endBeat - startBeat) * secPerBeat;
+      return [{
+        label: section.section_name,
+        start,
+        end: start + duration,
+        duration,
+        color: getSectionColor(section.section_name),
+        sectionIndex: index,
+      }];
     });
-    
-    return segments;
-  }, [activeSong, sections, timelineDurationsBySectionId]);
+  }, [activeSong, sections, beatMap]);
 
   const getSectionDurationString = (sectionName: string, sectionIdx?: number) => {
-    const section = sectionIdx === undefined
-      ? sections.find((item) => item.section_name === sectionName)
-      : sections[sectionIdx];
-    if (sectionName.toLowerCase().startsWith("spacer") && section) {
-      const spacerDurationSeconds = (timelineDurationsBySectionId[section.id] ?? 0.5) * 60 / (activeSong?.tempo || 75);
-      if (spacerDurationSeconds < 1) return `${spacerDurationSeconds.toFixed(2)}s`;
-      const spacerSeconds = Math.round(spacerDurationSeconds);
-      return `${Math.floor(spacerSeconds / 60)}:${(spacerSeconds % 60).toString().padStart(2, "0")}`;
+    const index = sectionIdx ?? sections.findIndex((section) => section.section_name === sectionName);
+    if (index < 0 || !activeSong) return "0:00";
+    const startBeat = beatMap.sectionStartBeats[index] ?? 0;
+    const endBeat = beatMap.sectionStartBeats[index + 1] ?? beatMap.totalBeats;
+    const durationSeconds = Math.max(0, endBeat - startBeat) * 60 / (activeSong.tempo || 75);
+    if (sectionName.toLowerCase().startsWith("spacer") && durationSeconds < 1) {
+      return `${durationSeconds.toFixed(2)}s`;
     }
-    const timings = activeSong?.section_timings?.[sectionName] || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
-    const sectionMultiplier = (timings.repeats || 0) + 1;
-    let totalCoreBeats = ((timings.measures || 0) * 4) + (timings.beats || 0);
-
-    if (sectionIdx !== undefined && timings.line_timings && memoizedSongAstTree[sectionIdx]) {
-        let calcBaseLoop = 0;
-        for (let i = 0; i < memoizedSongAstTree[sectionIdx].lines.length; i++) { 
-           const t = timings.line_timings[String(i)] || { measures: 0, beats: 0 };
-           const lineMult = (t.repeats || 0) + 1; 
-           calcBaseLoop += ((t.measures * 4) + (t.beats || 0)) * lineMult;
-        }
-        if (calcBaseLoop > 0) totalCoreBeats = calcBaseLoop * sectionMultiplier;
-    }
-    
-    let totalBeats = totalCoreBeats + ((timings.head_m || 0) * 4) + ((timings.tail_m || 0) * 4);
-    if (totalBeats <= 0) totalBeats = 16; 
-    
-    const totalSeconds = Math.round((totalBeats * (60000 / (activeSong?.tempo || 75))) / 1000);
+    const totalSeconds = Math.round(durationSeconds);
     return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
   };
 
@@ -859,6 +951,7 @@ export default function SoloPracticeRoomPage() {
         <div className="w-full h-full shrink-0 relative flex flex-col">
           {isTracksMode ? (
             <TracksView
+              activeSong={activeSong}
               sections={sections}
               songAst={memoizedSongAstTree}
               sectionStarts={beatMap.sectionStartBeats}
@@ -867,14 +960,19 @@ export default function SoloPracticeRoomPage() {
               activeSectionIndex={currentSectionIndex}
               queuedSectionIndex={queuedSectionIndex}
               activeLineIndex={activeLineIndex}
-              playheadBeat={isPlayingFlow ? tracksPlayheadBeat : beatMap.sectionStartBeats[currentSectionIndex] ?? 0}
+              playheadBeat={isPlayingFlow
+                ? tracksPlayheadBeat
+                : explicitScrubBeat ?? beatMap.sectionStartBeats[currentSectionIndex] ?? 0}
               isPlaying={isPlayingFlow}
               tempo={activeSong?.tempo ?? 75}
+              quarterBeatsPerMeasure={getTimelineMeter(activeSong?.section_timings).quarterBeatsPerMeasure}
               showChords={showChords}
               lyricsFontSize={lyricsFontSize}
               lineSpacing={lineSpacing}
               chordFormat={chordFormat}
               activeDisplayKey={activeDisplayKey}
+              handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+              isMD={true}
             />
           ) : isSimplifiedMode ? (
               <SimplifiedStackView 
@@ -897,7 +995,7 @@ export default function SoloPracticeRoomPage() {
               />
           ) : (
             <StandardSheetView 
-              memoizedSongAstTree={memoizedSongAstTree} isPlayingFlow={isPlayingFlow} playingTrackIndex={0}
+              memoizedSongAstTree={memoizedSongAstTree} isPlayingFlow={isPlayingFlow} isInteractive={true} playingTrackIndex={0}
               currentTrackIndex={0} currentSectionIndex={currentSectionIndex} queuedTrackIndex={null}
               queuedSectionIndex={queuedSectionIndex} getSectionDurationString={getSectionDurationString} handleSectionInteractiveSelection={handleSectionInteractiveSelection}
               sectionRefs={trackSectionRefs.current[0]} activeLineIndex={activeLineIndex} showChords={showChords} lyricsFontSize={lyricsFontSize}
@@ -1041,7 +1139,7 @@ export default function SoloPracticeRoomPage() {
                                 if (playableIndex < 0) return;
                                 if (!isPlayingFlow) {
                                   const jumpTime = getGlobalTime() + 150; 
-                                  executeJumpNow(0, playableIndex, jumpTime);
+                                  executeJumpNow(0, playableIndex, jumpTime, false, "explicit-jump");
                                 } else {
                                   let jumpTime = getGlobalTime() + 150;
                                   if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
@@ -1051,7 +1149,7 @@ export default function SoloPracticeRoomPage() {
                                     setQueuedSectionIndex(playableIndex);
                                     if (sectionsRef.current[playableIndex]) playGuideCue(sectionsRef.current[playableIndex].section_name);
                                     hasPlayedCueRef.current = true;
-                                  } else { executeJumpNow(0, playableIndex, jumpTime); }
+                                  } else { executeJumpNow(0, playableIndex, jumpTime, false, "explicit-jump"); }
                                 }
                             }}
                             className="w-8 h-8 rounded-full flex items-center justify-center bg-primary-container text-primary hover:text-white hover:bg-primary transition-colors border border-primary/20"
@@ -1072,19 +1170,7 @@ export default function SoloPracticeRoomPage() {
         </div>
       )}
 
-      {countdownValue !== null && (
-        <div className="fixed inset-0 z-[400000] bg-zinc-950/90 backdrop-blur-md flex flex-col items-center justify-center animate-in fade-in duration-100 select-none touch-none">
-          <span className="text-blue-500 font-black tracking-widest uppercase mb-4 text-xl md:text-2xl animate-pulse">Pre-Warming Sync Engine</span>
-          <span className="text-[150px] md:text-[250px] font-black text-white leading-none tracking-tighter drop-shadow-2xl">{countdownValue}</span>
-        </div>
-      )}
       <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>
-      {isYtBuffering && (
-        <div className="fixed inset-0 z-[400000] bg-zinc-950/90 backdrop-blur-md flex flex-col items-center justify-center animate-in fade-in duration-100 select-none touch-none">
-          <span className="text-red-500 font-black tracking-widest uppercase mb-4 text-xl md:text-2xl animate-pulse">Buffering Backing Track</span>
-          <span className="text-[100px] md:text-[150px] font-black text-white leading-none tracking-tighter drop-shadow-2xl">∞</span>
-        </div>
-      )}
     </div>
   );
 }

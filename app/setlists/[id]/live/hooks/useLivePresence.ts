@@ -45,6 +45,7 @@ export function useLivePresence(supabase: any, simulatedUserId: string, simulate
         const identityPayload = { 
           id: targetUserId, 
           connectionId: `${targetUserId}-${Math.random().toString(36).substring(2, 7)}`, 
+          authoritySessionId: crypto.randomUUID(),
           name: displayName, 
           initials, 
           bg: assignedBg,
@@ -93,6 +94,7 @@ export function useLivePresence(supabase: any, simulatedUserId: string, simulate
     const updatedPresencePayload = { 
       ...localPresenceUserRef.current, 
       isMD: isTakingOver,
+      authoritySessionId: isTakingOver ? crypto.randomUUID() : localPresenceUserRef.current.authoritySessionId,
       updatedAt: Date.now() 
     };
     
@@ -107,7 +109,9 @@ export function useLivePresence(supabase: any, simulatedUserId: string, simulate
         event: "lobby_sync",
         payload: { 
           action: isTakingOver ? "MD_TAKEOVER" : "MD_RELEASE", 
-          [isTakingOver ? "newMdId" : "releasedMdId"]: localPresenceUserRef.current.id 
+          [isTakingOver ? "newMdId" : "releasedMdId"]: localPresenceUserRef.current.id,
+          authorityConnectionId: isTakingOver ? localPresenceUserRef.current.connectionId : undefined,
+          authoritySessionId: isTakingOver ? localPresenceUserRef.current.authoritySessionId : undefined
         }
       });
 

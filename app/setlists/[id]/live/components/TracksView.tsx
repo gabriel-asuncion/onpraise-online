@@ -1,13 +1,15 @@
-import React, { useEffect, useRef } from "react";
-import { ArrangementSection, CompiledSectionToken } from "../types/setlist";
+import React, { useEffect, useRef, useState, useMemo } from "react";
+import { CompiledSectionToken, ArrangementSection, SongRecord } from "../types/setlist";
 import { MemoizedLyricLine } from "./MemoizedLyricLine";
 
 interface TracksViewProps {
+  activeSong: SongRecord | null;
   sections: ArrangementSection[];
   songAst: CompiledSectionToken[];
   sectionStarts: number[];
   sectionDurations: number[];
   totalBeats: number;
+  quarterBeatsPerMeasure: number;
   activeSectionIndex: number;
   queuedSectionIndex: number | null;
   activeLineIndex: number;
@@ -19,157 +21,394 @@ interface TracksViewProps {
   lineSpacing: number;
   chordFormat: "Key" | "Numbers";
   activeDisplayKey: string;
+  handleSectionInteractiveSelection: (idx: number, trackIdx?: number, exactBeat?: number) => void;
+  isMD?: boolean;
 }
 
-const TRACK_COLORS = [
-  "border-blue-300 bg-blue-600",
-  "border-violet-300 bg-violet-600",
-  "border-emerald-300 bg-emerald-600",
-  "border-amber-300 bg-amber-600",
-  "border-pink-300 bg-pink-600",
-  "border-cyan-300 bg-cyan-600",
-];
+function getSectionColor(label: string) {
+  const l = label.toLowerCase();
+  if (l.includes('chorus')) return 'bg-orange-500';
+  if (l.includes('verse')) return 'bg-sky-500';
+  if (l.includes('bridge')) return 'bg-primary';
+  if (l.includes('intro') || l.includes('inst') || l.includes('inter')) return 'bg-emerald-500';
+  if (l.includes('outro')) return 'bg-purple-500';
+  if (l.includes('tag') || l.includes('pre')) return 'bg-secondary';
+  return 'bg-zinc-500';
+}
 
-export function TracksView({
-  sections,
-  songAst,
-  sectionStarts,
-  sectionDurations,
-  totalBeats,
-  activeSectionIndex,
-  queuedSectionIndex,
-  activeLineIndex,
-  playheadBeat,
-  isPlaying,
-  tempo,
-  showChords,
-  lyricsFontSize,
-  lineSpacing,
-  chordFormat,
-  activeDisplayKey,
-}: TracksViewProps) {
-  const viewportRef = useRef<HTMLDivElement>(null);
-  const playheadRef = useRef<HTMLDivElement>(null);
-  const animationFrameRef = useRef<number | null>(null);
-  const anchorBeatRef = useRef(playheadBeat);
-  const anchorTimeRef = useRef(0);
-  const beatsPerMeasure = 4;
-  const pixelsPerBeat = 18;
-  const canvasWidth = Math.max(360, totalBeats * pixelsPerBeat + 32);
-  const lyricSectionIndex = queuedSectionIndex ?? activeSectionIndex;
-  const lyricSection = songAst[lyricSectionIndex];
-  const lyricSectionLabel = sections[lyricSectionIndex]?.section_name ?? lyricSection?.section_name ?? "Section";
+export function TracksView(props: TracksViewProps) {
+  const {
+    activeSong, sections, songAst, sectionStarts, sectionDurations, totalBeats, quarterBeatsPerMeasure,
+    activeSectionIndex, playheadBeat, isPlaying, tempo, showChords, lyricsFontSize,
+    lineSpacing, chordFormat, activeDisplayKey, handleSectionInteractiveSelection, isMD
+  } = props;
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  const [pixelsPerBeat, setPixelsPerBeat] = useState(40);
+  const [visualActiveIndex, setVisualActiveIndex] = useState(0);
+
+  // 1. Responsive Zoom & Offset Calculation
+  const offsetMs = activeSong?.youtube_sync_offset_ms || 0;
+  const offsetBeats = Math.max(0, (offsetMs / 1000) / (60 / (tempo || 75)));
+  const totalCanvasBeats = totalBeats + offsetBeats;
 
   useEffect(() => {
-    anchorBeatRef.current = playheadBeat;
-    anchorTimeRef.current = performance.now();
-  }, [playheadBeat]);
+    const handleResize = () => {
+      if (containerRef.current) {
+        const width = containerRef.current.clientWidth;
+        const optimal = Math.max(30, Math.min(80, (width * 0.8) / Math.max(1, totalBeats)));
+        setPixelsPerBeat(optimal);
+      }
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [totalBeats]);
 
-  useEffect(() => {
-    if (!isPlaying) {
-      if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-      return;
+  // 2. Exact Line Parsing Engine
+  const getLineBeats = (secName: string, expectedLineCount: number, durationBeats: number) => {
+    const st = activeSong?.section_timings as Record<string, any> | undefined;
+    let rawTimings = st?.[secName];
+
+    if (typeof rawTimings === 'string') {
+      try { rawTimings = JSON.parse(rawTimings); } catch(e){}
+    }
+    const timings = rawTimings || {};
+
+    let lt = timings.line_timings;
+    if (typeof lt === 'string') {
+      try { lt = JSON.parse(lt); } catch(e){}
     }
 
-    const renderFrame = (now: number) => {
-      const viewport = viewportRef.current;
-      const playhead = playheadRef.current;
-      if (viewport && playhead) {
-        const beat = anchorBeatRef.current + ((now - anchorTimeRef.current) * Math.max(1, tempo)) / 60_000;
-        const left = Math.max(0, beat) * pixelsPerBeat;
-        playhead.style.transform = `translateX(${left}px)`;
-        const targetScroll = Math.max(0, Math.min(viewport.scrollWidth - viewport.clientWidth, left - viewport.clientWidth * 0.35));
-        viewport.scrollLeft = targetScroll;
-      }
-      animationFrameRef.current = requestAnimationFrame(renderFrame);
-    };
+    if (!lt || typeof lt !== 'object' || Object.keys(lt).length === 0) {
+      return Array(expectedLineCount).fill(durationBeats / expectedLineCount);
+    }
 
-    animationFrameRef.current = requestAnimationFrame(renderFrame);
-    return () => {
-      if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
+    const beatsArray = [];
+    for (let i = 0; i < expectedLineCount; i++) {
+      const line = lt[String(i)] || {};
+      const m = Number(line.measures) || 0;
+      const b = Number(line.beats) || 0;
+      const r = Number(line.repeats) || 0;
+      const dur = (m * quarterBeatsPerMeasure + b) * (r + 1);
+      beatsArray.push(dur > 0 ? dur : (durationBeats / expectedLineCount));
+    }
+    return beatsArray;
+  };
+
+  const flatLines = useMemo(() => {
+    const list: { sec: CompiledSectionToken, sIdx: number, line: any, lIdx: number, startBeat: number, endBeat: number }[] = [];
+    songAst.forEach((sec, sIdx) => {
+      const startBeat = sectionStarts[sIdx] ?? 0;
+      const duration = sectionDurations[sIdx] ?? 0;
+      const lineCount = Math.max(1, sec.lines.length);
+
+      if (sec.lines.length === 0) {
+        list.push({ sec, sIdx, line: null, lIdx: 0, startBeat, endBeat: startBeat + duration });
+      } else {
+        const lineBeats = getLineBeats(sec.section_name, lineCount, duration);
+        let currentLineStart = startBeat;
+
+        sec.lines.forEach((line, lIdx) => {
+          const lineDur = lineBeats[lIdx];
+          list.push({
+            sec, sIdx, line, lIdx,
+            startBeat: currentLineStart,
+            endBeat: currentLineStart + lineDur
+          });
+          currentLineStart += lineDur;
+        });
+      }
+    });
+    return list;
+  }, [songAst, sectionStarts, sectionDurations, activeSong, quarterBeatsPerMeasure]);
+
+  // 3. Helper to find Section by Exact Beat
+  const getSectionIndex = (beat: number) => {
+    const target = sectionStarts.findIndex((start, i) => {
+      const nextStart = sectionStarts[i + 1] ?? totalBeats;
+      return beat >= start && beat < nextStart;
+    });
+    return target !== -1 ? target : 0;
+  };
+
+  // 4. Smooth 60FPS Hardware Synchronization
+  const stateRef = useRef({ isPlaying, tempo, playheadBeat, pixelsPerBeat, offsetBeats });
+  stateRef.current = { isPlaying, tempo, playheadBeat, pixelsPerBeat, offsetBeats };
+
+  const lastBeatRef = useRef(playheadBeat);
+  const lastBeatTimeRef = useRef(performance.now());
+  const visualLineRef = useRef(0);
+
+  if (playheadBeat !== lastBeatRef.current) {
+    lastBeatRef.current = playheadBeat;
+    lastBeatTimeRef.current = performance.now();
+  }
+
+  useEffect(() => {
+    let rAF: number;
+    const loop = () => {
+      if (containerRef.current) {
+        const { isPlaying, tempo, pixelsPerBeat, offsetBeats } = stateRef.current;
+        let exactFloatBeat = lastBeatRef.current;
+
+        if (isPlaying) {
+          const beatDurationMs = 60000 / (tempo || 75);
+          const elapsed = performance.now() - lastBeatTimeRef.current;
+          exactFloatBeat = lastBeatRef.current + elapsed / beatDurationMs;
+
+          // Auto-scroll the timeline natively (shifted right by the offset pre-roll space)
+          containerRef.current.scrollLeft = (exactFloatBeat + offsetBeats) * pixelsPerBeat;
+        } else {
+          // If paused, read the exact float beat directly from the user's manual scroll position
+          exactFloatBeat = (containerRef.current.scrollLeft / pixelsPerBeat) - offsetBeats;
+        }
+
+        // Transition lyrics exactly 1.0 beats before the line ends
+        let newVisualIdx = flatLines.length - 1;
+        for (let i = 0; i < flatLines.length; i++) {
+          if (exactFloatBeat < flatLines[i].endBeat - 1.0) {
+            newVisualIdx = i;
+            break;
+          }
+        }
+
+        if (newVisualIdx !== visualLineRef.current && newVisualIdx >= 0) {
+          visualLineRef.current = newVisualIdx;
+          setVisualActiveIndex(newVisualIdx);
+        }
+      }
+      rAF = requestAnimationFrame(loop);
     };
-  }, [isPlaying, pixelsPerBeat, tempo]);
+    rAF = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rAF);
+  }, [flatLines]);
+
+  // 5. Interactive Timeline Scrubbing (Clean implementation)
+  const handleTimelineScroll = () => {
+    if (isPlaying || !isMD) return;
+    if (scrollTimeout.current) clearTimeout(scrollTimeout.current);
+
+    scrollTimeout.current = setTimeout(() => {
+      if (!containerRef.current) return;
+      const centerBeat = (containerRef.current.scrollLeft / pixelsPerBeat) - offsetBeats;
+
+      const targetSecIdx = getSectionIndex(centerBeat);
+
+      // ✅ SURGICAL FIX: Directly pass the negative/positive exact beat to the engine
+      handleSectionInteractiveSelection(targetSecIdx, undefined, Math.max(-offsetBeats, centerBeat));
+    }, 150);
+  };
+
+  const handleCanvasClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isMD) return;
+
+    const rect = containerRef.current!.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const centerX = rect.width / 2;
+
+    const currentCenterBeat = (containerRef.current!.scrollLeft / pixelsPerBeat) - offsetBeats;
+
+    // ✅ SURGICAL FIX: Directly calculate the exact sub-beat clicked
+    const clickedBeat = Math.max(-offsetBeats, currentCenterBeat + ((clickX - centerX) / pixelsPerBeat));
+
+    const targetSecIdx = getSectionIndex(clickedBeat);
+
+    handleSectionInteractiveSelection(targetSecIdx, undefined, clickedBeat);
+
+    if (containerRef.current) {
+      containerRef.current.scrollTo({
+        left: (clickedBeat + offsetBeats) * pixelsPerBeat,
+        behavior: 'smooth'
+      });
+    }
+  };
+
+  const totalMeasures = Math.ceil(totalBeats / quarterBeatsPerMeasure);
+  const preRollMeasures = Math.ceil(offsetBeats / quarterBeatsPerMeasure);
+  const totalRenderMeasures = preRollMeasures + totalMeasures;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-surface">
-      <section className="min-h-0 flex-1 overflow-y-auto p-4 md:p-8" aria-live="polite">
-        <div className="mx-auto w-full max-w-5xl">
-          <div className="mb-4 flex items-center gap-2">
-            <h2 className="text-sm font-black uppercase tracking-widest text-primary">{lyricSectionLabel}</h2>
-            {queuedSectionIndex !== null && (
-              <span className="rounded bg-violet-600 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-white">Queued</span>
-            )}
-          </div>
-          <div className="space-y-2 rounded-2xl border border-outline-variant/20 bg-surface-container-low p-4 md:p-6">
-            {lyricSection?.lines.map((line, lineIndex) => (
-              <MemoizedLyricLine
-                key={`${lyricSection.id}-${lineIndex}`}
-                line={line}
-                sectionIndex={lyricSectionIndex}
-                lineIndex={lineIndex}
-                isCurrentlyPlayingLine={queuedSectionIndex === null && lineIndex === activeLineIndex}
-                showChords={showChords}
-                lyricsFontSize={lyricsFontSize}
-                lineSpacing={lineSpacing}
-                chordFormat={chordFormat}
-                activeDisplayKey={activeDisplayKey}
-              />
-            ))}
-            {!lyricSection?.lines.length && (
-              <p className="py-6 text-center text-sm font-medium text-on-surface-variant">No lyrics in this section.</p>
-            )}
-          </div>
-        </div>
-      </section>
+    <div className="flex-1 flex flex-col bg-[#09090b] h-full relative overflow-hidden font-sans">
 
-      <section className="absolute bottom-[calc(76px+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-24px)] max-w-5xl -translate-x-1/2 rounded-2xl border border-outline-variant/30 bg-surface-container-low/95 p-3 shadow-2xl backdrop-blur-md" aria-label="Read-only song timeline">
-        <div ref={viewportRef} className="overflow-x-hidden overflow-y-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-          <div className="relative h-20 select-none" style={{ width: `${canvasWidth}px` }}>
-            <div className="absolute inset-x-0 top-0 h-7 border-b border-outline-variant/30">
-              {Array.from({ length: Math.ceil(totalBeats / beatsPerMeasure) + 1 }, (_, index) => (
-                <div
-                  key={index}
-                  className="absolute inset-y-0 border-l border-outline-variant/50 pl-1.5 pt-1 font-mono text-[9px] font-bold text-on-surface-variant"
-                  style={{ left: `${index * beatsPerMeasure * pixelsPerBeat}px` }}
-                >
-                  {index + 1}
-                </div>
-              ))}
-            </div>
-            <div className="absolute inset-x-0 top-8 h-10 border-y border-outline-variant/30 bg-surface-container-high">
-              {sections.map((section, index) => {
-                const start = sectionStarts[index] ?? 0;
-                const duration = sectionDurations[index] ?? 0;
-                const colorIndex = Array.from(section.section_name).reduce((sum, char) => sum + char.charCodeAt(0), 0) % TRACK_COLORS.length;
-                const isActive = index === activeSectionIndex;
-                const isQueued = index === queuedSectionIndex;
-                return (
-                  <div
-                    key={section.id}
-                    className={`absolute inset-y-0 flex items-center overflow-hidden rounded-md border px-2 text-[10px] font-black text-white ${TRACK_COLORS[colorIndex]} ${isActive ? "z-10 ring-2 ring-white" : ""} ${isQueued ? "z-10 ring-2 ring-violet-200" : ""}`}
-                    style={{
-                      left: `${start * pixelsPerBeat + 1}px`,
-                      width: `${Math.max(28, duration * pixelsPerBeat - 2)}px`,
-                    }}
-                    title={section.section_name}
-                  >
-                    <span className="truncate">{section.section_name}</span>
+      {/* --- TELEPROMPTER LYRIC GLIDER --- */}
+      <div className="flex-1 flex flex-col justify-center px-4 md:px-8 relative z-10 overflow-hidden">
+        <div className="w-full max-w-4xl mx-auto h-[320px] relative flex items-center justify-center pointer-events-none">
+
+          {flatLines.map((item, idx) => {
+            const offset = idx - visualActiveIndex;
+            if (offset < -1 || offset > 2) return null;
+
+            const isActive = offset === 0;
+            const yPos = offset === 0 ? 0 : offset === 1 ? 120 : offset === 2 ? 180 : -90;
+            const opacity = isActive ? 1 : offset === 1 ? 0.6 : 0;
+            const scale = isActive ? 1 : offset === 1 ? 0.95 : 0.9;
+
+            return (
+              <div
+                key={`${item.sIdx}-${item.lIdx}`}
+                className="absolute w-full transition-all duration-[700ms] ease-[cubic-bezier(0.25,1,0.5,1)]"
+                style={{
+                  transform: `translate3d(0, ${yPos}px, 0) scale(${scale})`,
+                  opacity,
+                  zIndex: isActive ? 20 : 10 - Math.abs(offset)
+                }}
+              >
+                {isActive ? (
+                  <div className="bg-[#18181b] rounded-[20px] border border-[#27272a] shadow-[0_12px_40px_rgba(0,0,0,0.5)] relative overflow-hidden flex flex-col mx-auto w-full max-w-4xl">
+                    <div className="absolute left-0 top-0 bottom-0 w-[6px] bg-blue-500 shadow-[0_0_12px_rgba(59,130,246,0.8)]" />
+                    <div className="px-6 pt-5 pb-7 pl-8">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest text-white shadow-sm ${getSectionColor(item.sec.section_name)}`}>
+                          {item.sec.section_name}
+                        </span>
+                        <span className="text-blue-400 font-black text-[10px] tracking-widest uppercase">
+                          LINE {item.lIdx + 1}/{Math.max(1, item.sec.lines.length)}
+                        </span>
+                      </div>
+
+                      {item.line ? (
+                        <MemoizedLyricLine
+                          line={item.line} sectionIndex={item.sIdx} lineIndex={item.lIdx} isCurrentlyPlayingLine={true}
+                          showChords={showChords} lyricsFontSize={Math.min(lyricsFontSize + 8, 48)} lineSpacing={lineSpacing}
+                          chordFormat={chordFormat} activeDisplayKey={activeDisplayKey}
+                        />
+                      ) : (
+                        <div className="h-10 text-zinc-600 font-black italic uppercase text-sm flex items-center">Instrumental</div>
+                      )}
+                    </div>
                   </div>
-                );
-              })}
-            </div>
-            <div
-              ref={playheadRef}
-              className="pointer-events-none absolute bottom-0 top-0 z-20 w-0.5 bg-error"
-              style={{ left: 0, transform: `translateX(${Math.max(0, playheadBeat) * pixelsPerBeat}px)` }}
-              aria-hidden="true"
-            />
+                ) : (
+                  <div className="bg-transparent px-6 pl-8 flex flex-col mx-auto w-full max-w-4xl">
+                     {item.line ? (
+                       <MemoizedLyricLine
+                         line={item.line} sectionIndex={item.sIdx} lineIndex={item.lIdx} isCurrentlyPlayingLine={false}
+                         showChords={showChords} lyricsFontSize={Math.min(lyricsFontSize, 32)} lineSpacing={lineSpacing}
+                         chordFormat={chordFormat} activeDisplayKey={activeDisplayKey}
+                       />
+                     ) : (
+                       <div className="h-6 text-zinc-700 font-black italic uppercase text-[12px] flex items-center">Instrumental</div>
+                     )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* --- TIMELINE RIBBON --- */}
+      <div className="h-[120px] bg-[#18181b] border-y border-[#27272a] shadow-[0_0_40px_rgba(0,0,0,0.5)] shrink-0 relative flex flex-col">
+
+        {/* PLAYHEAD ANCHOR */}
+        <div className="absolute top-0 bottom-0 left-1/2 w-[2px] bg-red-500 z-50 pointer-events-none transform -translate-x-1/2 shadow-[0_0_12px_rgba(239,68,68,0.9)]">
+           <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-red-500" />
+           <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-b-[8px] border-l-transparent border-r-transparent border-b-red-500" />
+        </div>
+
+        {/* NATIVE SCROLL CANVAS */}
+        <div
+          ref={containerRef}
+          onScroll={handleTimelineScroll}
+          className={`absolute inset-0 overflow-x-auto overflow-y-hidden custom-scrollbar ${isPlaying ? 'pointer-events-none' : isMD ? 'cursor-grab active:cursor-grabbing' : ''}`}
+          style={{ scrollBehavior: 'auto' }}
+        >
+          <div
+            className="h-full relative"
+            style={{ width: `${totalCanvasBeats * pixelsPerBeat}px`, paddingLeft: '50vw', paddingRight: '50vw', boxSizing: 'content-box' }}
+            onClick={handleCanvasClick}
+          >
+             {/* 1. Bar Numbers Layer */}
+             <div className="absolute top-0 h-6 border-b border-[#27272a] flex items-end" style={{ left: '50vw', width: `${totalCanvasBeats * pixelsPerBeat}px` }}>
+               {Array.from({ length: totalRenderMeasures }).map((_, i) => {
+                 const mIdx = i - preRollMeasures;
+                 const beatPos = mIdx * quarterBeatsPerMeasure;
+                 if (beatPos + quarterBeatsPerMeasure < -offsetBeats || beatPos > totalBeats) return null;
+
+                 return (
+                   <div
+                     key={`measure-${mIdx}`}
+                     className="absolute h-full border-l border-[#3f3f46] text-[#71717a] font-mono text-[9px] font-bold pl-1 pt-1 pointer-events-none"
+                     style={{ left: `${(beatPos + offsetBeats) * pixelsPerBeat}px`, width: `${quarterBeatsPerMeasure * pixelsPerBeat}px` }}
+                   >
+                     {mIdx < 0 ? mIdx : mIdx + 1}
+                   </div>
+                 );
+               })}
+             </div>
+
+             {/* 2. Section Blocks Layer */}
+             <div className="absolute top-6 bottom-4" style={{ left: '50vw', width: `${totalCanvasBeats * pixelsPerBeat}px` }}>
+
+               {/* 🟡 Empty Offset Pre-Roll Lane */}
+               {offsetBeats > 0 && (
+                 <div
+                   className="absolute top-1 bottom-1 rounded-md border border-white/5 opacity-40 bg-zinc-800/20"
+                   style={{ left: `0px`, width: `${offsetBeats * pixelsPerBeat}px` }}
+                 >
+                   <div className="absolute top-1 right-2 font-black text-[9px] tracking-widest uppercase text-zinc-500 pointer-events-none">
+                     PRE-ROLL
+                   </div>
+                 </div>
+               )}
+
+               {sections.map((sec, idx) => {
+                 const startBeat = sectionStarts[idx] ?? 0;
+                 const durationBeats = sectionDurations[idx] ?? 0;
+                 if (durationBeats <= 0) return null;
+
+                 const isSecActive = idx === activeSectionIndex;
+                 const leftPx = (startBeat + offsetBeats) * pixelsPerBeat;
+                 const widthPx = durationBeats * pixelsPerBeat;
+                 const bgColor = getSectionColor(sec.section_name);
+
+                 const lineCount = Math.max(1, songAst[idx]?.lines.length || 1);
+                 const lineBeats = getLineBeats(sec.section_name, lineCount, durationBeats);
+                 let accumPartPx = 0;
+
+                 return (
+                   <div
+                     key={`track-sec-${idx}`}
+                     className={`absolute top-1 bottom-1 rounded-md overflow-hidden transition-all duration-200 border border-white/10 ${
+                       isSecActive ? 'opacity-100 z-20 shadow-[0_0_15px_rgba(255,255,255,0.15)] scale-y-[1.05] border-white/50' : `opacity-60 z-10 ${isMD ? 'hover:opacity-80 hover:border-white/30 cursor-pointer' : ''}`
+                     } ${bgColor}`}
+                     style={{
+                       left: `${leftPx}px`,
+                       width: `${Math.max(4, widthPx - 1)}px`,
+                       backgroundImage: 'linear-gradient(to bottom, rgba(255,255,255,0.1), rgba(0,0,0,0.3))'
+                     }}
+                   >
+                     {Array.from({ length: lineCount - 1 }).map((_, lIdx) => {
+                       accumPartPx += lineBeats[lIdx] * pixelsPerBeat;
+                       return (
+                         <div
+                           key={`line-part-${lIdx}`}
+                           className="absolute top-0 bottom-0 border-l border-white/30 pointer-events-none shadow-[1px_0_3px_rgba(0,0,0,0.2)]"
+                           style={{ left: `${accumPartPx}px` }}
+                         />
+                       );
+                     })}
+
+                     <div className="absolute top-1 left-2 font-black text-[10px] tracking-widest uppercase text-white drop-shadow-md whitespace-nowrap overflow-hidden pointer-events-none">
+                       {sec.section_name}
+                     </div>
+                   </div>
+                 );
+               })}
+             </div>
           </div>
         </div>
-        <p className="mt-1 text-center text-[9px] font-bold uppercase tracking-wider text-on-surface-variant">Tracks · follows playback</p>
-      </section>
+      </div>
+
+      {/* ✅ ZOOM CONTROLS */}
+      <div className="absolute right-4 bottom-[27vh] z-50 flex flex-col gap-1 bg-[#18181b]/80 backdrop-blur-md border border-white/10 p-1 rounded-lg shadow-xl">
+        <button onClick={() => setPixelsPerBeat(p => Math.min(200, p + 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">add</span></button>
+        <button onClick={() => setPixelsPerBeat(p => Math.max(15, p - 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">remove</span></button>
+      </div>
+
+      <div className="h-[25vh] min-h-[120px] bg-[#09090b] shrink-0" />
     </div>
   );
 }

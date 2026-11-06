@@ -3,14 +3,20 @@
 import React, { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
-import { useEngine } from "../../../context/EngineContext"; 
+import { useEngine } from "../../../context/EngineContext";
 import PageSkeleton from '../../../../components/PageSkeleton';
 import { useTimesync } from '../../../../hooks/useTimesync';
 
-import { CompiledSectionToken, CompiledBeatMap, BeatNode, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "./types/setlist";
+import { CompiledSectionToken, CompiledBeatMap, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "./types/setlist";
 import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote } from "./utils/music-math";
-import { normalizeSectionNameToAudioFile } from "./utils/setlist-helpers"; 
-import { getTimelineDurationBeats } from "./utils/timeline";
+import { normalizeSectionNameToAudioFile } from "./utils/setlist-helpers";
+import {
+  compileTimelineBeatMap,
+  getNextTimelineBeat,
+  getTimelineDurationBeats,
+  getTimelineMeter,
+  getYoutubeTimeForTimeline
+} from "./utils/timeline";
 
 import { useWakeLock } from "./hooks/useWakeLock";
 import { useWebAudioEngine } from "./hooks/useWebAudioEngine";
@@ -45,15 +51,44 @@ interface SongSegment {
 
 interface PlaybackStatePayload {
   action?: string;
+  setlistId?: string;
+  authoritySessionId?: string;
+  authorityUserId?: string;
+  authorityConnectionId?: string;
+  revision?: number;
   targetConnectionId?: string;
   trackIndex?: number;
   sectionIndex?: number;
+  queuedTrackIndex?: number | null;
+  queuedSectionIndex?: number | null;
   isPlaying?: boolean;
   mdSectionStartTime?: number | null;
   mdAbsoluteBeat?: number;
   mdGlobalBeatTime?: number;
   isYtSource?: boolean;
+  is_recording?: boolean;
+  is_paused?: boolean;
+  recording_start_time?: number | null;
+  recording_accumulated_ms?: number;
+  rehearsal_history?: RehearsalHistoryItem[];
 }
+
+interface PlaybackAuthority {
+  userId: string;
+  connectionId: string;
+  sessionId: string;
+}
+
+const VERSIONED_PLAYBACK_ACTIONS = new Set([
+  "START",
+  "STOP",
+  "JUMP",
+  "TRACK_CHANGE",
+  "QUEUE",
+  "HEARTBEAT",
+  "PLAYBACK_STATE",
+  "TELEMETRY_SYNC"
+]);
 
 interface RehearsalHistoryItem {
   timestamp: number;
@@ -105,13 +140,13 @@ export default function SetlistPerformanceRoomPage() {
   const { isSynced, getGlobalTime } = useTimesync();
   const isSyncedRef = useRef(isSynced);
   isSyncedRef.current = isSynced;
-  
+
 
   // ✅ SURGICAL FIX: Calculates if the current user hierarchy can edit the song
   const canEditSong = ["admin", "moderator", "musician"].includes(activeRole);
 
   useWakeLock();
-  
+
   // ✅ SURGICAL FIX: Bring back fetchAndDecodeAudio
   const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio, setAudioPanRight } = useWebAudioEngine();
 
@@ -146,7 +181,7 @@ export default function SetlistPerformanceRoomPage() {
 
   useEffect(() => {
     if (typeof window === "undefined" || tracksList.length === 0) return;
-    
+
     // 1. Preload Guide Cues
     const uniqueFiles = new Set<string>();
     tracksList.forEach(track => {
@@ -179,14 +214,12 @@ export default function SetlistPerformanceRoomPage() {
   const [currentDriftMs, setCurrentDriftMs] = useState<number | null>(null);
   const [isTestingSync, setIsTestingSync] = useState<boolean>(false);
   const [testVisualBeat, setTestVisualBeat] = useState<number>(1);
-  const [countdownValue, setCountdownValue] = useState<number | null>(null);
-  const countdownValueRef = useRef<number | null>(null);
   const [playbackClockNotice, setPlaybackClockNotice] = useState<string | null>(null);
 
   // ✅ SURGICAL ADDITION: Pause state tracking
   const [isPaused, setIsPaused] = useState(false);
   const [recordingAccumulatedMs, setRecordingAccumulatedMs] = useState(0);
-  
+
   // ✅ Keeps paused state synced for the logger
   const isPausedRef = useRef(false);
 
@@ -196,25 +229,27 @@ export default function SetlistPerformanceRoomPage() {
   const [currentMeasureLength, setCurrentMeasureLength] = useState<number>(4);
   const lastVisualMeasureLengthRef = useRef<number>(4);
 
-  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false); 
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
   const [isMdLockModalOpen, setIsMdLockModalOpen] = useState<boolean>(false);
   const [isAddBlockModalOpen, setIsAddBlockModalOpen] = useState<boolean>(false);
 
   // ✅ SURGICAL ADDITION: Chapters & Looping Engine State
   const [isChaptersModalOpen, setIsChaptersModalOpen] = useState(false);
-  const [isUserLobbyOpen, setIsUserLobbyOpen] = useState(false); 
-  
+  const [isUserLobbyOpen, setIsUserLobbyOpen] = useState(false);
+
   // ✅ SURGICAL ADDITION: Chat Engine & MD Tracking State
   const [lobbyMessages, setLobbyMessages] = useState<any[]>([]);
   const prevMdRef = useRef<string | null>(null);
-  
+
   // ✅ SURGICAL ADDITION: MD Request State
   const [mdRequest, setMdRequest] = useState<any | null>(null);
-  
+
   // ✅ SURGICAL FIX: Missing State Variables
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
   const isUserLobbyOpenRef = useRef(isUserLobbyOpen);
-  
+
+  const [explicitScrubBeat, setExplicitScrubBeat] = useState<number | null>(null);
+
   useEffect(() => {
     isUserLobbyOpenRef.current = isUserLobbyOpen;
     if (isUserLobbyOpen) setUnreadMessageCount(0); // Clear on open
@@ -222,7 +257,7 @@ export default function SetlistPerformanceRoomPage() {
 
   // ✅ SURGICAL FIX: Initialize empty! Synced history timestamps will now trigger the badge.
   const [lastReadTimes, setLastReadTimes] = useState<Record<string, number>>({});
-  
+
   const totalUnreadCount = useMemo(() => {
     let count = 0;
     lobbyMessages.forEach(msg => {
@@ -295,7 +330,7 @@ export default function SetlistPerformanceRoomPage() {
   const sendPingMessage = (text: string, targetUserId?: string) => {
     if (pingCooldown > 0) return;
     setPingCooldown(60); // Start 60-second cooldown
-    
+
     if (realtimeChannelRef.current && localPresenceUserRef.current) {
       realtimeChannelRef.current.send({
         type: "broadcast",
@@ -317,45 +352,18 @@ export default function SetlistPerformanceRoomPage() {
   // ✅ NATIVE SCROLL SNAPPING ENGINE (Replaces Custom Physics)
   // =========================================================================
   const carouselRef = useRef<HTMLDivElement>(null);
-  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  useEffect(() => () => {
-    if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
-  }, []);
-
-  const handleNativeScroll = () => {
-    if (!carouselRef.current) return;
-    
-    if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
-    
-    // ✅ SURGICAL FIX: Debounce the entire state update so React doesn't fight the native swipe.
-    scrollTimeoutRef.current = setTimeout(() => {
-      if (!carouselRef.current) return;
-      
-      const index = Math.round(carouselRef.current.scrollLeft / carouselRef.current.clientWidth);
-      
-      if (index !== currentTrackIndexRef.current) {
-        // ✅ SURGICAL FIX: We MUST call `mountTargetSetlistTrackIndex` instead of `setCurrentTrackIndex`
-        // so that the active song, keys, and AST data update correctly to match the visual track!
-        mountTargetSetlistTrackIndex(index);
-        
-        if (!isPlayingRef.current && localPresenceUserRef.current?.isMD) {
-          sendSupabaseBroadcast({ action: "TRACK_CHANGE", trackIndex: index });
-        }
-      }
-    }, 150);
-  };
-
-  // Keep carousel aligned if MD broadcasts a jump or user clicks LiveHeader
+  // Browsing the carousel does not select a playback track. Only explicit controls
+  // or an authoritative playback command may change currentTrackIndex.
   useEffect(() => {
     if (carouselRef.current) {
+      // ✅ SURGICAL FIX: Ensure the carousel perfectly snaps without fighting the active click logic
       const targetLeft = currentTrackIndex * carouselRef.current.clientWidth;
       if (Math.abs(carouselRef.current.scrollLeft - targetLeft) > 10) {
         carouselRef.current.scrollTo({ left: targetLeft, behavior: "smooth" });
       }
     }
   }, [currentTrackIndex]);
-  
+
   useEffect(() => {
     if (!activeSong?.id) {
       setAvailableSongSections([]);
@@ -371,7 +379,7 @@ export default function SetlistPerformanceRoomPage() {
           .from("song_sections")
           .select("section_name")
           .eq("song_id", activeSong.id);
-          
+
         if (isCurrentRequest && !error && data) {
           const uniqueNames = Array.from(new Set(data.map((section) => section.section_name)));
           setAvailableSongSections(uniqueNames);
@@ -403,6 +411,7 @@ export default function SetlistPerformanceRoomPage() {
   const rehearsalHistoryRef = useRef<RehearsalHistoryItem[]>([]);
   const playbackTelemetrySessionRef = useRef<PlaybackTelemetrySession | null>(null);
   const stopPlaybackTelemetryRef = useRef<() => Promise<void>>(async () => {});
+  const telemetryUpdateRevisionRef = useRef(0);
   const jumpReasonRef = useRef<"Auto Play" | "Quick Play" | "Queued">("Auto Play");
 
   const [isZenMode, setIsZenMode] = useState<boolean>(false);
@@ -429,24 +438,48 @@ export default function SetlistPerformanceRoomPage() {
   const queuedTrackIndexRef = useRef<number | null>(null);
   const queuedSectionIndexRef = useRef<number | null>(null);
   const clickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const playClickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pendingQuantizedJumpRef = useRef<{ trackIndex: number; sectionIndex: number; jumpTime: number } | null>(null);
   const isYtBackingTrackStartRef = useRef<boolean>(false);
   const activeLineIndexRef = useRef<number>(0);
   const isPlayingRef = useRef(false);
   const playbackSyncRevisionRef = useRef(0);
+  const playbackAuthorityRef = useRef<PlaybackAuthority | null>(null);
+  const acceptedPlaybackRevisionRef = useRef<{
+    authorityConnectionId: string;
+    authoritySessionId: string;
+    revision: number;
+  } | null>(null);
+  const outgoingPlaybackSessionRef = useRef<{
+    authorityConnectionId: string;
+    authoritySessionId: string;
+    revision: number;
+  } | null>(null);
   const currentSectionIndexRef = useRef(0);
   const sectionStartTimeRef = useRef<number>(0);
   const pauseOffsetMsRef = useRef<number>(0);
   const lastBeatRef = useRef<number>(1);
   const animationFrameRef = useRef<number | null>(null);
   const pendingPlaybackStateRef = useRef<PlaybackStatePayload | null>(null);
-  const handleSyncCommandRef = useRef<(payload: PlaybackStatePayload) => void>(() => {});
+  const handleSyncCommandRef = useRef<(payload: PlaybackStatePayload, validatedReplay?: boolean) => void>(() => {});
   const playbackStateRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // const sectionRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
   const audioContextStartTimeRef = useRef<number | null>(null);
   const astTreeRef = useRef<CompiledSectionToken[]>([]);
   const mdSectionStartTimeRef = useRef<number | null>(null);
+  const youtubeStartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingYoutubeSyncRef = useRef<{
+    sectionIndex: number;
+    sectionStartTime: number;
+    mode: "start" | "explicit-jump" | "snapshot";
+  } | null>(null);
+  const pendingYoutubeStartRef = useRef<{
+    trackIndex: number;
+    sectionIndex: number;
+    exactBeat?: number | null;
+  } | null>(null);
+  const youtubePlaybackStartedHandlerRef = useRef<(currentTimeSeconds: number) => void>(() => {});
+  const youtubePlaybackErrorHandlerRef = useRef<() => void>(() => {});
+  const beginYoutubeBackedStartRef = useRef<() => void>(() => {});
 
   const backdropProgressRef = useRef<HTMLDivElement | null>(null);
   const accentProgressBarRef = useRef<HTMLDivElement | null>(null);
@@ -463,10 +496,10 @@ export default function SetlistPerformanceRoomPage() {
   if (trackSectionRefs.current.length !== tracksList.length) {
     trackSectionRefs.current = tracksList.map((_, i) => trackSectionRefs.current[i] || { current: {} });
   }
-  
+
   const metronomeRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
- 
-  
+
+
 
   useEffect(() => { playingTrackIndexRef.current = playingTrackIndex; }, [playingTrackIndex]);
   useEffect(() => { queuedTrackIndexRef.current = queuedTrackIndex; }, [queuedTrackIndex]);
@@ -483,14 +516,19 @@ export default function SetlistPerformanceRoomPage() {
     }
   }, [loading]);
 
+  const wasPlayingFlowRef = useRef(isPlayingFlow);
   useEffect(() => {
+    const justStopped = wasPlayingFlowRef.current && !isPlayingFlow;
+    wasPlayingFlowRef.current = isPlayingFlow;
+    if (justStopped) return;
+
     // ✅ SURGICAL FIX: Removed `isPlayingFlow` so non-MDs jump to the section even when playback is paused!
     if (!showSyncBack) {
       const activeLineId = `line-${currentSectionIndex}-${activeLineIndex}`;
-      
+
       const activeContainer = trackScrollRefs.current[currentTrackIndex]?.current;
       const targetLine = activeContainer?.querySelector(`#${activeLineId}`) || document.getElementById(activeLineId);
-      
+
       if (targetLine) {
         isAutoScrollingRef.current = true;
         targetLine.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -503,7 +541,7 @@ export default function SetlistPerformanceRoomPage() {
   useEffect(() => {
     let reqId: number;
     const testVisualRef = { current: 1 };
-    
+
     if (isTestingSync) {
       const startTime = performance.now();
       const tick = (timestamp: number) => {
@@ -551,6 +589,10 @@ export default function SetlistPerformanceRoomPage() {
       return;
     }
 
+    if (targetSetlistId === setlistId && hasCurrentPlaybackAuthority()) {
+      sendSupabaseBroadcast({ action: "TELEMETRY_SYNC", ...update });
+    }
+
     const write = telemetryWriteQueueRef.current.catch(() => undefined).then(async () => {
       const { error } = await supabase.from("setlists").update(update).eq("id", targetSetlistId);
       if (error) throw error;
@@ -561,8 +603,36 @@ export default function SetlistPerformanceRoomPage() {
       await write;
       setTelemetrySaveError(null);
     } catch (error) {
-      console.error("Failed to save rehearsal telemetry:", error);
-      setTelemetrySaveError("Telemetry could not be saved. Check your connection.");
+      const details = error && typeof error === "object"
+        ? error as { message?: unknown; code?: unknown; details?: unknown; hint?: unknown }
+        : null;
+      console.error("Failed to save rehearsal telemetry:", {
+        message: details?.message ?? (error instanceof Error ? error.message : String(error)),
+        code: details?.code,
+        details: details?.details,
+        hint: details?.hint
+      });
+      setTelemetrySaveError("Lobby telemetry is synced, but rehearsal history could not be saved for later sessions.");
+    }
+  }
+
+  function applyTelemetryUpdate(update: TelemetryUpdate) {
+    telemetryUpdateRevisionRef.current += 1;
+    if (typeof update.is_recording === "boolean") {
+      setIsRecording(update.is_recording);
+      isRecordingRef.current = update.is_recording;
+    }
+    if (typeof update.is_paused === "boolean") {
+      setIsPaused(update.is_paused);
+      isPausedRef.current = update.is_paused;
+    }
+    if ("recording_start_time" in update) setRecordingStartTime(update.recording_start_time ?? null);
+    if (typeof update.recording_accumulated_ms === "number" && Number.isFinite(update.recording_accumulated_ms)) {
+      setRecordingAccumulatedMs(update.recording_accumulated_ms);
+    }
+    if (Array.isArray(update.rehearsal_history)) {
+      rehearsalHistoryRef.current = update.rehearsal_history;
+      setRehearsalHistory(update.rehearsal_history);
     }
   }
 
@@ -646,7 +716,6 @@ export default function SetlistPerformanceRoomPage() {
   useEffect(() => {
     if (!setlistId) return;
     let isCurrent = true;
-    let realtimeRevision = 0;
 
     setIsRecording(false);
     isRecordingRef.current = false;
@@ -657,48 +726,41 @@ export default function SetlistPerformanceRoomPage() {
     setRehearsalHistory([]);
     rehearsalHistoryRef.current = [];
     setTelemetrySaveError(null);
-    
+
     const fetchTelemetry = async () => {
-       const requestRevision = realtimeRevision;
+       const requestRevision = telemetryUpdateRevisionRef.current;
        const { data, error } = await supabase
         .from('setlists')
         .select('is_recording, is_paused, recording_accumulated_ms, recording_start_time, rehearsal_history')
         .eq('id', setlistId)
         .single();
-       
+
        if (!isCurrent) return;
-       if (requestRevision !== realtimeRevision) return;
+       if (requestRevision !== telemetryUpdateRevisionRef.current) return;
        if (error) {
          console.error("🚨 Telemetry Fetch Error:", error.message);
          return;
        }
 
        if (data) {
-          setIsRecording(data.is_recording || false);
-          isRecordingRef.current = data.is_recording || false;
-          setIsPaused(data.is_paused || false);
-          isPausedRef.current = data.is_paused || false;
-          // ✅ SURGICAL FIX: Force int8 to be a Number so the timer math doesn't glitch
-          setRecordingAccumulatedMs(Number(data.recording_accumulated_ms) || 0);
-          setRecordingStartTime(data.recording_start_time);
-          const history = data.rehearsal_history || [];
-          setRehearsalHistory(history);
-          rehearsalHistoryRef.current = history;
+          applyTelemetryUpdate({
+            is_recording: data.is_recording || false,
+            is_paused: data.is_paused || false,
+            recording_accumulated_ms: Number(data.recording_accumulated_ms) || 0,
+            recording_start_time: data.recording_start_time,
+            rehearsal_history: data.rehearsal_history || []
+          });
        }
     }
     const telemetryChannel = supabase.channel(`telemetry_${setlistId}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'setlists', filter: `id=eq.${setlistId}` }, (payload) => {
-        realtimeRevision += 1;
-        setIsRecording(payload.new.is_recording || false);
-        isRecordingRef.current = payload.new.is_recording || false;
-        setIsPaused(payload.new.is_paused || false);
-        isPausedRef.current = payload.new.is_paused || false;
-        // ✅ SURGICAL FIX: Force int8 to be a Number
-        setRecordingAccumulatedMs(Number(payload.new.recording_accumulated_ms) || 0);
-        setRecordingStartTime(payload.new.recording_start_time);
-        const history = payload.new.rehearsal_history || [];
-        setRehearsalHistory(history);
-        rehearsalHistoryRef.current = history;
+        applyTelemetryUpdate({
+          is_recording: payload.new.is_recording || false,
+          is_paused: payload.new.is_paused || false,
+          recording_accumulated_ms: Number(payload.new.recording_accumulated_ms) || 0,
+          recording_start_time: payload.new.recording_start_time,
+          rehearsal_history: payload.new.rehearsal_history || []
+        });
       }).subscribe((status) => {
         if (status === "SUBSCRIBED") void fetchTelemetry();
       });
@@ -711,12 +773,23 @@ export default function SetlistPerformanceRoomPage() {
   }, [setlistId]);
 
   const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4, absoluteBeat?: number) => {
-    if (isTracksMode && absoluteBeat !== undefined) setTracksPlayheadBeat(absoluteBeat);
+    // ✅ SURGICAL FIX: Directly calculate negative sub-beats to perfectly glide through pre-rolls without snapping to 0
+    if (isTracksMode) {
+      if (isPlaying && mdSectionStartTimeRef.current && activeSongRef.current) {
+        const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
+        const elapsedMs = getGlobalTime() - mdSectionStartTimeRef.current;
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
+        setTracksPlayheadBeat(sectionStartBeat + (elapsedMs / beatDurationMs));
+      } else if (absoluteBeat !== undefined) {
+        setTracksPlayheadBeat(absoluteBeat);
+      }
+    }
+
     // 1. Standard UI Metronome
     metronomeRefs.current.forEach((el, index) => {
       if (!el) return;
       const beatNum = index + 1;
-      if (beatNum > measureLength) { el.style.display = 'none'; return; } 
+      if (beatNum > measureLength) { el.style.display = 'none'; return; }
       else { el.style.display = 'flex'; }
       el.className = "w-6 h-6 items-center justify-center font-mono font-black text-[10px] rounded border transition-all duration-75 select-none";
       if (isPlaying && activeBeat === beatNum) {
@@ -729,22 +802,13 @@ export default function SetlistPerformanceRoomPage() {
 
     // 2. ZEN MODE: Peripheral Soft Gradient Overlay
     if (isZenMode && zenOverlayRef.current && isPlaying) {
-      const isDownbeat = activeBeat === 1; 
-      // ✅ Use distinct hex colors for a softer overlay aesthetic
-      const flashColor = isDownbeat ? 'rgba(250, 186, 55, 0.45)' : 'rgba(37, 99, 235, 0.25)'; 
-      
+      const isDownbeat = activeBeat === 1;
+      const flashColor = isDownbeat ? 'rgba(250, 186, 55, 0.45)' : 'rgba(37, 99, 235, 0.25)';
       const overlay = zenOverlayRef.current;
-      
-      // ✅ Cancel active transitions to snap instantly to the solid color
       overlay.style.transition = 'none';
       overlay.style.opacity = '1';
-      // ✅ Use a massive, feathered inset shadow to create a soft vignette gradient on top of the UI
       overlay.style.boxShadow = `inset 0 0 120px 20px ${flashColor}, inset 0 0 30px 10px ${flashColor}`;
-      
-      // Force the browser to reflow so the instant change registers
-      void overlay.offsetWidth; 
-      
-      // ✅ Gradually fade the opacity out completely over 600ms
+      void overlay.offsetWidth;
       overlay.style.transition = 'opacity 0.6s ease-out';
       overlay.style.opacity = '0';
     }
@@ -752,13 +816,127 @@ export default function SetlistPerformanceRoomPage() {
 
   const beatMapRef = useRef<CompiledBeatMap>({ totalBeats: 0, nodes: [], sectionStartBeats: [] });
 
+  const updatePlaybackAuthority = (authority: PlaybackAuthority | null) => {
+    const current = playbackAuthorityRef.current;
+    if (
+      current?.userId === authority?.userId &&
+      current?.connectionId === authority?.connectionId &&
+      current?.sessionId === authority?.sessionId
+    ) return;
+
+    playbackAuthorityRef.current = authority;
+    acceptedPlaybackRevisionRef.current = null;
+    pendingPlaybackStateRef.current = null;
+  };
+
+  const hasCurrentPlaybackAuthority = () => {
+    const user = localPresenceUserRef.current;
+    const authority = playbackAuthorityRef.current;
+    return Boolean(
+      user?.isMD &&
+      authority &&
+      authority.userId === user.id &&
+      authority.connectionId === user.connectionId &&
+      authority.sessionId === user.authoritySessionId
+    );
+  };
+
+  const handleTogglePlaybackAuthority = () => {
+    const wasMd = localPresenceUserRef.current?.isMD === true;
+    handleToggleMusicDirectorMode();
+    const currentUser = localPresenceUserRef.current;
+    if (currentUser?.isMD === wasMd) return;
+
+    updatePlaybackAuthority(
+      currentUser?.isMD && currentUser.id && currentUser.connectionId && currentUser.authoritySessionId
+        ? {
+            userId: currentUser.id,
+            connectionId: currentUser.connectionId,
+            sessionId: currentUser.authoritySessionId
+          }
+        : null
+    );
+  };
+
+  const validatePlaybackPayload = (payload: PlaybackStatePayload) => {
+    if (!VERSIONED_PLAYBACK_ACTIONS.has(payload.action || "")) return true;
+
+    if (
+      payload.action === "PLAYBACK_STATE" &&
+      payload.targetConnectionId !== localPresenceUserRef.current?.connectionId
+    ) return false;
+
+    const authority = playbackAuthorityRef.current;
+    if (
+      authority === null ||
+      payload.setlistId !== setlistId ||
+      payload.authorityUserId !== authority.userId ||
+      payload.authorityConnectionId !== authority.connectionId ||
+      payload.authoritySessionId !== authority.sessionId ||
+      !Number.isSafeInteger(payload.revision) ||
+      (payload.revision as number) < 1
+    ) {
+      return false;
+    }
+
+    const accepted = acceptedPlaybackRevisionRef.current;
+    if (accepted) {
+      if (
+        accepted.authorityConnectionId !== authority.connectionId ||
+        accepted.authoritySessionId !== payload.authoritySessionId ||
+        (payload.revision as number) <= accepted.revision
+      ) return false;
+    }
+
+    acceptedPlaybackRevisionRef.current = {
+      authorityConnectionId: authority.connectionId,
+      authoritySessionId: payload.authoritySessionId,
+      revision: payload.revision as number
+    };
+    return true;
+  };
+
   // ✅ Core Supabase Transmitter
   const sendSupabaseBroadcast = (payload: any) => {
     if (realtimeChannelRef.current) {
+      let outgoingPayload = payload;
+      if (VERSIONED_PLAYBACK_ACTIONS.has(payload.action)) {
+        const localUser = localPresenceUserRef.current;
+        if (!hasCurrentPlaybackAuthority()) {
+          console.warn(`Ignoring ${payload.action} from a client without current MD authority.`);
+          return;
+        }
+
+        if (!localUser?.connectionId || !localUser.id || !localUser.authoritySessionId) return;
+        let session = outgoingPlaybackSessionRef.current;
+        if (
+          !session ||
+          session.authorityConnectionId !== localUser.connectionId ||
+          session.authoritySessionId !== localUser.authoritySessionId
+        ) {
+          session = {
+            authorityConnectionId: localUser.connectionId,
+            authoritySessionId: localUser.authoritySessionId,
+            revision: 0
+          };
+          outgoingPlaybackSessionRef.current = session;
+        }
+
+        session.revision += 1;
+        outgoingPayload = {
+          ...payload,
+          setlistId,
+          authoritySessionId: session.authoritySessionId,
+          authorityUserId: localUser.id,
+          authorityConnectionId: localUser.connectionId,
+          revision: session.revision
+        };
+      }
+
       realtimeChannelRef.current.send({
         type: "broadcast",
         event: "lobby_sync",
-        payload
+        payload: outgoingPayload
       });
     }
   };
@@ -776,7 +954,10 @@ export default function SetlistPerformanceRoomPage() {
     }
   };
 
-  const applySharedPlaybackState = (payload: PlaybackStatePayload) => {
+  const applySharedPlaybackState = (
+    payload: PlaybackStatePayload,
+    youtubeSyncMode?: "snapshot"
+  ) => {
     const trackIndex = payload.trackIndex;
     const sectionIndex = payload.sectionIndex;
     const startTime = payload.mdSectionStartTime;
@@ -820,11 +1001,20 @@ export default function SetlistPerformanceRoomPage() {
 
       const synchronizeAfterTrackMount = () => {
         if (revision !== playbackSyncRevisionRef.current) return;
-        executeJumpNow(trackIndex, sectionIndex, startTime, true);
+        executeJumpNow(trackIndex, sectionIndex, startTime, true, youtubeSyncMode);
         const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
         const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
-        const elapsedMs = Math.max(0, getGlobalTime() - startTime);
-        lastAudioBeatRef.current = sectionStartBeat + Math.floor(elapsedMs / beatDurationMs) + 1;
+        const now = getGlobalTime();
+        const elapsedMs = now - startTime;
+        if (elapsedMs > 0) {
+          const currentAbsoluteBeat = sectionStartBeat + elapsedMs / beatDurationMs;
+          lastAudioBeatRef.current = getNextTimelineBeat(
+            currentAbsoluteBeat,
+            getTimelineMeter(activeSongRef.current?.section_timings)
+          );
+        } else {
+          lastAudioBeatRef.current = sectionStartBeat;
+        }
       };
 
       if (isTrackMismatch) {
@@ -837,19 +1027,33 @@ export default function SetlistPerformanceRoomPage() {
 
     const localStartTime = mdSectionStartTimeRef.current;
     if (localStartTime === null) return;
-    const correctionMs = startTime - localStartTime;
-    if (Math.abs(correctionMs) > 15) {
-      if (Math.abs(correctionMs) > 50) {
-        cancelFutureAudio?.();
-        const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
-        const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
-        const elapsedMs = Math.max(0, getGlobalTime() - startTime);
-        lastAudioBeatRef.current = sectionStartBeat + Math.floor(elapsedMs / beatDurationMs) + 1;
-      }
-      mdSectionStartTimeRef.current = startTime;
-      if (audioContextStartTimeRef.current !== null) {
-        audioContextStartTimeRef.current += correctionMs / 1000;
-      }
+    const now = getGlobalTime();
+    const beatDurationMs = 60000 / (tracksListRef.current[trackIndex]?.songs?.tempo || 75);
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
+    let driftBeats: number | null = null;
+
+    if (
+      typeof payload.mdAbsoluteBeat === "number" &&
+      Number.isFinite(payload.mdAbsoluteBeat) &&
+      typeof payload.mdGlobalBeatTime === "number" &&
+      Number.isFinite(payload.mdGlobalBeatTime)
+    ) {
+      const localAbsoluteBeat = sectionStartBeat + (now - localStartTime) / beatDurationMs;
+      const mdAbsoluteBeatNow = payload.mdAbsoluteBeat + (now - payload.mdGlobalBeatTime) / beatDurationMs;
+      driftBeats = localAbsoluteBeat - mdAbsoluteBeatNow;
+      if (Math.abs(driftBeats) < 0.08) return;
+    }
+
+    const requestedCorrectionMs = driftBeats === null
+      ? startTime - localStartTime
+      : driftBeats * beatDurationMs * 0.35;
+    if (Math.abs(requestedCorrectionMs) < 20) return;
+
+    const maxCorrectionMs = Math.min(100, beatDurationMs * 0.2);
+    const correctionMs = Math.max(-maxCorrectionMs, Math.min(maxCorrectionMs, requestedCorrectionMs));
+    mdSectionStartTimeRef.current = localStartTime + correctionMs;
+    if (audioContextStartTimeRef.current !== null) {
+      audioContextStartTimeRef.current += correctionMs / 1000;
     }
   };
 
@@ -862,7 +1066,9 @@ export default function SetlistPerformanceRoomPage() {
     }
 
     if (payload.isPlaying) {
-      applySharedPlaybackState(payload);
+      applySharedPlaybackState(payload, "snapshot");
+      setQueuedTrackIndex(payload.queuedTrackIndex ?? null);
+      setQueuedSectionIndex(payload.queuedSectionIndex ?? null);
       return;
     }
 
@@ -880,13 +1086,23 @@ export default function SetlistPerformanceRoomPage() {
     setCurrentSectionIndex(sectionIndex);
     playingTrackIndexRef.current = trackIndex;
     setPlayingTrackIndex(trackIndex);
+    setQueuedTrackIndex(null);
+    setQueuedSectionIndex(null);
   };
 
   // ✅ Core Receiver
-  const handleSyncCommand = (payload: any) => {
+  const handleSyncCommand = (payload: any, validatedReplay = false) => {
+    if (!payload || typeof payload !== "object") return;
+    if (!validatedReplay && !validatePlaybackPayload(payload as PlaybackStatePayload)) return;
+
+    if (payload.action === "TELEMETRY_SYNC") {
+      applyTelemetryUpdate(payload as TelemetryUpdate);
+      return;
+    }
+
     if (
       !isSyncedRef.current &&
-      ["START", "JUMP", "HEARTBEAT", "PLAYBACK_STATE"].includes(payload.action)
+      ["START", "STOP", "JUMP", "TRACK_CHANGE", "HEARTBEAT", "PLAYBACK_STATE"].includes(payload.action || "")
     ) {
       if (
         payload.action !== "PLAYBACK_STATE" ||
@@ -903,13 +1119,23 @@ export default function SetlistPerformanceRoomPage() {
       const targetTrackIdx = payload.trackIndex !== undefined ? payload.trackIndex : currentTrackIndexRef.current;
       isPlayingRef.current = true; setIsPlayingFlow(true);
       isYtBackingTrackStartRef.current = payload.isYtSource || false;
-      executeJumpNow(targetTrackIdx, payload.sectionIndex, payload.mdSectionStartTime, true);
+      const startTime = payload.mdSectionStartTime || getGlobalTime();
+      executeJumpNow(targetTrackIdx, payload.sectionIndex, startTime, true, "start");
+      const elapsedMs = getGlobalTime() - startTime;
+      if (elapsedMs > 0 && activeSongRef.current) {
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[payload.sectionIndex] || 0;
+        const beatDurationMs = 60000 / (activeSongRef.current.tempo || 75);
+        lastAudioBeatRef.current = getNextTimelineBeat(
+          sectionStartBeat + elapsedMs / beatDurationMs,
+          getTimelineMeter(activeSongRef.current.section_timings)
+        );
+      }
     }
     else if (payload.action === "STOP") {
       clearPlaybackStateRetry();
       pendingPlaybackStateRef.current = null;
       playbackSyncRevisionRef.current++;
-      executeLocalResetSequence();
+      executeLocalResetSequence(true);
     }
     else if (payload.action === "JUMP") {
       clearPlaybackStateRetry();
@@ -921,7 +1147,13 @@ export default function SetlistPerformanceRoomPage() {
         setQueuedTrackIndex(payload.trackIndex ?? currentTrackIndexRef.current);
         setQueuedSectionIndex(payload.sectionIndex);
       } else {
-        executeJumpNow(payload.trackIndex ?? currentTrackIndexRef.current, payload.sectionIndex, jumpTime);
+        executeJumpNow(
+          payload.trackIndex ?? currentTrackIndexRef.current,
+          payload.sectionIndex,
+          jumpTime,
+          false,
+          "explicit-jump"
+        );
       }
     }
     else if (payload.action === "TRACK_CHANGE") { playbackSyncRevisionRef.current++; mountTargetSetlistTrackIndex(payload.trackIndex); }
@@ -932,13 +1164,26 @@ export default function SetlistPerformanceRoomPage() {
     else if (payload.action === "PLAYBACK_STATE_REQUEST") {
       if (localPresenceUserRef.current?.isMD && payload.requesterConnectionId) {
         const isPlaying = isPlayingRef.current;
+        const trackIndex = isPlaying ? playingTrackIndexRef.current : currentTrackIndexRef.current;
+        const startTime = mdSectionStartTimeRef.current;
+        const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
+        const elapsedBeats = isPlaying && typeof startTime === "number"
+          ? Math.floor((getGlobalTime() - startTime) / beatDurationMs)
+          : null;
         sendSupabaseBroadcast({
           action: "PLAYBACK_STATE",
           targetConnectionId: payload.requesterConnectionId,
           isPlaying,
-          trackIndex: isPlaying ? playingTrackIndexRef.current : currentTrackIndexRef.current,
+          trackIndex,
           sectionIndex: currentSectionIndexRef.current,
-          mdSectionStartTime: mdSectionStartTimeRef.current,
+          mdSectionStartTime: startTime,
+          ...(elapsedBeats === null || typeof startTime !== "number" ? {} : {
+            mdAbsoluteBeat: sectionStartBeat + elapsedBeats,
+            mdGlobalBeatTime: startTime + elapsedBeats * beatDurationMs
+          }),
+          queuedTrackIndex: queuedTrackIndexRef.current,
+          queuedSectionIndex: queuedSectionIndexRef.current,
           isYtSource: isPlaying && isYtBackingTrackStartRef.current
         });
       }
@@ -949,6 +1194,13 @@ export default function SetlistPerformanceRoomPage() {
     else if (payload.action === "MD_TAKEOVER") {
       latestMdBroadcastRef.current = { mdId: payload.newMdId, timestamp: Date.now() };
       setOnlineUsers(prev => prev.map(u => ({ ...u, isMD: u.id === payload.newMdId })));
+      const newAuthority = payload.newMdId === localPresenceUserRef.current?.id
+        ? localPresenceUserRef.current
+        : onlineUsers.find(user => user.id === payload.newMdId);
+      const authoritySessionId = payload.authoritySessionId || newAuthority?.authoritySessionId;
+      updatePlaybackAuthority(newAuthority?.connectionId && authoritySessionId
+        ? { userId: newAuthority.id, connectionId: newAuthority.connectionId, sessionId: authoritySessionId }
+        : null);
 
       if (localPresenceUserRef.current?.isMD && localPresenceUserRef.current.id !== payload.newMdId) {
         const downgradedPayload = { ...localPresenceUserRef.current, isMD: false, updatedAt: Date.now() };
@@ -958,7 +1210,12 @@ export default function SetlistPerformanceRoomPage() {
         executeLocalResetSequence();
       } else if (localPresenceUserRef.current?.id === payload.newMdId && !localPresenceUserRef.current?.isMD) {
         // ✅ SURGICAL FIX: Explicitly upgrade the requester when the transfer is accepted!
-        const upgradedPayload = { ...localPresenceUserRef.current, isMD: true, updatedAt: Date.now() };
+        const upgradedPayload = {
+          ...localPresenceUserRef.current,
+          isMD: true,
+          authoritySessionId: authoritySessionId || localPresenceUserRef.current.authoritySessionId,
+          updatedAt: Date.now()
+        };
         setLocalPresenceUser(upgradedPayload);
         localPresenceUserRef.current = upgradedPayload;
         if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(upgradedPayload);
@@ -966,8 +1223,9 @@ export default function SetlistPerformanceRoomPage() {
     }
     else if (payload.action === "MD_RELEASE") {
       latestMdBroadcastRef.current = { mdId: null, timestamp: Date.now() };
+      updatePlaybackAuthority(null);
       setOnlineUsers(prev => prev.map(u => u.id === payload.releasedMdId ? { ...u, isMD: false } : u));
-      executeLocalResetSequence(); 
+      executeLocalResetSequence();
     }
     // ✅ SURGICAL ADDITION: MD Transfer Request Listeners
     else if (payload.action === "MD_REQUEST") {
@@ -992,22 +1250,22 @@ export default function SetlistPerformanceRoomPage() {
           const newMsgs = payload.history
             .filter((m: any) => !existingIds.has(m.id))
             .map((m: any) => ({ ...m, seenBy: m.seenBy || [] }));
-            
-          if (newMsgs.length === 0) return prev; 
+
+          if (newMsgs.length === 0) return prev;
           return [...prev, ...newMsgs].sort((a, b) => a.timestamp - b.timestamp).slice(-100);
         });
       }
     }
   };
 
-  handleSyncCommandRef.current = handleSyncCommand;
+  handleSyncCommandRef.current = (payload, validatedReplay) => handleSyncCommand(payload, validatedReplay);
   useEffect(() => {
     if (!isSynced) return;
     setPlaybackClockNotice(null);
     const pendingState = pendingPlaybackStateRef.current;
     if (!pendingState) return;
     pendingPlaybackStateRef.current = null;
-    handleSyncCommandRef.current(pendingState);
+    handleSyncCommandRef.current(pendingState, true);
   }, [isSynced]);
 
   // ✅ SURGICAL ADDITION: MD Transfer Request Senders
@@ -1017,7 +1275,7 @@ export default function SetlistPerformanceRoomPage() {
       sendSupabaseBroadcast({ action: "MD_REQUEST", requester: localPresenceUserRef.current });
       alert("Transfer request sent to " + currentMd.name);
     } else {
-      handleToggleMusicDirectorMode();
+      handleTogglePlaybackAuthority();
     }
   };
 
@@ -1027,93 +1285,316 @@ export default function SetlistPerformanceRoomPage() {
     localPresenceUserRef.current = downgraded;
     if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(downgraded);
     executeLocalResetSequence();
-    
+
     // ✅ SURGICAL FIX: Delay the broadcast slightly to ensure Supabase presence updates cleanly for all clients!
+    const newAuthority = onlineUsers.find(user => user.id === requesterId);
+    const authoritySessionId = crypto.randomUUID();
     setTimeout(() => {
-      sendSupabaseBroadcast({ action: "MD_TAKEOVER", newMdId: requesterId });
+      sendSupabaseBroadcast({
+        action: "MD_TAKEOVER",
+        newMdId: requesterId,
+        authorityConnectionId: newAuthority?.connectionId,
+        authoritySessionId
+      });
     }, 150);
     setMdRequest(null);
   };
 
-  function executeStartSequence(useCountdown: boolean, forcedStartTimestamp?: number, isYtSource: boolean = false) {
-    if (!isSyncedRef.current) {
-      setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist.");
+  function executeStartSequence(isYtSource: boolean = false) {
+    if (isPlayingRef.current || pendingYoutubeStartRef.current) return;
+    if (!hasCurrentPlaybackAuthority()) { setPlaybackClockNotice("Waiting for Music Director authority to synchronize."); return; }
+    if (!isSyncedRef.current) { setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist."); return; }
+
+    initAudioContext();
+
+    // Apply the exact scrubbed beat memory
+    let startTimestamp = getGlobalTime();
+    const exactScrubBeat = explicitScrubBeat;
+    if (exactScrubBeat !== null && activeSongRef.current) {
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
+      const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
+      startTimestamp = getGlobalTime() - ((exactScrubBeat - sectionStartBeat) * beatDurationMs);
+      setExplicitScrubBeat(null);
+    }
+
+    if (isYtSource) {
+      isYtBackingTrackStartRef.current = true;
+      pendingYoutubeStartRef.current = {
+        trackIndex: currentTrackIndexRef.current,
+        sectionIndex: currentSectionIndexRef.current,
+        exactBeat: exactScrubBeat
+      };
+      pendingYoutubeSyncRef.current = null;
+
+      if (isYtPlayerReadyRef.current && ytPlayerRef.current) beginYoutubeBackedStart();
       return;
     }
 
-    isYtBackingTrackStartRef.current = isYtSource; 
-    playingTrackIndexRef.current = currentTrackIndexRef.current;
-    setPlayingTrackIndex(currentTrackIndexRef.current);
+    completeLiveStart(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, false, exactScrubBeat);
+  }
+
+  function beginYoutubeBackedStart() {
+    if (!pendingYoutubeStartRef.current || !isYtPlayerReadyRef.current) return;
+    const player = ytPlayerRef.current;
+    if (!player || typeof player.seekTo !== "function" || typeof player.playVideo !== "function") return;
+    const pendingStart = pendingYoutubeStartRef.current;
+
+    const startVisualTimelineWithoutYoutube = () => {
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+      const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
+      const now = getGlobalTime();
+      const startTimestamp = pendingStart.exactBeat == null
+        ? now
+        : now - (pendingStart.exactBeat - sectionStartBeat) * beatDurationMs;
+      completeLiveStart(
+        pendingStart.trackIndex,
+        pendingStart.sectionIndex,
+        startTimestamp,
+        false,
+        pendingStart.exactBeat
+      );
+    };
+
+    try {
+      const song = activeSongRef.current;
+      const offsetMs = song?.youtube_sync_offset_ms || 0;
+      let expectedYoutubeTime;
+
+      if (pendingStart.exactBeat !== undefined && pendingStart.exactBeat !== null) {
+        expectedYoutubeTime = getYoutubeTimeForTimeline(pendingStart.exactBeat, 0, song?.tempo || 75, offsetMs);
+      } else {
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+        expectedYoutubeTime = getYoutubeTimeForTimeline(sectionStartBeat, 0, song?.tempo || 75, offsetMs);
+        const isFreshStart = mdSectionStartTimeRef.current ? Math.abs(getGlobalTime() - mdSectionStartTimeRef.current) < 500 : true;
+        if (pendingStart.sectionIndex === 0 && isFreshStart) expectedYoutubeTime = 0;
+      }
+
+      setTimeout(() => {
+        if (pendingYoutubeStartRef.current !== pendingStart) return;
+        try {
+          player.seekTo(Math.max(0, expectedYoutubeTime), true);
+          player.playVideo();
+          if (player.getPlayerState?.() === 1) {
+            handleYoutubePlaybackStarted(player.getCurrentTime?.() ?? expectedYoutubeTime);
+          }
+        } catch (error) {
+          console.warn("Could not start the optional YouTube player.", error);
+          startVisualTimelineWithoutYoutube();
+        }
+      }, 0);
+    } catch (error) {
+      console.warn("Could not start the optional YouTube player.", error);
+      startVisualTimelineWithoutYoutube();
+    }
+  }
+
+  function handleYoutubePlaybackStarted(currentTimeSeconds: number) {
+    const pendingStart = pendingYoutubeStartRef.current;
+    if (!pendingStart) return;
+
+    const song = activeSongRef.current;
+    const offsetMs = song?.youtube_sync_offset_ms || 0;
+    const beatDurationMs = 60000 / (song?.tempo || 75);
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+
+    let expectedYoutubeTime;
+    if (pendingStart.exactBeat !== undefined && pendingStart.exactBeat !== null) {
+      expectedYoutubeTime = getYoutubeTimeForTimeline(pendingStart.exactBeat, 0, song?.tempo || 75, offsetMs);
+    } else {
+      expectedYoutubeTime = getYoutubeTimeForTimeline(sectionStartBeat, 0, song?.tempo || 75, offsetMs);
+      const isFreshStart = mdSectionStartTimeRef.current ? Math.abs(getGlobalTime() - mdSectionStartTimeRef.current) < 500 : true;
+      if (pendingStart.sectionIndex === 0 && isFreshStart) expectedYoutubeTime = 0;
+    }
+
+    const actualTimeSecs = Math.abs(currentTimeSeconds - expectedYoutubeTime) > 2.0 ? expectedYoutubeTime : currentTimeSeconds;
+    const totalSongElapsedMs = (actualTimeSecs * 1000) - offsetMs;
+
+    // ✅ MUST BE RELATIVE TO SECTION START BEAT so the engine doesn't wipe out negative pre-rolls!
+    const theoreticalSectionStartMs = sectionStartBeat * beatDurationMs;
+    const sectionElapsedMs = totalSongElapsedMs - theoreticalSectionStartMs;
+    const startTimestamp = getGlobalTime() - sectionElapsedMs;
+
+    completeLiveStart(pendingStart.trackIndex, pendingStart.sectionIndex, startTimestamp, true, pendingStart.exactBeat);
+  }
+
+  function completeLiveStart(
+    trackIndex: number,
+    sectionIndex: number,
+    startTimestamp: number,
+    isYtSource: boolean,
+    exactStartBeat?: number | null
+  ) {
+    if (
+      !hasCurrentPlaybackAuthority() ||
+      trackIndex !== currentTrackIndexRef.current ||
+      sectionIndex !== currentSectionIndexRef.current
+    ) {
+      pendingYoutubeStartRef.current = null;
+      isYtBackingTrackStartRef.current = false;
+      ytPlayerRef.current?.pauseVideo?.();
+      return;
+    }
+
+    pendingYoutubeStartRef.current = null;
+    isYtBackingTrackStartRef.current = isYtSource;
+    playingTrackIndexRef.current = trackIndex;
+    setPlayingTrackIndex(trackIndex);
     playingSongRef.current = activeSongRef.current;
     playingSectionsRef.current = sectionsRef.current;
     isPlayingRef.current = true;
     setIsPlayingFlow(true);
-
-    // ✅ SURGICAL FIX: Deterministic 5-Second Buffer
-    // Completely neutralizes network latency by scheduling execution in the future
-    const delayMs = 5000; 
-    const startTimestamp = forcedStartTimestamp ?? (getGlobalTime() + delayMs);
     mdSectionStartTimeRef.current = startTimestamp;
 
     void startPlaybackTelemetry();
-    executeJumpNow(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, true);
 
-    sendSupabaseBroadcast({ 
-      action: "START", 
-      trackIndex: currentTrackIndexRef.current, 
-      sectionIndex: currentSectionIndexRef.current, 
-      mdSectionStartTime: startTimestamp, 
-      isYtSource: isYtSource 
+    executeJumpNow(trackIndex, sectionIndex, startTimestamp, true, isYtSource ? "start" : undefined, exactStartBeat === null ? undefined : exactStartBeat);
+
+    sendSupabaseBroadcast({
+      action: "START",
+      trackIndex,
+      sectionIndex,
+      mdSectionStartTime: startTimestamp,
+      isYtSource: isYtSource
     });
   }
 
+  function handleYoutubePlaybackError() {
+    const pendingStart = pendingYoutubeStartRef.current;
+    if (pendingStart) {
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+      const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
+      const now = getGlobalTime();
+      const startTimestamp = pendingStart.exactBeat == null
+        ? now
+        : now - (pendingStart.exactBeat - sectionStartBeat) * beatDurationMs;
+      completeLiveStart(
+        pendingStart.trackIndex,
+        pendingStart.sectionIndex,
+        startTimestamp,
+        false,
+        pendingStart.exactBeat
+      );
+    }
+  }
+
   const {
-    youtubeVideoId, isYtBuffering, setIsYtBuffering,
-    ytPlayerRef, isYtPlayerReadyRef, ytSyncPendingRef, isYtBufferingRef
+    youtubeVideoId,
+    isYtPlayerReady,
+    ytPlayerRef, isYtPlayerReadyRef
   } = useYouTubeSync({
-    activeSong, 
-    activeSongRef, 
-    beatMapRef, 
+    activeSong,
+    activeSongRef,
+    beatMapRef,
     currentSectionIndexRef,
-    getGlobalTime, 
-    youtubeVolumeRef, 
-    isYoutubeSyncEnabled: isYoutubeSyncEnabled && localPresenceUser?.isMD === true
+    getGlobalTime,
+    youtubeVolumeRef,
+    isYoutubeSyncEnabled,
+    onPlaybackStarted: (currentTimeSeconds) => youtubePlaybackStartedHandlerRef.current(currentTimeSeconds),
+    onPlaybackError: () => youtubePlaybackErrorHandlerRef.current()
   });
+  useEffect(() => {
+    youtubePlaybackStartedHandlerRef.current = handleYoutubePlaybackStarted;
+    youtubePlaybackErrorHandlerRef.current = handleYoutubePlaybackError;
+    beginYoutubeBackedStartRef.current = beginYoutubeBackedStart;
+  });
+
+  const syncYoutubeToTimeline = useCallback((
+    sectionIndex: number,
+    sectionStartTime: number,
+    mode: "start" | "explicit-jump" | "snapshot"
+  ) => {
+    if (youtubeStartTimeoutRef.current) {
+      clearTimeout(youtubeStartTimeoutRef.current);
+      youtubeStartTimeoutRef.current = null;
+    }
+
+    const request = { sectionIndex, sectionStartTime, mode };
+    pendingYoutubeSyncRef.current = request;
+    const song = activeSongRef.current;
+    const player = ytPlayerRef.current;
+    if (
+      !isYtBackingTrackStartRef.current ||
+      !song ||
+      !player ||
+      !isYtPlayerReadyRef.current ||
+      typeof player.seekTo !== "function"
+    ) return;
+
+    const offsetMs = song.youtube_sync_offset_ms || 0;
+    const now = getGlobalTime();
+
+    // ✅ NO CLAMPING: Allow negative time so engine knows we are in the Pre-Roll!
+    const elapsedTimelineMs = now - sectionStartTime;
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
+    const beatDurationMs = 60000 / (song.tempo || 75);
+
+    const theoreticalYoutubeTimeMs = (sectionStartBeat * beatDurationMs) + elapsedTimelineMs + offsetMs;
+    const expectedYoutubeTimeSecs = Math.max(0, theoreticalYoutubeTimeMs / 1000);
+
+    try {
+      setTimeout(() => {
+        player.seekTo(expectedYoutubeTimeSecs, true);
+        pendingYoutubeSyncRef.current = null;
+
+        const ensurePlaying = () => {
+          if (
+            isPlayingRef.current &&
+            isYtBackingTrackStartRef.current &&
+            player.getPlayerState?.() !== 1
+          ) {
+            try { player.playVideo?.(); } catch (error) { console.warn(error); }
+          }
+        };
+
+        // Pause YT only if required time is genuinely in the negative future (Before Video 0:00).
+        if (mode === "start" && theoreticalYoutubeTimeMs < 0) {
+          player.pauseVideo?.();
+          youtubeStartTimeoutRef.current = setTimeout(() => {
+            youtubeStartTimeoutRef.current = null;
+            if (isPlayingRef.current && isYtBackingTrackStartRef.current) {
+              player.playVideo?.();
+            }
+          }, Math.abs(theoreticalYoutubeTimeMs));
+        } else {
+          ensurePlaying();
+        }
+      }, 0);
+    } catch (error) {}
+  }, [getGlobalTime]);
+
+  useEffect(() => {
+    if (isYtPlayerReady && pendingYoutubeStartRef.current) {
+      beginYoutubeBackedStartRef.current();
+    }
+    const pendingSync = pendingYoutubeSyncRef.current;
+    if (isYtPlayerReady && pendingSync && isYtBackingTrackStartRef.current) {
+      syncYoutubeToTimeline(
+        pendingSync.sectionIndex,
+        pendingSync.sectionStartTime,
+        pendingSync.mode
+      );
+    }
+  }, [isYtPlayerReady, syncYoutubeToTimeline]);
 
   useHardwareClock({
     isPlayingFlow, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
-    audioLatencyOffsetMs, isYtBackingTrackStartRef, isYtBufferingRef, countdownValueRef, setCountdownValue,
+    audioLatencyOffsetMs, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
     queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
-    pendingQuantizedJumpRef, getGlobalTime, 
+    pendingQuantizedJumpRef, getGlobalTime,
     playGuideCue, getAudioContext, audioContextStartTimeRef,
 
-    // 👇 ADD THIS EXACT BLOCK 👇
     triggerMetronomeSound: (beatPulse, time) => {
-      // ✅ FIX: Trust the Stage Mixer volume fader instead of the strict boolean toggle
       if (localClickVolumeRef.current <= 0) return;
-      
       const soundKey = `metronome_${metronomeSoundTypeRef.current}_${beatPulse}`;
       playZeroLatencyAudio(soundKey, localClickVolumeRef.current, time);
     },
-    // 👆 ---------------------- 👆
 
-    getYoutubeTime: () => {
-      if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isYtBufferingRef.current) {
-        return ytPlayerRef.current.getCurrentTime();
-      }
-      return null;
-    },
-    seekYoutubeTo: (seconds) => {
-      if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
-        ytPlayerRef.current.seekTo(seconds, true);
-      }
-    },
-    executeJumpNow, localPresenceUserRef, 
-    sendSupabaseBroadcast, // (Note: In the solo page, this is `sendSupabaseBroadcast: () => {},`)
-    updateMetronomeUI, activeLineIndexRef, setActiveLineIndex, 
+    executeJumpNow, localPresenceUserRef,
+    sendSupabaseBroadcast,
+    updateMetronomeUI, activeLineIndexRef, setActiveLineIndex,
     handleAdvanceToNextSetlistTrack,
     sectionStartTimeRef, pauseOffsetMsRef, animationFrameRef, playingTrackIndexRef
   });
@@ -1149,16 +1630,14 @@ export default function SetlistPerformanceRoomPage() {
     return clearPlaybackStateRetry;
   }, [loading, roomChannelGeneration, localPresenceUser?.connectionId, localPresenceUser?.isMD]);
 
-  // ✅ SURGICAL FIX: Restored Flawless Supabase Implementation
   useEffect(() => {
-    if (!setlistId || !localPresenceUser?.connectionId) return; 
+    if (!setlistId || !localPresenceUser?.connectionId) return;
     isChannelSubscribedRef.current = false;
-    
+
     const lobbyChannel = supabase.channel(`setlist_lobby_${setlistId}`, {
-      config: { 
-        // ✅ SURGICAL FIX: Prevent the server from echoing your own commands back to you!
-        broadcast: { ack: false, self: false }, 
-        presence: { key: localPresenceUser.connectionId } 
+      config: {
+        broadcast: { ack: false, self: false },
+        presence: { key: localPresenceUser.connectionId }
       }
     });
 
@@ -1167,54 +1646,69 @@ export default function SetlistPerformanceRoomPage() {
         const presenceState = lobbyChannel.presenceState();
         let flatUsers = Object.values(presenceState).flat() as any[];
 
-        // 🛡️ THE HIGHLANDER RULE & ANTI-BOUNCE SHIELD
-        // 1. Sort by most recent update so the newest claimant wins any MD collision
         flatUsers.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
-        // ✅ SURGICAL FIX: Explicitly typed as 'any' to satisfy strict TypeScript rules
         let mdClaimant: any = null;
         flatUsers = flatUsers.map(u => {
             if (u.isMD && !mdClaimant) {
                 mdClaimant = u;
                 return u;
             } else if (u.isMD) {
-                return { ...u, isMD: false }; // Force strip MD from older claimants
+                return { ...u, isMD: false };
             }
             return u;
         });
 
-        // 2. Apply explicit manual override if a takeover happened in the last 3 seconds
         const override = latestMdBroadcastRef.current;
         if (Date.now() - override.timestamp < 3000) {
            flatUsers = flatUsers.map(u => ({ ...u, isMD: override.mdId === u.id }));
            mdClaimant = flatUsers.find(u => u.isMD) || null;
         }
 
-        // ✅ SURGICAL FIX: MD Disconnect Detector & Auto-Assign
         const currentMdId = mdClaimant ? mdClaimant.id : null;
+        updatePlaybackAuthority(
+          mdClaimant?.connectionId && mdClaimant?.authoritySessionId
+            ? {
+                userId: mdClaimant.id,
+                connectionId: mdClaimant.connectionId,
+                sessionId: mdClaimant.authoritySessionId
+              }
+            : null
+        );
         if (prevMdRef.current && !currentMdId) {
-            // MD disconnected or relinquished without a successor!
-            executeLocalResetSequence(); // Instantly stop playback globally
-            
-            // Auto-assign the next senior connection (alphabetical by ID as deterministic tie-breaker)
+            executeLocalResetSequence();
+
             if (flatUsers.length > 0) {
                 const nextMD = [...flatUsers].sort((a, b) => a.id.localeCompare(b.id))[0];
                 if (nextMD.id === localPresenceUserRef.current?.id) {
-                    const upgraded = { ...localPresenceUserRef.current, isMD: true, updatedAt: Date.now() };
+                    const upgraded = {
+                      ...localPresenceUserRef.current,
+                      isMD: true,
+                      authoritySessionId: crypto.randomUUID(),
+                      updatedAt: Date.now()
+                    };
                     setLocalPresenceUser(upgraded);
                     localPresenceUserRef.current = upgraded;
+                    updatePlaybackAuthority({
+                      userId: upgraded.id,
+                      connectionId: upgraded.connectionId,
+                      sessionId: upgraded.authoritySessionId
+                    });
                     if (isChannelSubscribedRef.current) realtimeChannelRef.current?.track(upgraded);
-                    sendSupabaseBroadcast({ action: "MD_TAKEOVER", newMdId: upgraded.id });
+                    sendSupabaseBroadcast({
+                      action: "MD_TAKEOVER",
+                      newMdId: upgraded.id,
+                      authorityConnectionId: upgraded.connectionId,
+                      authoritySessionId: upgraded.authoritySessionId
+                    });
                 }
             }
         }
         prevMdRef.current = currentMdId;
 
-        // ✅ SURGICAL FIX: Strict mapping removes ghost users when they drop the connection!
         const liveUserIds = new Set(Object.values(presenceState).flat().map((u: any) => u.id));
         setOnlineUsers(flatUsers.filter(u => liveUserIds.has(u.id)));
 
-        // 3. If I locally think I'm MD, but the Highlander rule says someone else is, I must yield!
         if (localPresenceUserRef.current?.isMD && mdClaimant && mdClaimant.id !== localPresenceUserRef.current.id) {
             const downgradedPayload = { ...localPresenceUserRef.current, isMD: false, updatedAt: Date.now() };
             setLocalPresenceUser(downgradedPayload);
@@ -1227,32 +1721,22 @@ export default function SetlistPerformanceRoomPage() {
       .on("broadcast", { event: "lobby_sync" }, ({ payload }) => {
         handleSyncCommand(payload);
       })
-      // ✅ SURGICAL ADDITION: Listen for ephemeral chat messages
       .on("broadcast", { event: "lobby_chat" }, ({ payload }) => {
         setLobbyMessages(prev => [...prev, { ...payload, seenBy: payload.seenBy || [] }].slice(-100));
         if (!isUserLobbyOpenRef.current) setUnreadMessageCount(prev => prev + 1);
       })
-      // ✅ SURGICAL ADDITION: Listen for network read receipts
       .on("broadcast", { event: "lobby_chat_seen" }, ({ payload }) => {
         setLobbyMessages(prev => prev.map(msg => {
-          // Remove this user's avatar from ALL older messages instantly
           const filteredSeenBy = (msg.seenBy || []).filter((u: any) => u.id !== payload.reader.id);
-          
-          // Pin their avatar to the specific message they just saw!
           if (msg.id === payload.messageId) {
             return { ...msg, seenBy: [...filteredSeenBy, payload.reader] };
           }
           return { ...msg, seenBy: filteredSeenBy };
         }));
       })
-      // ✅ SURGICAL ADDITION: Listen for pings
       .on("broadcast", { event: "lobby_ping" }, ({ payload }) => {
         if (!payload.targetUserId || payload.targetUserId === localPresenceUserRef.current?.id) {
-          // ✅ Passed the text payload into the alert state
           setPingAlert({ senderName: payload.senderName, isWhisper: !!payload.targetUserId, text: payload.text });
-          // ✅ SURGICAL FIX: Removed setTimeout. The modal is now persistent until dismissed manually.
-          
-          // Force wake audio context to play a native notification beep if possible
           try {
              const ctx = getAudioContext();
              if (ctx && ctx.state === "running") {
@@ -1268,12 +1752,10 @@ export default function SetlistPerformanceRoomPage() {
         }
       })
       .subscribe((status) => {
-        if (status === "SUBSCRIBED") { 
-          isChannelSubscribedRef.current = true; 
+        if (status === "SUBSCRIBED") {
+          isChannelSubscribedRef.current = true;
           setRoomChannelGeneration(generation => generation + 1);
-          lobbyChannel.track(localPresenceUserRef.current); 
-          // ✅ SURGICAL FIX: Request global chat history automatically when joining
-          // Increased buffer to 1200ms to guarantee WebSockets are fully established and tracking
+          lobbyChannel.track(localPresenceUserRef.current);
           setTimeout(() => {
             if (realtimeChannelRef.current && localPresenceUserRef.current) {
                realtimeChannelRef.current.send({
@@ -1294,14 +1776,20 @@ export default function SetlistPerformanceRoomPage() {
     };
   }, [setlistId, localPresenceUser?.connectionId]);
 
-  function executeJumpNow(targetTrackIdx: number, targetSectionIdx: number, jumpTime: number, isInitialStart: boolean = false) {
-    if (cancelFutureAudio) cancelFutureAudio(); // ✅ SURGICAL FIX: Kill all future ghost beats instantly
-    
+  function executeJumpNow(
+    targetTrackIdx: number,
+    targetSectionIdx: number,
+    jumpTime: number,
+    isInitialStart: boolean = false,
+    youtubeSyncMode?: "start" | "explicit-jump" | "snapshot",
+    exactStartBeat?: number | null
+  ) {
+    if (cancelFutureAudio) cancelFutureAudio();
+
     if (targetTrackIdx !== undefined && targetTrackIdx !== playingTrackIndexRef.current) {
       mountTargetSetlistTrackIndex(targetTrackIdx);
-      // CSS Native Snapping useEffect will automatically handle the smooth glide!
     }
-    
+
     playingTrackIndexRef.current = targetTrackIdx !== undefined ? targetTrackIdx : currentTrackIndexRef.current;
     setPlayingTrackIndex(playingTrackIndexRef.current);
     playingSongRef.current = activeSongRef.current;
@@ -1309,36 +1797,24 @@ export default function SetlistPerformanceRoomPage() {
 
     if (jumpTime) {
       mdSectionStartTimeRef.current = jumpTime;
-      initAudioContext(); 
+      initAudioContext();
       const audioCtx = getAudioContext();
       if (audioCtx) {
         const timeUntilJumpMs = jumpTime - getGlobalTime();
         const absoluteHardwareTimeAtJump = audioCtx.currentTime + (timeUntilJumpMs / 1000);
+
+        // jumpTime is the section-start timestamp; the exact scrub beat only seeds the next click.
         const targetAbsoluteBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
         const beatSpeedSecs = 60 / (activeSongRef.current?.tempo || 75);
         const theoreticalSongStartOffset = targetAbsoluteBeat * beatSpeedSecs;
-        
-        const ytOffsetSecs = (activeSongRef.current?.youtube_sync_offset_ms || 0) / 1000;
-        const ytSeekTargetSecs = targetSectionIdx === 0 ? 0 : (ytOffsetSecs + theoreticalSongStartOffset);
 
         audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
-        console.log(`🕒 [Clock Sync] Ctx State: ${audioCtx?.state} | StartTimeRef: ${audioContextStartTimeRef.current}`);
-        if (isYtBackingTrackStartRef.current && ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') {
-          try { 
-            ytPlayerRef.current.seekTo(ytSeekTargetSecs, true); 
-            ytPlayerRef.current.pauseVideo();
-            
-            const videoStartTime = targetSectionIdx === 0 ? jumpTime - (activeSongRef.current?.youtube_sync_offset_ms || 0) : jumpTime;
-            const timeUntilPlayMs = Math.max(0, videoStartTime - getGlobalTime());
-            setTimeout(() => {
-              if (isPlayingRef.current) ytPlayerRef.current.playVideo();
-            }, timeUntilPlayMs);
-          } catch(e) {}
-        }
-        
+      }
+      if (youtubeSyncMode) {
+        syncYoutubeToTimeline(targetSectionIdx, jumpTime, youtubeSyncMode);
       }
     }
-    
+
     if (localPresenceUserRef.current?.isMD && isRecordingRef.current && playingSectionsRef.current.length > 0) {
       const track = tracksListRef.current[targetTrackIdx];
       const section = playingSectionsRef.current[targetSectionIdx];
@@ -1355,28 +1831,60 @@ export default function SetlistPerformanceRoomPage() {
     jumpReasonRef.current = "Auto Play";
 
     currentSectionIndexRef.current = targetSectionIdx; setCurrentSectionIndex(targetSectionIdx);
-    lastAudioBeatRef.current = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0; 
+
+    // Seed trackers INSTANTLY with the exact scrub beat
+    const sectionStartBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
+    const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+    const absoluteStart = exactStartBeat !== undefined && exactStartBeat !== null
+      ? exactStartBeat
+      : sectionStartBeat;
+
+    lastAudioBeatRef.current = Math.max(sectionStartBeat, absoluteStart);
     lastBeatRef.current = 0; lastVisualBeatRef.current = 0;
+    setTracksPlayheadBeat(isPlayingRef.current
+      ? sectionStartBeat + (getGlobalTime() - jumpTime) / beatDurationMs
+      : absoluteStart);
+
     setQueuedTrackIndex(null); setQueuedSectionIndex(null); pendingQuantizedJumpRef.current = null;
-    hasPlayedCueRef.current = false; 
-    
+    hasPlayedCueRef.current = false;
+
     setShowSyncBack(false);
 
     if (backdropProgressRef.current) backdropProgressRef.current.style.transform = "scaleX(0)";
     if (accentProgressBarRef.current) accentProgressBarRef.current.style.transform = "scaleX(0)";
     if (isPlayingRef.current) {
       const apparentLatency = getGlobalTime() - jumpTime;
-      sectionStartTimeRef.current = Math.abs(apparentLatency) < 2000 ? performance.now() - apparentLatency : performance.now();
+      sectionStartTimeRef.current = performance.now() - apparentLatency;
     }
   }
 
-  function executeLocalResetSequence() {
-    if (cancelFutureAudio) cancelFutureAudio(); // ✅ SURGICAL FIX: Kill all future ghost beats instantly
+  function executeLocalResetSequence(preservePosition = false) {
+    if (cancelFutureAudio) cancelFutureAudio();
+    if (youtubeStartTimeoutRef.current) {
+      clearTimeout(youtubeStartTimeoutRef.current);
+      youtubeStartTimeoutRef.current = null;
+    }
+
+    if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') {
+       try { ytPlayerRef.current.pauseVideo(); } catch(e) {}
+    }
+    pendingYoutubeSyncRef.current = null;
+    pendingYoutubeStartRef.current = null;
+    isYtBackingTrackStartRef.current = false;
+
+    setExplicitScrubBeat(null); // Clear memory on reset
+    if (!preservePosition) setTracksPlayheadBeat(0);
+
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
-    currentSectionIndexRef.current = 0; lastBeatRef.current = 0; activeLineIndexRef.current = 0;
-    setCurrentSectionIndex(0); updateMetronomeUI(1, false); setActiveLineIndex(0);
+    if (!preservePosition) {
+      currentSectionIndexRef.current = 0;
+      activeLineIndexRef.current = 0;
+      setCurrentSectionIndex(0);
+      setActiveLineIndex(0);
+    }
+    lastBeatRef.current = 0;
+    updateMetronomeUI(1, false);
     setQueuedTrackIndex(null); setQueuedSectionIndex(null); setCurrentDriftMs(null);
     setShowSyncBack(false);
     if (backdropProgressRef.current) backdropProgressRef.current.style.transform = "scaleX(0)";
@@ -1430,8 +1938,6 @@ export default function SetlistPerformanceRoomPage() {
 
   function handleUserSelectTrackBadge(trackIdx: number) {
     mountTargetSetlistTrackIndex(trackIdx);
-    // CSS Native Snapping useEffect will automatically handle the smooth glide!
-    
     if (!isPlayingFlow && localPresenceUser?.isMD) {
       sendSupabaseBroadcast({ action: "TRACK_CHANGE", trackIndex: trackIdx });
     }
@@ -1466,62 +1972,87 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   function handleToggleFlowPlaybackState() {
-    if (!localPresenceUser?.isMD) { setIsMdLockModalOpen(true); return; }
+    if (!hasCurrentPlaybackAuthority()) { setIsMdLockModalOpen(true); return; }
+    if (pendingYoutubeStartRef.current) {
+      pendingYoutubeStartRef.current = null;
+      isYtBackingTrackStartRef.current = false;
+      ytPlayerRef.current?.pauseVideo?.();
+      return;
+    }
     if (isPlayingFlow) {
-      if (playClickTimeoutRef.current) { clearTimeout(playClickTimeoutRef.current); playClickTimeoutRef.current = null; }
       if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
-      handleResetFlowTrigger();
+      handleResetFlowTrigger(true);
     } else {
       if (sections.length === 0 || !activeSong) return;
-
-      if (playClickTimeoutRef.current) {
-        clearTimeout(playClickTimeoutRef.current); playClickTimeoutRef.current = null;
-        executeStartSequence(true, undefined, localPresenceUser?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
-      } else {
-        playClickTimeoutRef.current = setTimeout(() => {
-          playClickTimeoutRef.current = null;
-          executeStartSequence(true, undefined, localPresenceUser?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
-        }, 250);
-      }
+      executeStartSequence(localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
     }
   }
 
-  function handleResetFlowTrigger() {
+  function handleResetFlowTrigger(preservePosition = false) {
     void stopPlaybackTelemetry();
-    executeLocalResetSequence();
-    if (localPresenceUser?.isMD) sendSupabaseBroadcast({ action: "STOP" });
+    executeLocalResetSequence(preservePosition);
+    if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP" });
   }
 
-  function handleSectionInteractiveSelection(index: number) {
-    if (!localPresenceUser?.isMD && (onlineUsers.find(u => u.isMD && u.id !== localPresenceUser?.id) !== undefined)) return; 
+  function handleSectionInteractiveSelection(index: number, overrideTrackIndex?: number, exactBeat?: number) {
+    if (!hasCurrentPlaybackAuthority()) return;
     if (!isPlayingFlow && !isSyncedRef.current) {
       setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist.");
       return;
     }
-    
-    jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play"; 
+
+    const targetTrackIndex = overrideTrackIndex !== undefined ? overrideTrackIndex : currentTrackIndex;
+    jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play";
+
+    if (targetTrackIndex !== currentTrackIndex) {
+      mountTargetSetlistTrackIndex(targetTrackIndex);
+    }
+
+    let timeOffsetMs = 0;
+    if (exactBeat !== undefined && activeSongRef.current) {
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[index] || 0;
+      const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
+      timeOffsetMs = (exactBeat - sectionStartBeat) * beatDurationMs;
+      setExplicitScrubBeat(exactBeat);
+    } else {
+      setExplicitScrubBeat(null);
+    }
 
     if (!isPlayingFlow) {
-      const jumpTime = getGlobalTime() + 150; executeJumpNow(currentTrackIndex, index, jumpTime);
-      sendSupabaseBroadcast({ action: "JUMP", trackIndex: currentTrackIndex, sectionIndex: index, mdSectionStartTime: jumpTime });
+      const jumpTime = getGlobalTime() + 150;
+      const effectiveStartTime = jumpTime - timeOffsetMs;
+      // ✅ SURGICAL FIX: Must pass exactBeat down to executeJumpNow
+      executeJumpNow(targetTrackIndex, index, effectiveStartTime, false, "explicit-jump", exactBeat);
+      sendSupabaseBroadcast({ action: "JUMP", trackIndex: targetTrackIndex, sectionIndex: index, mdSectionStartTime: effectiveStartTime });
       return;
     }
-    if (clickTimeoutRef.current) {
+
+    if (clickTimeoutRef.current && exactBeat === undefined) {
       clearTimeout(clickTimeoutRef.current); clickTimeoutRef.current = null;
-      setQueuedTrackIndex(currentTrackIndex); setQueuedSectionIndex(index); pendingQuantizedJumpRef.current = null;
-      sendSupabaseBroadcast({ action: "QUEUE", trackIndex: currentTrackIndex, sectionIndex: index });
+      setQueuedTrackIndex(targetTrackIndex); setQueuedSectionIndex(index); pendingQuantizedJumpRef.current = null;
+      sendSupabaseBroadcast({ action: "QUEUE", trackIndex: targetTrackIndex, sectionIndex: index });
     } else {
+      if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
       clickTimeoutRef.current = setTimeout(() => {
         clickTimeoutRef.current = null;
         let jumpTime = getGlobalTime() + 150;
-        if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
-          const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
-          jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
-          pendingQuantizedJumpRef.current = { trackIndex: currentTrackIndex, sectionIndex: index, jumpTime };
-          setQueuedTrackIndex(currentTrackIndex); setQueuedSectionIndex(index);
-        } else { executeJumpNow(currentTrackIndex, index, jumpTime); }
-        sendSupabaseBroadcast({ action: "JUMP", trackIndex: currentTrackIndex, sectionIndex: index, mdSectionStartTime: jumpTime });
-      }, 250);
+        let effectiveStartTime = jumpTime - timeOffsetMs;
+
+        if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current && exactBeat === undefined) {
+          const currentPlayingSong = playingSongRef.current || activeSongRef.current;
+          const currentMeter = getTimelineMeter(currentPlayingSong.section_timings);
+          const currentMeasureDurationMs = (60 / (currentPlayingSong.tempo || 75)) * 1000 * currentMeter.quarterBeatsPerMeasure;
+
+          jumpTime = getGlobalTime() + (currentMeasureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % currentMeasureDurationMs));
+          effectiveStartTime = jumpTime;
+          pendingQuantizedJumpRef.current = { trackIndex: targetTrackIndex, sectionIndex: index, jumpTime };
+          setQueuedTrackIndex(targetTrackIndex); setQueuedSectionIndex(index);
+        } else {
+          // ✅ SURGICAL FIX: Must pass exactBeat down to executeJumpNow
+          executeJumpNow(targetTrackIndex, index, effectiveStartTime, false, "explicit-jump", exactBeat);
+        }
+        sendSupabaseBroadcast({ action: "JUMP", trackIndex: targetTrackIndex, sectionIndex: index, mdSectionStartTime: effectiveStartTime });
+      }, exactBeat !== undefined ? 0 : 250);
     }
   }
 
@@ -1559,13 +2090,14 @@ export default function SetlistPerformanceRoomPage() {
   const songSegments = useMemo(() => {
     const segments: SongSegment[] = [];
     if (!activeSong || sections.length === 0) return segments;
-    
+
     const offsetSec = (activeSong.youtube_sync_offset_ms || 0) / 1000;
     const tempo = activeSong.tempo || 120;
     const secPerBeat = 60 / tempo;
-    
+    const beatsPerMeasure = getTimelineMeter(activeSong.section_timings).quarterBeatsPerMeasure;
+
     let currentStartTime = offsetSec;
-    
+
     sections.forEach((sec, idx) => {
       let rawTimings = activeSong?.section_timings?.[sec.section_name];
       if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
@@ -1574,17 +2106,35 @@ export default function SetlistPerformanceRoomPage() {
       const spacerDurationBeats = isSpacer
         ? getTimelineDurationBeats(activeSong?.section_timings, idx, sec.id, activeSong?.default_structure) ?? 0.5
         : 0;
-      
-      const beatsPerMeasure = 4; // Standardized for live
+
       const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
-      const basePassBeats = ((Number(timings.measures) || 4) * beatsPerMeasure) + (Number(timings.beats) || 0);
+      let basePassBeats = ((Number(timings.measures) || 4) * beatsPerMeasure) + (Number(timings.beats) || 0);
+      let rawLineTimings: unknown = timings.line_timings;
+      if (typeof rawLineTimings === "string") {
+        try { rawLineTimings = JSON.parse(rawLineTimings); } catch { rawLineTimings = undefined; }
+      }
+      const lineTimings = rawLineTimings && typeof rawLineTimings === "object"
+        ? rawLineTimings as Record<string, { measures?: number; beats?: number; repeats?: number }>
+        : null;
+      if (lineTimings && typeof lineTimings === "object") {
+        const lineCount = (sec.content || "").split("\n").length;
+        const linePassBeats = Array.from({ length: lineCount }, (_, lineIndex) => {
+          const line = lineTimings[String(lineIndex)];
+          if (!line) return 0;
+          return (
+            ((Number(line.measures) || 0) * beatsPerMeasure + (Number(line.beats) || 0)) *
+            ((Number(line.repeats) || 0) + 1)
+          );
+        }).reduce((total, duration) => total + duration, 0);
+        if (linePassBeats > 0) basePassBeats = linePassBeats;
+      }
       const totalCoreBeats = basePassBeats * sectionMultiplier;
       const headBeats = (Number(timings.head_m) || 0) * beatsPerMeasure;
       const tailBeats = (Number(timings.tail_m) || 0) * beatsPerMeasure;
-      
+
       let totalBeats = isSpacer ? spacerDurationBeats : totalCoreBeats + headBeats + tailBeats;
       if (!isSpacer && totalBeats <= 0) totalBeats = 16;
-      
+
       const durationSec = totalBeats * secPerBeat;
       if (!sec.section_name.toLowerCase().startsWith("spacer")) {
         segments.push({
@@ -1598,7 +2148,7 @@ export default function SetlistPerformanceRoomPage() {
       }
       currentStartTime += durationSec;
     });
-    
+
     return segments;
   }, [activeSong, sections]);
   // =========================================================================
@@ -1606,7 +2156,7 @@ export default function SetlistPerformanceRoomPage() {
   // =========================================================================
   const memoizedSetlistAst = useMemo(() => {
     if (!tracksList || tracksList.length === 0) return [];
-    
+
     return tracksList.map((track, trackIndex) => {
       const song = track.songs;
       if (!song) return { trackIndex, trackId: track.id, title: "Unknown", displayKey: "C", ast: [] };
@@ -1615,7 +2165,7 @@ export default function SetlistPerformanceRoomPage() {
       const displayKey = track.custom_key || song.original_key || "C";
       const originalKey = song.original_key || "C";
       const isMinor = originalKey.endsWith("m");
-      
+
       const oldIdx = CHROMATIC_SCALE.indexOf(normalizeKeyNote(isMinor ? originalKey.slice(0, -1) : originalKey));
       const newIdx = CHROMATIC_SCALE.indexOf(normalizeKeyNote(isMinor ? displayKey.slice(0, -1) : displayKey));
       let delta = 0;
@@ -1627,15 +2177,15 @@ export default function SetlistPerformanceRoomPage() {
       const ast = trackSections.map((section): CompiledSectionToken => {
         const rawText = section.content || "";
         if (!rawText.trim()) return { id: section.id, section_name: section.section_name, lines: [] };
-        
+
         const linesArray = rawText.split("\n").map((line): ParsedLineToken => {
           let commentText = "";
           const cleanLineText = line.replace(/\{([^\}]+)\}/g, (_, p1) => { commentText = p1.trim(); return ""; });
           const wordsMatch = cleanLineText.match(/(?:\[[^\]]+\]|\S)+/g) || [];
-          
+
           const wordsTokens = wordsMatch.map((chunk): ParsedWordToken => {
-            const chordRegex = /\[([^\]]+)\]/g; 
-            const chordsList: string[] = []; 
+            const chordRegex = /\[([^\]]+)\]/g;
+            const chordsList: string[] = [];
             let match;
             while ((match = chordRegex.exec(chunk)) !== null) {
               chordsList.push(delta !== 0 ? transposeBracketContent(match[1], delta) : match[1]);
@@ -1648,94 +2198,28 @@ export default function SetlistPerformanceRoomPage() {
       });
 
       // 3. Return the fully compiled song packet
-      return { 
-        trackIndex, 
-        trackId: track.id, 
-        title: song.title, 
+      return {
+        trackIndex,
+        trackId: track.id,
+        title: song.title,
         originalKey: song.original_key,
-        displayKey, 
+        displayKey,
         tempo: song.tempo,
-        ast 
+        ast
       };
     });
   }, [tracksList]);
 
   beatMapRef.current = useMemo(() => {
-    const map: BeatNode[] = []; const sectionStartBeats: number[] = []; let currentAbsoluteBeat = 0;
-    if (!activeSong || sections.length === 0) return { totalBeats: 0, nodes: [], sectionStartBeats: [] };
-
-    sections.forEach((section, sIdx) => {
-      sectionStartBeats.push(currentAbsoluteBeat);
-      if (section.section_name.toLowerCase().startsWith("spacer")) {
-        currentAbsoluteBeat += getTimelineDurationBeats(activeSong.section_timings, sIdx, section.id, activeSong.default_structure) ?? 0.5;
-        return;
-      }
-      
-      let rawTimings = activeSong?.section_timings?.[section.section_name];
-      if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
-      const timings = rawTimings || {};
-
-      const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
-      const headBeats = (Number(timings.head_m) || 0) * 4;
-      const tailBeats = (Number(timings.tail_m) || 0) * 4;
-      
-      // ✅ THE ABSOLUTE TRUTH: The master settings dictate the exact loop length
-      const baseLoopBeats = ((Number(timings.measures) || 4) * 4) + (Number(timings.beats) || 0);
-      
-      const parsedLinesCount = memoizedSongAstTree[sIdx]?.lines.length || 1;
-      let hasLineOverrides = false; 
-      const lineBeatsMap: number[] = [];
-      
-      let lineTimingsObj = timings.line_timings;
-      if (typeof lineTimingsObj === 'string') { try { lineTimingsObj = JSON.parse(lineTimingsObj); } catch(e){} }
-
-      if (lineTimingsObj && Object.keys(lineTimingsObj).length > 0) {
-        hasLineOverrides = true;
-        for (let i = 0; i < parsedLinesCount; i++) {
-          const t = lineTimingsObj[String(i)];
-          if (t) {
-            const lineMult = (Number(t.repeats) || 0) + 1; 
-            const lineBeats = ((Number(t.measures) * 4) + (Number(t.beats) || 0)) * lineMult;
-            lineBeatsMap.push(lineBeats); 
-          } else {
-            lineBeatsMap.push(0); // Safe fallback for Ghost Data
-          }
-        }
-      }
-
-      const stampBeats = (totalBeatsToStamp: number) => {
-          let remaining = totalBeatsToStamp;
-          while (remaining > 0) { 
-            const mLen = remaining >= 4 ? 4 : remaining; 
-            for (let b = 1; b <= mLen; b++) { 
-              map.push({ absoluteBeatIndex: currentAbsoluteBeat, measureBeatIndex: b, measureLength: mLen, sectionIndex: sIdx, isDownbeat: b === 1 }); 
-              currentAbsoluteBeat++; 
-            }
-            remaining -= mLen; 
-          }
-      };
-
-      stampBeats(headBeats);
-      for (let r = 0; r < sectionMultiplier; r++) { 
-        let beatsStamped = 0;
-        if (hasLineOverrides) { 
-           lineBeatsMap.forEach(b => {
-              if (b > 0) { stampBeats(b); beatsStamped += b; }
-           }); 
-        } 
-        
-        // ✅ SURGICAL FIX: The Auto-Padder!
-        // If the line timings are broken or missing, automatically pad the remaining beats 
-        // to match the Master M setting. This guarantees the clock NEVER shrinks and crashes!
-        const missingBeats = baseLoopBeats - beatsStamped;
-        if (missingBeats > 0) {
-           stampBeats(missingBeats);
-        }
-      }
-      stampBeats(tailBeats);
-    });
-
-    return { totalBeats: currentAbsoluteBeat, nodes: map, sectionStartBeats };
+    if (!activeSong || sections.length === 0) {
+      return { totalBeats: 0, nodes: [], sectionStartBeats: [] };
+    }
+    return compileTimelineBeatMap(
+      sections,
+      activeSong.section_timings,
+      memoizedSongAstTree.map((section) => section.lines.length),
+      activeSong.default_structure
+    );
   }, [activeSong, sections, memoizedSongAstTree]);
   useEffect(() => { astTreeRef.current = memoizedSongAstTree; }, [memoizedSongAstTree]);
 
@@ -1750,21 +2234,41 @@ export default function SetlistPerformanceRoomPage() {
     let rawTimings = activeSong?.section_timings?.[sectionName];
     if (typeof rawTimings === 'string') { try { rawTimings = JSON.parse(rawTimings); } catch(e){} }
     const timings = rawTimings || { measures: 4, beats: 0, repeats: 0, head_m: 0, tail_m: 0 };
-    
+
     // ✅ Strictly enforce the Master Repeat & Measure settings
-    const sectionMultiplier = (Number(timings.repeats) || 0) + 1; 
-    const basePassBeats = ((Number(timings.measures) || 4) * 4) + (Number(timings.beats) || 0);
-    
+    const beatsPerMeasure = getTimelineMeter(activeSong?.section_timings).quarterBeatsPerMeasure;
+    const sectionMultiplier = (Number(timings.repeats) || 0) + 1;
+    let basePassBeats = ((Number(timings.measures) || 4) * beatsPerMeasure) + (Number(timings.beats) || 0);
+    let rawLineTimings: unknown = timings.line_timings;
+    if (typeof rawLineTimings === "string") {
+      try { rawLineTimings = JSON.parse(rawLineTimings); } catch { rawLineTimings = undefined; }
+    }
+    const lineTimings = rawLineTimings && typeof rawLineTimings === "object"
+      ? rawLineTimings as Record<string, { measures?: number; beats?: number; repeats?: number }>
+      : null;
+    if (sectionIdx !== undefined && lineTimings && typeof lineTimings === "object") {
+      const lineCount = memoizedSongAstTree[sectionIdx]?.lines.length || 1;
+      const linePassBeats = Array.from({ length: lineCount }, (_, lineIndex) => {
+        const line = lineTimings[String(lineIndex)];
+        if (!line) return 0;
+        return (
+          ((Number(line.measures) || 0) * beatsPerMeasure + (Number(line.beats) || 0)) *
+          ((Number(line.repeats) || 0) + 1)
+        );
+      }).reduce((total, duration) => total + duration, 0);
+      if (linePassBeats > 0) basePassBeats = linePassBeats;
+    }
+
     const totalCoreBeats = basePassBeats * sectionMultiplier;
-    const headBeats = (Number(timings.head_m) || 0) * 4;
-    const tailBeats = (Number(timings.tail_m) || 0) * 4;
-    
+    const headBeats = (Number(timings.head_m) || 0) * beatsPerMeasure;
+    const tailBeats = (Number(timings.tail_m) || 0) * beatsPerMeasure;
+
     let totalBeats = totalCoreBeats + headBeats + tailBeats;
-    if (totalBeats <= 0) totalBeats = 16; 
-    
+    if (totalBeats <= 0) totalBeats = 16;
+
     const tempo = Number(activeSong?.tempo) || 75;
     const totalSeconds = Math.round((totalBeats * (60000 / tempo)) / 1000);
-    
+
     return `${Math.floor(totalSeconds / 60)}:${(totalSeconds % 60).toString().padStart(2, '0')}`;
   };
 
@@ -1772,12 +2276,12 @@ export default function SetlistPerformanceRoomPage() {
 
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
-      
+
       {/* ========================================================================= */}
       {/* ✅ HEADER: Outside the swipe canvas so it remains perfectly fixed */}
       {/* ========================================================================= */}
       {!isZenMode && (
-        <LiveHeader 
+        <LiveHeader
           activeSong={activeSong} activeDisplayKey={activeDisplayKey} currentDriftMs={currentDriftMs}
           localPresenceUser={localPresenceUser} isPlayingFlow={isPlayingFlow} currentBeat={currentBeat}
           currentMeasureLength={currentMeasureLength} metronomeRefs={metronomeRefs} setIsSettingsModalOpen={setIsSettingsModalOpen}
@@ -1791,14 +2295,14 @@ export default function SetlistPerformanceRoomPage() {
           activeSectionName={sectionsRef.current[currentSectionIndex]?.section_name || "---"}
           nextSectionName={
             (queuedSectionIndexRef.current !== null && queuedTrackIndexRef.current !== null)
-              ? "QUEUED" 
+              ? "QUEUED"
               : sectionsRef.current[currentSectionIndex + 1]?.section_name || "END"
           }
           handleSyncBack={() => setShowSyncBack(false)}
-          showSyncBack={showSyncBack} 
-          scrollContainerRef={trackScrollRefs.current[currentTrackIndex]} 
-          setIsUserLobbyOpen={setIsUserLobbyOpen} 
-          unreadMessageCount={totalUnreadCount} 
+          showSyncBack={showSyncBack}
+          scrollContainerRef={trackScrollRefs.current[currentTrackIndex]}
+          setIsUserLobbyOpen={setIsUserLobbyOpen}
+          unreadMessageCount={totalUnreadCount}
           setIsChaptersModalOpen={setIsChaptersModalOpen} // ✅ Add prop to trigger modal
           isRecordingTelemetry={isRecording}
           isTelemetryPaused={isPaused}
@@ -1816,147 +2320,107 @@ export default function SetlistPerformanceRoomPage() {
       )}
 
       {/* ========================================================================= */}
-      {/* ✅ HORIZONTAL CAROUSEL CANVAS */}
+      {/* ✅ DYNAMIC VIEW ROUTER: Sheet (Horizontal), Stack (Vertical), Tracks (Split) */}
       {/* ========================================================================= */}
-      <div 
-        ref={carouselRef}
-        onScroll={handleNativeScroll}
-        className="flex-1 flex flex-row w-full h-full relative overflow-x-auto snap-x snap-mandatory [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
-      >
-        {memoizedSetlistAst.map((trackAst, idx) => {
-          const isActive = idx === currentTrackIndex;
-          
-          const localScrollRef = trackScrollRefs.current[idx];
-          const localSectionRefs = trackSectionRefs.current[idx];
+      {isSimplifiedMode ? (
+        <div className="flex-1 w-full h-full relative overflow-hidden bg-surface">
+          <SimplifiedStackView
+            setlistAst={memoizedSetlistAst}
+            memoizedSongAstTree={memoizedSongAstTree}
+            currentSectionIndex={currentSectionIndex}
+            queuedSectionIndex={queuedSectionIndex}
+            queuedTrackIndex={queuedTrackIndex}
+            currentTrackIndex={currentTrackIndex}
+            activeLineIndex={activeLineIndex}
+            chordFormat={chordFormat}
+            activeDisplayKey={activeDisplayKey}
+            getSectionDurationString={getSectionDurationString}
+            simplifiedProgressBarRef={simplifiedProgressBarRef}
+            upcomingTrackItem={tracksList[currentTrackIndex + 1] || null}
+            handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+            handleUserSelectTrackBadge={handleUserSelectTrackBadge}
+            showChords={showChords} lyricsFontSize={lyricsFontSize} lineSpacing={lineSpacing}
+          />
+        </div>
+      ) : isTracksMode ? (
+        <div className="flex-1 w-full h-full relative overflow-hidden bg-[#09090b]">
+          <TracksView
+             activeSong={activeSong} // ✅ SURGICAL FIX: Feed the raw song data so it can parse line timings
+             sections={sections}
+             songAst={memoizedSongAstTree}
+             sectionStarts={beatMapRef.current.sectionStartBeats}
+             sectionDurations={sections.map((_, i) => Math.max(0, (beatMapRef.current.sectionStartBeats[i + 1] ?? beatMapRef.current.totalBeats) - (beatMapRef.current.sectionStartBeats[i] ?? 0)))}
+             totalBeats={beatMapRef.current.totalBeats}
+             quarterBeatsPerMeasure={getTimelineMeter(activeSong?.section_timings).quarterBeatsPerMeasure}
+             activeSectionIndex={currentSectionIndex}
+             queuedSectionIndex={queuedTrackIndex === currentTrackIndex ? queuedSectionIndex : null}
+             activeLineIndex={activeLineIndex}
+             playheadBeat={isPlayingFlow ? tracksPlayheadBeat : (explicitScrubBeat !== null ? explicitScrubBeat : (beatMapRef.current.sectionStartBeats[currentSectionIndex] ?? 0))}
+             isPlaying={isPlayingFlow}
+             tempo={activeSong?.tempo ?? 75}
+             showChords={showChords}
+             lyricsFontSize={lyricsFontSize}
+             lineSpacing={lineSpacing}
+             chordFormat={chordFormat}
+             activeDisplayKey={activeDisplayKey}
+             // ✅ SURGICAL FIX: Feed MD capabilities to TracksView so the timeline can be clicked!
+             handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+             isMD={localPresenceUser?.isMD}
+          />
+        </div>
+      ) : (
+        <div
+          ref={carouselRef}
+          className="flex-1 flex flex-row w-full h-full relative overflow-x-auto snap-x snap-mandatory [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
+        >
+          {memoizedSetlistAst.map((trackAst, idx) => {
+            const isActive = idx === currentTrackIndex;
+            const localScrollRef = trackScrollRefs.current[idx];
+            const localSectionRefs = trackSectionRefs.current[idx];
 
-          return (
-            // ✅ SURGICAL FIX: Strictly enforce max/min width so long text never stretches the child and displaces the sibling songs!
-            <div key={trackAst.trackId} className="w-full min-w-full max-w-full h-full shrink-0 relative flex flex-col overflow-x-hidden snap-center">
-              
-              {isSimplifiedMode ? (
-                <SimplifiedStackView
-                  setlistAst={memoizedSetlistAst}
-                  memoizedSongAstTree={isActive ? memoizedSongAstTree : trackAst.ast} 
-                  currentSectionIndex={isActive ? currentSectionIndex : 0} 
-                  queuedSectionIndex={isActive ? queuedSectionIndex : null}
-                  queuedTrackIndex={isActive ? queuedTrackIndex : null} 
-                  currentTrackIndex={idx} 
-                  activeLineIndex={isActive ? activeLineIndex : 0}
-                  chordFormat={chordFormat} 
-                  activeDisplayKey={isActive ? activeDisplayKey : trackAst.displayKey} 
-                  getSectionDurationString={getSectionDurationString}
-                  simplifiedProgressBarRef={isActive ? simplifiedProgressBarRef : { current: null }} 
-                  upcomingTrackItem={tracksList[idx + 1] || null}
-                  handleSectionInteractiveSelection={handleSectionInteractiveSelection}
-                  handleUserSelectTrackBadge={handleUserSelectTrackBadge}
-                  showChords={showChords} lyricsFontSize={lyricsFontSize} lineSpacing={lineSpacing}
-                />
-             ) : isTracksMode ? (
-               (() => {
-                 const track = tracksList[idx];
-                 const trackSections: ArrangementSection[] = isActive
-                   ? sections
-                   : track?.custom_structure ?? trackAst.ast.map((section) => ({
-                       id: section.id,
-                       section_name: section.section_name,
-                       content: "",
-                     }));
-                 const trackSong = track?.songs;
-                 const sectionDurations = trackSections.map((section, sectionIndex) => {
-                   if (isActive) {
-                     const sectionStart = beatMapRef.current.sectionStartBeats[sectionIndex] ?? 0;
-                     const nextStart = beatMapRef.current.sectionStartBeats[sectionIndex + 1] ?? beatMapRef.current.totalBeats;
-                     return Math.max(0.5, nextStart - sectionStart);
-                   }
-                   if (section.section_name.toLowerCase().startsWith("spacer")) {
-                     return getTimelineDurationBeats(trackSong?.section_timings, sectionIndex, section.id, trackSong?.default_structure) ?? 0.5;
-                   }
-                   const timing = trackSong?.section_timings?.[section.section_name];
-                   return Math.max(1, ((Number(timing?.measures) || 4) * 4 + (Number(timing?.beats) || 0)) * ((Number(timing?.repeats) || 0) + 1) + (Number(timing?.head_m) || 0) * 4 + (Number(timing?.tail_m) || 0) * 4);
-                 });
-                 const sectionStarts = sectionDurations.map((_, sectionIndex) =>
-                   sectionDurations.slice(0, sectionIndex).reduce((sum, duration) => sum + duration, 0),
-                 );
-                 const totalBeats = sectionDurations.reduce((sum, duration) => sum + duration, 0);
-                 const isPlayingTrack = idx === playingTrackIndex;
-                 const viewSectionIndex = isPlayingTrack ? currentSectionIndex : 0;
-                 const viewQueuedSectionIndex = queuedTrackIndex === idx ? queuedSectionIndex : null;
-                 return (
-                   <TracksView
-                     sections={trackSections}
-                     songAst={isActive ? memoizedSongAstTree : trackAst.ast}
-                     sectionStarts={sectionStarts}
-                     sectionDurations={sectionDurations}
-                     totalBeats={totalBeats}
-                     activeSectionIndex={viewSectionIndex}
-                     queuedSectionIndex={viewQueuedSectionIndex}
-                     activeLineIndex={isPlayingTrack ? activeLineIndex : 0}
-                     playheadBeat={isPlayingTrack
-                       ? isPlayingFlow ? tracksPlayheadBeat : sectionStarts[viewSectionIndex] ?? 0
-                       : 0}
-                     isPlaying={isPlayingTrack && isPlayingFlow}
-                     tempo={trackSong?.tempo ?? trackAst.tempo ?? 75}
-                     showChords={showChords}
-                     lyricsFontSize={lyricsFontSize}
-                     lineSpacing={lineSpacing}
-                     chordFormat={chordFormat}
-                     activeDisplayKey={isActive ? activeDisplayKey : trackAst.displayKey}
-                   />
-                 );
-               })()
-             ) : (
-                <StandardSheetView 
-                  memoizedSongAstTree={isActive ? memoizedSongAstTree : trackAst.ast} 
-                  isPlayingFlow={isActive ? isPlayingFlow : false} 
-                  playingTrackIndex={playingTrackIndex}
-                  currentTrackIndex={idx} 
-                  currentSectionIndex={isActive ? currentSectionIndex : 0} 
-                  queuedTrackIndex={isActive ? queuedTrackIndex : null}
-                  queuedSectionIndex={isActive ? queuedSectionIndex : null} 
-                  getSectionDurationString={getSectionDurationString} 
-                  handleSectionInteractiveSelection={handleSectionInteractiveSelection}
-                  activeLineIndex={isActive ? activeLineIndex : 0} 
-                  showChords={showChords} lyricsFontSize={lyricsFontSize}
-                  lineSpacing={lineSpacing} chordFormat={chordFormat} 
-                  activeDisplayKey={isActive ? activeDisplayKey : trackAst.displayKey} 
-                  upcomingTrackItem={tracksList[idx + 1] || null}
-                  handleUserSelectTrackBadge={handleUserSelectTrackBadge} 
-                  isAutoScrollingRef={isActive ? isAutoScrollingRef : { current: false }} 
-                  setShowSyncBack={isActive ? setShowSyncBack : () => {}} 
-                  // ✅ Feed the independent refs in
-                  sectionRefs={localSectionRefs} 
-                  scrollContainerRef={localScrollRef}
-                />
-              )}
-
-              {/* The Scrubber slides in and out attached to the active song */}
-              {/* {isActive && !isZenMode && (
-                <ScrubberOverlay 
-                  sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={queuedTrackIndex} currentTrackIndex={currentTrackIndex}
-                  queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
-                  isSimplifiedMode={isSimplifiedMode} tracksList={tracksList} handleUserSelectTrackBadge={handleUserSelectTrackBadge}
-                  // ✅ Feed the independent refs in
-                  sectionRefs={localSectionRefs} 
-                />
-              )} */}
-            </div>
-          );
-        })}
-      </div>
+            return (
+              <div key={trackAst.trackId} className="w-full min-w-full max-w-full h-full shrink-0 relative flex flex-col overflow-x-hidden snap-center">
+                  <StandardSheetView
+                    memoizedSongAstTree={isActive ? memoizedSongAstTree : trackAst.ast}
+                    isPlayingFlow={isActive ? isPlayingFlow : false}
+                    isInteractive={isActive}
+                    playingTrackIndex={playingTrackIndex}
+                    currentTrackIndex={idx}
+                    currentSectionIndex={isActive ? currentSectionIndex : 0}
+                    queuedTrackIndex={isActive ? queuedTrackIndex : null}
+                    queuedSectionIndex={isActive ? queuedSectionIndex : null}
+                    getSectionDurationString={getSectionDurationString}
+                    handleSectionInteractiveSelection={handleSectionInteractiveSelection}
+                    activeLineIndex={isActive ? activeLineIndex : 0}
+                    showChords={showChords} lyricsFontSize={lyricsFontSize}
+                    lineSpacing={lineSpacing} chordFormat={chordFormat}
+                    activeDisplayKey={isActive ? activeDisplayKey : trackAst.displayKey}
+                    upcomingTrackItem={tracksList[idx + 1] || null}
+                    handleUserSelectTrackBadge={handleUserSelectTrackBadge}
+                    isAutoScrollingRef={isActive ? isAutoScrollingRef : { current: false }}
+                    setShowSyncBack={isActive ? setShowSyncBack : () => {}}
+                    sectionRefs={localSectionRefs}
+                    scrollContainerRef={localScrollRef}
+                  />
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ========================================================================= */}
       {/* ✅ OVERLAYS & MODALS: Locked rigidly to the viewport */}
       {/* ========================================================================= */}
       {isZenMode && (
          <>
-           <div 
-             ref={zenOverlayRef} 
+           <div
+             ref={zenOverlayRef}
              className="fixed inset-0 pointer-events-none z-[400000] opacity-0"
            />
-           <ZenMovableFAB 
-             isMD={localPresenceUser?.isMD} 
-             isPlayingFlow={isPlayingFlow} 
-             onTogglePlay={handleToggleFlowPlaybackState} 
+           <ZenMovableFAB
+             isMD={localPresenceUser?.isMD}
+             isPlayingFlow={isPlayingFlow}
+             onTogglePlay={handleToggleFlowPlaybackState}
              onOpenSettings={() => setIsSettingsModalOpen(true)}
              onExitZen={() => setIsZenMode(false)}
            />
@@ -1964,10 +2428,10 @@ export default function SetlistPerformanceRoomPage() {
       )}
 
       <SettingsModal
-        isSettingsModalOpen={isSettingsModalOpen} setIsSettingsModalOpen={setIsSettingsModalOpen} localPresenceUser={localPresenceUser} onlineUsers={onlineUsers} handleToggleMusicDirectorMode={handleToggleMusicDirectorMode}
+        isSettingsModalOpen={isSettingsModalOpen} setIsSettingsModalOpen={setIsSettingsModalOpen} localPresenceUser={localPresenceUser} onlineUsers={onlineUsers} handleToggleMusicDirectorMode={handleTogglePlaybackAuthority}
         showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode} isTracksMode={isTracksMode} setIsTracksMode={setIsTracksMode}
         isZenMode={isZenMode} setIsZenMode={setIsZenMode}
-        metronomeSoundType={metronomeSoundType} 
+        metronomeSoundType={metronomeSoundType}
         setMetronomeSoundType={setMetronomeSoundType}
         lineSpacing={lineSpacing} setLineSpacing={setLineSpacing} lyricsFontSize={lyricsFontSize} setLyricsFontSize={setLyricsFontSize}
         isMetronomeSoundEnabled={isMetronomeSoundEnabled} setIsMetronomeSoundEnabled={setIsMetronomeSoundEnabled} isDoubleMetronomeEnabled={isDoubleMetronomeEnabled} setIsDoubleMetronomeEnabled={setIsDoubleMetronomeEnabled}
@@ -1979,14 +2443,14 @@ export default function SetlistPerformanceRoomPage() {
         isClickGuideHardPannedRight={isClickGuideHardPannedRight}
         setIsClickGuideHardPannedRight={setIsClickGuideHardPannedRight}
         canEditSong={canEditSong}
-        isRecording={isRecording} setIsRecordModalOpen={setIsRecordModalOpen} 
+        isRecording={isRecording} setIsRecordModalOpen={setIsRecordModalOpen}
         recordingStartTime={recordingStartTime}
-        isPaused={isPaused} recordingAccumulatedMs={recordingAccumulatedMs} 
+        isPaused={isPaused} recordingAccumulatedMs={recordingAccumulatedMs}
         getGlobalTime={getGlobalTime}
         isPlayingFlow={isPlayingFlow} router={router} handleOpenTransposerModal={() => setIsTransposerOpen(true)} setIsStructureModalOpen={setIsStructureModalOpen}
       />
 
-      <StructureEditorModal 
+      <StructureEditorModal
         isStructureModalOpen={isStructureModalOpen} setIsStructureModalOpen={setIsStructureModalOpen} isSavingStructure={isSavingStructure} sections={sections}
         originalStructure={tracksList[currentTrackIndex]?.original_structure || []}
         onReset={() => { void persistStructure([...(tracksList[currentTrackIndex]?.original_structure || [])]); }}
@@ -2007,9 +2471,9 @@ export default function SetlistPerformanceRoomPage() {
         saveError={structureSaveError}
       />
 
-      <AddBlockModal 
-        isAddBlockModalOpen={isAddBlockModalOpen} 
-        setIsAddBlockModalOpen={setIsAddBlockModalOpen} 
+      <AddBlockModal
+        isAddBlockModalOpen={isAddBlockModalOpen}
+        setIsAddBlockModalOpen={setIsAddBlockModalOpen}
         availableSectionNames={availableSongSections}
         handleModalAppendNewSectionItem={async (name) => {
           if (!activeSong || isSavingStructure) return;
@@ -2032,35 +2496,35 @@ export default function SetlistPerformanceRoomPage() {
         }}
       />
 
-      <TransposerModal 
+      <TransposerModal
         isTransposerOpen={isTransposerOpen} setIsTransposerOpen={setIsTransposerOpen} activeSong={activeSong}
         modalRoot={modalRoot} setModalRoot={setModalRoot} modalAccidental={modalAccidental as ""|"#"|"b"} setModalAccidental={setModalAccidental}
         handleCommitTranspositionSave={async (e) => {
-          e.preventDefault(); 
+          e.preventDefault();
           if (!activeSong) return;
-          
+
           const formatted = `${modalRoot}${modalAccidental}${activeSong.original_key.endsWith("m") ? "m" : ""}`;
-          
+
           // 1. Instantly update the local React State
-          setActiveDisplayKey(formatted); 
+          setActiveDisplayKey(formatted);
           setIsTransposerOpen(false);
-          setTracksList(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, custom_key: formatted } : t)); 
+          setTracksList(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, custom_key: formatted } : t));
           handleResetFlowTrigger();
-          
+
           // 2. ✅ SURGICAL FIX: Find the junction row using match()
           // activeSong.id is the UUID from the `songs` table.
           if (activeSong.id && setlistId) {
-            
+
             // Note: If a user adds the exact same song twice to the same setlist block,
             // this will transpose BOTH of them. This is usually the desired behavior.
             const { error } = await supabase
               .from("setlist_songs")
               .update({ custom_key: formatted })
-              .match({ 
-                setlist_id: setlistId, 
-                song_id: activeSong.id 
+              .match({
+                setlist_id: setlistId,
+                song_id: activeSong.id
               });
-              
+
             if (error) {
               console.error("Failed to save transposition:", error.message);
               alert("Could not save the key change permanently to the database.");
@@ -2069,7 +2533,7 @@ export default function SetlistPerformanceRoomPage() {
         }}
       />
 
-      <RecordRehearsalModal 
+      <RecordRehearsalModal
         isRecordModalOpen={isRecordModalOpen} setIsRecordModalOpen={setIsRecordModalOpen} isMD={localPresenceUser?.isMD} isRecording={isRecording}
         isPaused={isPaused} recordingStartTime={recordingStartTime} recordingAccumulatedMs={recordingAccumulatedMs} history={rehearsalHistory}
         saveError={telemetrySaveError}
@@ -2133,10 +2597,10 @@ export default function SetlistPerformanceRoomPage() {
         }}
       />
 
-      <MdLockModal 
-        isMdLockModalOpen={isMdLockModalOpen} setIsMdLockModalOpen={setIsMdLockModalOpen} 
-        activeMDConnection={onlineUsers.find(u => u.isMD && u.id !== localPresenceUser?.id)} 
-        handleToggleMusicDirectorMode={handleToggleMusicDirectorMode} 
+      <MdLockModal
+        isMdLockModalOpen={isMdLockModalOpen} setIsMdLockModalOpen={setIsMdLockModalOpen}
+        activeMDConnection={onlineUsers.find(u => u.isMD && u.id !== localPresenceUser?.id)}
+        handleToggleMusicDirectorMode={handleTogglePlaybackAuthority}
         handleRequestMusicDirector={handleRequestMusicDirector} // ✅ Pass the request func
       />
 
@@ -2164,7 +2628,7 @@ export default function SetlistPerformanceRoomPage() {
             <div className="w-14 h-14 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mt-1 mb-2 shadow-inner border border-blue-100">
               <span className="material-symbols-outlined text-[28px] animate-bounce">notifications_active</span>
             </div>
-            
+
             <div className="space-y-1">
               <h3 className="text-[18px] font-black text-zinc-900 tracking-tight">Team Alert</h3>
               <p className="text-xs font-bold text-zinc-500">
@@ -2180,9 +2644,9 @@ export default function SetlistPerformanceRoomPage() {
             </div>
 
             <div className="pt-2 flex flex-col gap-2">
-              <button 
-                type="button" 
-                onClick={() => setPingAlert(null)} 
+              <button
+                type="button"
+                onClick={() => setPingAlert(null)}
                 className="w-full py-3.5 bg-zinc-950 hover:bg-zinc-800 text-white font-black text-xs uppercase tracking-widest rounded-xl text-center shadow-md cursor-pointer transition-colors"
               >
                 Dismiss
@@ -2196,13 +2660,13 @@ export default function SetlistPerformanceRoomPage() {
       {isChaptersModalOpen && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-150">
           <div className="bg-surface-container rounded-t-3xl md:rounded-[2rem] shadow-2xl border-t border-x md:border border-outline-variant/30 w-full max-w-md flex flex-col max-h-[85vh] animate-in slide-in-from-bottom-full md:zoom-in-95 duration-300">
-            
+
             <div className="flex items-center justify-between p-5 border-b border-outline-variant/20 shrink-0">
               <div className="flex items-center gap-2">
                 <span className="material-symbols-outlined text-[20px] text-on-surface-variant">format_list_bulleted</span>
                 <h3 className="font-black text-[16px] text-on-surface">Song Chapters</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setIsChaptersModalOpen(false)}
                 className="w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant flex items-center justify-center transition-colors border border-outline-variant/30"
               >
@@ -2218,9 +2682,9 @@ export default function SetlistPerformanceRoomPage() {
                   const isActive = currentSectionIndex === seg.sectionIndex;
                   const isQueued = queuedSectionIndex === seg.sectionIndex; // ✅ Track Queue State
                   const isMD = localPresenceUser?.isMD;
-                  
+
                   return (
-                    <div 
+                    <div
                       key={`chap-${idx}`}
                       className={`group flex items-center justify-between p-3 rounded-xl transition-colors border ${isActive ? 'bg-primary/10 border-primary/30' : isQueued ? 'bg-purple-500/10 border-purple-500/30' : 'bg-surface-container border-transparent hover:bg-surface-container-high'}`}
                     >
@@ -2231,16 +2695,16 @@ export default function SetlistPerformanceRoomPage() {
                         </div>
                         <span className="font-mono text-[11px] text-on-surface-variant tracking-widest mt-0.5">{formatTime(seg.start)}</span>
                       </div>
-  
+
                       {isMD && !isActive ? (
                         <div className="flex items-center gap-2 shrink-0">
                           {/* ✅ SURGICAL ADDITION: Explicit Queue Button */}
                           {!isQueued && (
-                            <button 
+                            <button
                               onClick={(e) => {
                                   e.stopPropagation(); // ✅ Prevents modal closure
-                                  setQueuedTrackIndex(currentTrackIndex); 
-                                  setQueuedSectionIndex(seg.sectionIndex); 
+                                  setQueuedTrackIndex(currentTrackIndex);
+                                  setQueuedSectionIndex(seg.sectionIndex);
                                   pendingQuantizedJumpRef.current = null;
                                   sendSupabaseBroadcast({ action: "QUEUE", trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex });
                               }}
@@ -2252,23 +2716,25 @@ export default function SetlistPerformanceRoomPage() {
                           )}
 
                           {/* ✅ SURGICAL ADDITION: Explicit Play Now Button */}
-                          <button 
+                          <button
                             onClick={(e) => {
                                 e.stopPropagation(); // ✅ Prevents modal closure
-                                jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play"; 
+                                jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play";
                                 if (!isPlayingFlow) {
                                   // ✅ SURGICAL FIX: "Play Now" while stopped actually STARTS the playback from this chapter!
                                   currentSectionIndexRef.current = seg.sectionIndex;
                                   setCurrentSectionIndex(seg.sectionIndex);
-                                  executeStartSequence(false, undefined, localPresenceUser?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
+                                  executeStartSequence(localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
                                 } else {
                                   let jumpTime = getGlobalTime() + 150;
                                   if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {
-                                    const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
+                                    const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000;
                                     jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
                                     pendingQuantizedJumpRef.current = { trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex, jumpTime };
                                     setQueuedTrackIndex(currentTrackIndex); setQueuedSectionIndex(seg.sectionIndex);
-                                  } else { executeJumpNow(currentTrackIndex, seg.sectionIndex, jumpTime); }
+                                  } else {
+                                    executeJumpNow(currentTrackIndex, seg.sectionIndex, jumpTime, false, "explicit-jump");
+                                  }
                                   sendSupabaseBroadcast({ action: "JUMP", trackIndex: currentTrackIndex, sectionIndex: seg.sectionIndex, mdSectionStartTime: jumpTime });
                                 }
                             }}
@@ -2290,17 +2756,17 @@ export default function SetlistPerformanceRoomPage() {
         </div>
       )}
 
-      <UserLobby 
+      <UserLobby
         isOpen={isUserLobbyOpen}
-        onClose={() => setIsUserLobbyOpen(false)} 
-        onlineUsers={onlineUsers} 
-        localPresenceUser={localPresenceUser} 
+        onClose={() => setIsUserLobbyOpen(false)}
+        onlineUsers={onlineUsers}
+        localPresenceUser={localPresenceUser}
         lobbyMessages={lobbyMessages}
         sendChatMessage={sendChatMessage}
         sendPingMessage={sendPingMessage}
         sendReadReceipt={sendReadReceipt} // ✅ Pass read receipt trigger
-        pingCooldown={pingCooldown} 
-        lastReadTimes={lastReadTimes} 
+        pingCooldown={pingCooldown}
+        lastReadTimes={lastReadTimes}
         setLastReadTimes={setLastReadTimes}
         teamId={setlistTeamId || userTeamId}
         setlistId={setlistId}
@@ -2310,31 +2776,6 @@ export default function SetlistPerformanceRoomPage() {
       />
 
       <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>
-      
-      {/* ✅ SURGICAL FIX: The buffering overlay is completely forbidden from rendering if playback is stopped. */}
-      {(countdownValue !== null || (isYtBuffering && isPlayingFlow)) && (
-        <div className="fixed inset-0 z-[400000] bg-zinc-950/90 backdrop-blur-md flex flex-col items-center justify-center animate-in fade-in duration-100 select-none touch-none">
-          {countdownValue !== null ? (
-            <>
-              <span className={`font-black tracking-widest uppercase mb-4 text-xl md:text-2xl animate-pulse ${isYtBuffering ? 'text-amber-500' : 'text-blue-500'}`}>
-                {isYtBuffering ? "Buffering & Syncing Engine" : "Pre-Warming Sync Engine"}
-              </span>
-              <span className="text-[150px] md:text-[250px] font-black text-white leading-none tracking-tighter drop-shadow-2xl">
-                {countdownValue}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="text-red-500 font-black tracking-widest uppercase mb-4 text-xl md:text-2xl animate-pulse">
-                Buffering Backing Track
-              </span>
-              <span className="text-[100px] md:text-[150px] font-black text-white leading-none tracking-tighter drop-shadow-2xl">
-                ∞
-              </span>
-            </>
-          )}
-        </div>
-      )}
 
     </div>
   );

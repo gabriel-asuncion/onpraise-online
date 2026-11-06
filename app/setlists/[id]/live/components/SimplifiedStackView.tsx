@@ -17,7 +17,7 @@ interface SimplifiedStackViewProps {
   simplifiedProgressBarRef: React.MutableRefObject<HTMLDivElement | null>;
   upcomingTrackItem: SetlistTrackItem | null;
   
-  handleSectionInteractiveSelection: (idx: number) => void;
+  handleSectionInteractiveSelection: (idx: number, trackIdx?: number) => void;
   handleUserSelectTrackBadge: (trackIdx: number) => void;
   showChords: boolean;
   lyricsFontSize: number;
@@ -35,6 +35,29 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
   const titleRefs = useRef<{ [key: string]: HTMLHeadingElement | null }>({});
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lastScrollTime = useRef(0);
+  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const didDragRef = useRef(false);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    pointerStartRef.current = { x: event.clientX, y: event.clientY };
+    didDragRef.current = false;
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const pointerStart = pointerStartRef.current;
+    if (!pointerStart || didDragRef.current) return;
+    if (Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 10) {
+      didDragRef.current = true;
+    }
+  };
+
+  const handleClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!didDragRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    didDragRef.current = false;
+    pointerStartRef.current = null;
+  };
 
   const handleScroll = () => {
     const now = Date.now();
@@ -95,7 +118,11 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
     <div 
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      className="flex-1 overflow-y-auto custom-scrollbar bg-surface relative z-0 scroll-smooth pb-[50vh]"
+      onPointerDownCapture={handlePointerDown}
+      onPointerMoveCapture={handlePointerMove}
+      onClickCapture={handleClickCapture}
+      // ✅ SURGICAL FIX: absolute inset-0 forces it to strictly respect viewport height without leaking body scroll
+      className="absolute inset-0 overflow-y-auto custom-scrollbar bg-surface z-0 scroll-smooth pb-[50vh]"
     >
       <style>{`
         @keyframes marquee-dynamic {
@@ -168,12 +195,7 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
                        key={sec.id}
                        id={`stack-sec-${song.trackIndex}-${secIdx}`}
                        onClick={() => {
-                         if (!isCurrentSong) {
-                           handleUserSelectTrackBadge(song.trackIndex);
-                           setTimeout(() => handleSectionInteractiveSelection(secIdx), 150);
-                         } else {
-                           handleSectionInteractiveSelection(secIdx);
-                         }
+                         handleSectionInteractiveSelection(secIdx, song.trackIndex);
                        }}
                        className={`rounded-xl md:rounded-2xl px-4 pb-3 pt-5 md:px-5 md:pb-4 md:pt-6 shadow-sm transition-all duration-300 relative cursor-pointer ${
                          isActive 

@@ -335,7 +335,7 @@ export function SettingsModal(props: SettingsModalProps) {
                       <span className="text-[13px] text-on-surface font-bold">YouTube Telemetry Sync</span>
                       <span className="text-[11px] text-on-surface-variant">
                         {isMDActive
-                          ? "Use the backing track as your stage clock"
+                          ? "Use playback start to anchor the shared metronome"
                           : alternateMD
                             ? "Only the Music Director's device loads the backing track"
                             : "Only the Music Director can enable this"}

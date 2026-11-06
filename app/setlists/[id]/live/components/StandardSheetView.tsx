@@ -6,13 +6,14 @@ import { MemoizedLyricLine } from "./MemoizedLyricLine";
 interface StandardSheetViewProps {
   memoizedSongAstTree: CompiledSectionToken[];
   isPlayingFlow: boolean;
+  isInteractive: boolean;
   playingTrackIndex: number;
   currentTrackIndex: number;
   currentSectionIndex: number;
   queuedTrackIndex: number | null;
   queuedSectionIndex: number | null;
   getSectionDurationString: (sectionName: string, sectionIdx?: number) => string;
-  handleSectionInteractiveSelection: (idx: number) => void;
+  handleSectionInteractiveSelection: (idx: number, trackIdx?: number) => void;
   sectionRefs: React.MutableRefObject<{ [key: string]: HTMLDivElement | null }>;
   activeLineIndex: number;
   showChords: boolean;
@@ -29,11 +30,35 @@ interface StandardSheetViewProps {
 
 export function StandardSheetView(props: StandardSheetViewProps) {
   const {
-    memoizedSongAstTree, isPlayingFlow, playingTrackIndex, currentTrackIndex, currentSectionIndex,
+    memoizedSongAstTree, isPlayingFlow, isInteractive, playingTrackIndex, currentTrackIndex, currentSectionIndex,
     queuedTrackIndex, queuedSectionIndex, getSectionDurationString, handleSectionInteractiveSelection,
     sectionRefs, activeLineIndex, showChords, lyricsFontSize, lineSpacing, chordFormat, activeDisplayKey,
     upcomingTrackItem, handleUserSelectTrackBadge, scrollContainerRef, isAutoScrollingRef, setShowSyncBack
   } = props;
+
+  const pointerStartRef = React.useRef<{ x: number; y: number } | null>(null);
+  const didDragRef = React.useRef(false);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    pointerStartRef.current = { x: event.clientX, y: event.clientY };
+    didDragRef.current = false;
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const pointerStart = pointerStartRef.current;
+    if (!pointerStart || didDragRef.current) return;
+    if (Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 10) {
+      didDragRef.current = true;
+    }
+  };
+
+  const handleClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!didDragRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    didDragRef.current = false;
+    pointerStartRef.current = null;
+  };
 
   const handleUserScrollIntent = () => {
     if (!isAutoScrollingRef.current) setShowSyncBack(true);
@@ -42,6 +67,9 @@ export function StandardSheetView(props: StandardSheetViewProps) {
   return (
     <div 
       ref={scrollContainerRef} 
+      onPointerDownCapture={handlePointerDown}
+      onPointerMoveCapture={handlePointerMove}
+      onClickCapture={handleClickCapture}
       onWheel={handleUserScrollIntent}
       onTouchMove={handleUserScrollIntent}
       className="flex-1 overflow-y-auto p-4 md:p-8 pt-6 custom-scrollbar pb-64 bg-surface"
@@ -61,7 +89,15 @@ export function StandardSheetView(props: StandardSheetViewProps) {
             <div
               key={section.id}
               ref={(el) => { sectionRefs.current[section.id] = el; }}
-              onClick={() => handleSectionInteractiveSelection(idx)}
+              onClick={() => {
+                if (!isInteractive) {
+                  // If MD swiped ahead to a future song, focus the carousel on it first, then queue it!
+                  handleUserSelectTrackBadge(currentTrackIndex);
+                  setTimeout(() => handleSectionInteractiveSelection(idx, currentTrackIndex), 150);
+                } else {
+                  handleSectionInteractiveSelection(idx, currentTrackIndex);
+                }
+              }}
               className={`rounded-xl md:rounded-2xl px-4 pb-3 pt-5 md:px-5 md:pb-4 md:pt-6 shadow-sm transition-all duration-300 relative cursor-pointer ${
                 isThisSectionActivePlayback 
                   ? "bg-surface-container-high shadow-[0_0_24px_rgba(37,99,235,0.22)] scale-[1.02] z-20" 
