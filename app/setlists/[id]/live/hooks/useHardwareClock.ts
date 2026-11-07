@@ -65,6 +65,7 @@ export interface HardwareClockConfig {
 
 export function useHardwareClock(config: HardwareClockConfig) {
   const workerRef = useRef<Worker | null>(null);
+  const workerUrlRef = useRef<string | null>(null);
   const fallbackTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const configRef = useRef(config);
@@ -72,7 +73,21 @@ export function useHardwareClock(config: HardwareClockConfig) {
 
   useEffect(() => {
     const killEngine = () => {
-      if (workerRef.current) { workerRef.current.postMessage('stop'); workerRef.current.terminate(); workerRef.current = null; }
+      const worker = workerRef.current;
+      const workerUrl = workerUrlRef.current;
+      if (worker) {
+        try {
+          worker.postMessage('stop');
+        } catch (error) {
+          console.warn("Playback worker stop message failed; terminating it directly.", error);
+        }
+        worker.terminate();
+        if (workerRef.current === worker) workerRef.current = null;
+      }
+      if (workerUrl && workerUrlRef.current === workerUrl) {
+        URL.revokeObjectURL(workerUrl);
+        workerUrlRef.current = null;
+      }
       if (fallbackTimerRef.current) { clearInterval(fallbackTimerRef.current); fallbackTimerRef.current = null; }
     };
 
@@ -334,11 +349,23 @@ export function useHardwareClock(config: HardwareClockConfig) {
           };
         `;
         const blob = new Blob([workerCode], { type: 'application/javascript' });
-        workerRef.current = new Worker(URL.createObjectURL(blob));
-        workerRef.current.onmessage = (e) => { if (e.data === 'tick') clockExecutionTick(); };
-        workerRef.current.postMessage('start');
+        const workerUrl = URL.createObjectURL(blob);
+        workerUrlRef.current = workerUrl;
+        const worker = new Worker(workerUrl);
+        workerRef.current = worker;
+        worker.onmessage = (e) => { if (e.data === 'tick') clockExecutionTick(); };
+        worker.postMessage('start');
       }
     } catch (err) {
+      const worker = workerRef.current;
+      if (worker) {
+        worker.terminate();
+        if (workerRef.current === worker) workerRef.current = null;
+      }
+      if (workerUrlRef.current) {
+        URL.revokeObjectURL(workerUrlRef.current);
+        workerUrlRef.current = null;
+      }
       console.warn("Web Worker blocked. Falling back to main-thread interval.");
       if (!fallbackTimerRef.current) fallbackTimerRef.current = setInterval(clockExecutionTick, 25);
     }

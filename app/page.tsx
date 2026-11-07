@@ -1,10 +1,12 @@
 "use client";
 
-import React, { useState, useEffect, useSyncExternalStore } from 'react';
+import React, { useState, useEffect, useSyncExternalStore, useRef } from 'react';
 import { createClient } from '../utils/supabase/client';
 import { useRouter, useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import type { Session } from '@supabase/supabase-js';
+import { resolveAccountLandingDecision } from '../lib/account-routing';
+import { getInvitationPath, normalizeJoinCode } from '../lib/invitations';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -96,6 +98,16 @@ export default function Home() {
   
   const searchParams = useSearchParams();
   const inviteCode = searchParams.get("invite");
+  const authErrorParam = searchParams.get("auth_error");
+  const [authRoutingError, setAuthRoutingError] = useState(() => {
+    if (authErrorParam) return "Sign-in could not be completed. Please try again.";
+    if (inviteCode && !normalizeJoinCode(inviteCode)) {
+      return "This invitation link is not valid. You can still sign in and request a new invite.";
+    }
+    return "";
+  });
+  const [isResolvingAccount, setIsResolvingAccount] = useState(true);
+  const routingAttemptRef = useRef<string | null>(null);
 
   const [activeSlide, setActiveSlide] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(true);
@@ -148,58 +160,107 @@ export default function Home() {
     };
   }, []);
 
-  // ✅ SURGICAL FIX: Consolidated Session, Invite, & Profile Completion Routing
+  // Keep the invite available across OAuth redirects and embedded-browser reloads.
   useEffect(() => {
-    // 1. Safely extract invite code from URL on mount
-    let currentInvite = inviteCode;
-    if (!currentInvite && typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      currentInvite = params.get("invite");
+    const rawInvite = inviteCode;
+    const normalizedInvite = normalizeJoinCode(rawInvite);
+    if (rawInvite && normalizedInvite) {
+      localStorage.setItem("onpraise_pending_invite", normalizedInvite);
+    } else if (rawInvite) {
+      localStorage.removeItem("onpraise_pending_invite");
     }
 
-    // ✅ HELPER: Checks profile completion before letting them into the app
-    const checkAndRouteUser = async (session: Session) => {
-      // ✅ SURGICAL FIX: Pull from localStorage in case the OAuth callback stripped the URL params!
-      const activeInvite = currentInvite || localStorage.getItem("onpraise_pending_invite");
-
-      if (activeInvite) {
-        router.push(`/onboarding?invite=${activeInvite}`);
+    let isActive = true;
+    const routeForSession = async (session: Session | null) => {
+      if (!session) {
+        routingAttemptRef.current = null;
+        if (isActive) setIsResolvingAccount(false);
         return;
       }
 
-      // Check if user has actually finished onboarding (has a team and name)
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("team_id, full_name")
-        .eq("id", session.user.id)
-        .maybeSingle();
+      const stashedInvite = rawInvite ? null : localStorage.getItem("onpraise_pending_invite");
+      const activeInvite = normalizedInvite || normalizeJoinCode(stashedInvite);
+      const routeKey = `${session.user.id}:${activeInvite || "account"}`;
+      if (routingAttemptRef.current === routeKey) return;
+      routingAttemptRef.current = routeKey;
+      if (isActive) {
+        setIsResolvingAccount(true);
+        if (!rawInvite || normalizedInvite) setAuthRoutingError("");
+      }
 
-      const needsOnboarding = !profile || !profile.team_id || !profile.full_name;
+      try {
+        const accountDecision = await resolveAccountLandingDecision(async () => {
+          const { data: profile, error: profileError } = await supabase
+            .from("profiles")
+            .select("full_name, team_id, secondary_team_ids, ministries")
+            .eq("id", session.user.id)
+            .maybeSingle();
+          if (profileError) throw profileError;
+          return profile;
+        }, async () => {
+          const { data: membership, error: membershipError } = await supabase
+            .from("team_members")
+            .select("id")
+            .eq("user_id", session.user.id)
+            .limit(1);
+          if (membershipError) throw membershipError;
+          return Boolean(membership?.length);
+        });
 
-      if (needsOnboarding) {
-        router.push('/onboarding'); // Force to onboarding if incomplete
-      } else {
-        router.push('/dashboard'); // Safe to enter the app
+        if (!isActive) return;
+        if (rawInvite && !normalizedInvite) {
+          setIsResolvingAccount(false);
+          routingAttemptRef.current = null;
+          setAuthRoutingError("This invitation link is not valid. You can still sign in and request a new invite.");
+          return;
+        }
+
+        if (activeInvite) {
+          localStorage.setItem("onpraise_pending_invite", activeInvite);
+          router.replace(getInvitationPath(activeInvite));
+        } else {
+          router.replace(accountDecision.destination);
+        }
+      } catch (error) {
+        console.error("Could not resolve account onboarding state.", error);
+        if (isActive) {
+          routingAttemptRef.current = null;
+          setIsResolvingAccount(false);
+          setAuthRoutingError("We couldn't verify your account yet. Check your connection and try again.");
+        }
       }
     };
 
-    // 2. Check if they are ALREADY logged in on mount
-    const checkExistingSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        await checkAndRouteUser(session);
-      }
-    };
-    checkExistingSession();
-
-    // 3. Catch them right after they finish Google OAuth
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session && event === 'SIGNED_IN') {
-        await checkAndRouteUser(session);
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" && session) {
+        void routeForSession(session);
+      } else if (event === "SIGNED_OUT") {
+        routingAttemptRef.current = null;
+        if (isActive) setIsResolvingAccount(false);
       }
     });
 
+    void supabase.auth.getSession()
+      .then(({ data, error }) => {
+        if (!isActive) return;
+        if (error) {
+          console.error("Could not restore the Supabase session.", error);
+          setIsResolvingAccount(false);
+          setAuthRoutingError("We couldn't restore your sign-in session. Sign in again or open this link in your browser.");
+          return;
+        }
+        return routeForSession(data.session);
+      })
+      .catch((error: unknown) => {
+        console.error("Could not restore the Supabase session.", error);
+        if (isActive) {
+          setIsResolvingAccount(false);
+          setAuthRoutingError("We couldn't restore your sign-in session. Sign in again or open this link in your browser.");
+        }
+      });
+
     return () => {
+      isActive = false;
       authListener.subscription.unsubscribe();
     };
   }, [supabase, router, inviteCode]);
@@ -277,27 +338,29 @@ export default function Home() {
 
   const handleGoogleLogin = async () => {
     const supabase = createClient();
-    
-    // ✅ SURGICAL FIX: Retrieve the active invite code from the URL params directly
-    let currentInvite = inviteCode;
-    if (!currentInvite && typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      currentInvite = params.get("invite");
+    const storedInvite = localStorage.getItem("onpraise_pending_invite");
+    const activeInvite = normalizeJoinCode(inviteCode) || normalizeJoinCode(storedInvite);
+    if (inviteCode && !activeInvite) {
+      setAuthRoutingError("This invitation code is invalid. Ask the team owner for a new link.");
+      return;
     }
-    
-    // ✅ SURGICAL FIX: Use the 'next' parameter so the callback knows exactly where to route them!
-    let callbackUrl = `${window.location.origin}/auth/callback`;
-    if (currentInvite) {
-      const nextDestination = encodeURIComponent(`/onboarding?invite=${currentInvite}`);
-      callbackUrl += `?next=${nextDestination}&invite=${encodeURIComponent(currentInvite)}`;
+    if (activeInvite) localStorage.setItem("onpraise_pending_invite", activeInvite);
+
+    const callbackUrl = new URL("/auth/callback", window.location.origin);
+    if (activeInvite) callbackUrl.searchParams.set("invite", activeInvite);
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: callbackUrl.toString(),
+        },
+      });
+      if (error) throw error;
+    } catch (error) {
+      console.error("Google sign-in could not be started.", error);
+      setAuthRoutingError("Google sign-in could not be started. Please try again.");
     }
-    
-    await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: callbackUrl,
-      },
-    });
   };
 
   // ✅ THE SLIDES ARRAY WITH DENSE, UNIQUE BLOB CLUSTERS
@@ -569,9 +632,20 @@ export default function Home() {
             <span className="text-lg">🚀</span> Open OnPraise App
           </a>
         )}
+        {authRoutingError && (
+          <p className="mb-3 w-full max-w-sm rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-center text-xs font-bold text-red-700" role="alert">
+            {authRoutingError}
+          </p>
+        )}
+        {isResolvingAccount && (
+          <p className="mb-3 text-xs font-semibold text-zinc-500" role="status">
+            Checking your sign-in…
+          </p>
+        )}
         <button
           onClick={handleGoogleLogin}
-          className="w-full max-w-sm bg-white hover:bg-zinc-50 text-zinc-800 font-black text-sm uppercase tracking-wider py-4 px-4 rounded-2xl border border-zinc-200/80 shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all active:scale-95 flex items-center justify-center gap-3 cursor-pointer"
+          disabled={isResolvingAccount}
+          className="w-full max-w-sm bg-white hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-wait text-zinc-800 font-black text-sm uppercase tracking-wider py-4 px-4 rounded-2xl border border-zinc-200/80 shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all active:scale-95 flex items-center justify-center gap-3 cursor-pointer"
         >
           <svg className="w-5 h-5" viewBox="0 0 24 24">
             <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />

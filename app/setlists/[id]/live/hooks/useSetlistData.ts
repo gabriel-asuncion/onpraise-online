@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { SongRecord, SetlistTrackItem, ArrangementSection } from "../types/setlist";
 import { createClient } from "../../../../../utils/supabase/client";
+import { loadSongSectionsBySongId } from "../utils/load-song-sections";
 
 type SetlistSongRow = {
   id: string;
@@ -98,22 +99,21 @@ export function useSetlistData(setlistId: string, supabase: ReturnType<typeof cr
         }
 
         if (rawQueryData && rawQueryData.length > 0) {
+          const songIds = [...new Set(rawQueryData.flatMap((row) => {
+            const song = Array.isArray(row.songs) ? row.songs[0] : row.songs;
+            return song?.id ? [song.id] : [];
+          }))];
+          const sectionsBySongId = await loadSongSectionsBySongId(supabase, songIds);
+
           const trackTitles = rawQueryData.flatMap((row) => {
             const song = Array.isArray(row.songs) ? row.songs[0] : row.songs;
             return song?.title ? [song.title] : [];
           });
-          const formattedTracks = await Promise.all(rawQueryData.map(async (t) => {
+          const formattedTracks = rawQueryData.map((t) => {
             const flattenedSongNode = Array.isArray(t.songs) ? t.songs[0] : t.songs;
             if (!flattenedSongNode) return null;
 
-            const { data: sectionsData, error: sectionsError } = await supabase
-              .from("song_sections")
-              .select("id, section_name, content")
-              .eq("song_id", flattenedSongNode.id)
-              .order("sequence_order", { ascending: true });
-            if (sectionsError) throw sectionsError;
-
-            const songSections = sectionsData || [];
+            const songSections = sectionsBySongId.get(flattenedSongNode.id) || [];
             const defaultStructure = Array.isArray(flattenedSongNode.default_structure)
               ? flattenedSongNode.default_structure
               : [];
@@ -144,7 +144,7 @@ export function useSetlistData(setlistId: string, supabase: ReturnType<typeof cr
               original_structure: originalStructure,
               songs: flattenedSongNode as unknown as SongRecord
             };
-          }));
+          });
 
           const cleanTracks = formattedTracks.filter(t => t !== null) as SetlistTrackItem[];
           

@@ -150,13 +150,16 @@ export default function EventCockpitPage() {
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [copiedSetlistId, setCopiedSetlistId] = useState<string | null>(null);
 
-  async function syncRosterUI(currentTeamId: string, allProfilesData: DBProfile[]) {
+  async function syncRosterUI(allProfilesData: DBProfile[]): Promise<boolean> {
     const { data: rawRoster, error } = await supabase
       .from("event_rosters") 
       .select("id, role, user_id, setlist_id") // ✅ Fetch setlist_id
       .eq("event_id", eventId);
 
-    if (error) return;
+    if (error) {
+      console.error("Failed to refresh event roster.", error);
+      return false;
+    }
     const mappedRoster = (rawRoster || []).map(row => {
       const p = allProfilesData.find(profile => profile.id === row.user_id);
       return { ...row, profiles: p || null };
@@ -164,24 +167,34 @@ export default function EventCockpitPage() {
     setRoster(mappedRoster as MemberRow[]);
     setStagedRoster(mappedRoster as MemberRow[]); 
     setHasChanges(false);
+    return true;
   }
 
-  async function fetchEventSetlists(targetEventId: string) {
+  async function fetchEventSetlists(targetEventId: string): Promise<boolean> {
     const { data: setlists, error } = await supabase
       .from("setlists")
       .select("id, name, event_id")
       .eq("event_id", targetEventId);
 
-    if (!error && setlists && setlists.length > 0) {
+    if (error) {
+      console.error("Failed to fetch event setlists.", error);
+      return false;
+    }
+
+    if (setlists && setlists.length > 0) {
       setEventSetlists(setlists);
       const slIds = setlists.map(s => s.id);
       
-      const { data: slSongs } = await supabase
+      const { data: slSongs, error: songsError } = await supabase
         .from("setlist_songs")
         // ✅ SURGICAL FIX: Added custom_key to the fetch query
         .select(`id, setlist_id, sequence_order, start_time, group_name, assigned_user_ids, group_color, parent_color, custom_key, songs (*)`)
         .in("setlist_id", slIds)
         .order("sequence_order", { ascending: true });
+      if (songsError) {
+        console.error("Failed to fetch event setlist songs.", songsError);
+        return false;
+      }
         
       const grouped: Record<string, SetlistSongItem[]> = {};
       slIds.forEach(id => grouped[id] = []);
@@ -225,12 +238,14 @@ export default function EventCockpitPage() {
       setSetlistSongs(grouped[targetId] || []);
       setStagedSetlistSongs(grouped[targetId] || []);
       stagedSetlistSongsRef.current = grouped[targetId] || []; // Force sync ref instantly
+      return true;
     } else {
       setEventSetlists([]);
       setAllSetlistSongsMap({});
       setSelectedSetlistId("");
       setStagedSetlistSongs([]);
       stagedSetlistSongsRef.current = [];
+      return true;
     }
   }
 
@@ -267,7 +282,7 @@ export default function EventCockpitPage() {
       }
 
       await fetchEventSetlists(eventId);
-      await syncRosterUI(activeWorkspaceId, combinedProfiles);
+      await syncRosterUI(combinedProfiles);
       setAllDatabaseSongs(await getAllSongs());
     } catch (e) { console.error(e); }
     setLoading(false);
@@ -379,43 +394,62 @@ export default function EventCockpitPage() {
     if (stagedRoster.some(r => r.user_id === userId && r.role === targetRole && (r.setlist_id === selectedSetlistId || (!r.setlist_id && isLegacyFallback)))) return; 
     
     // 1. Optimistic UI Update
-    let newRoster = [...stagedRoster];
-    let removedLegacyId: string | null = null;
+    const previousRoster = stagedRoster;
+    let newRoster = [...previousRoster];
+    let sourceRosterId: string | null = null;
     
     if (sourceRole && sourceRole !== targetRole) {
       const itemToRemove = newRoster.find(r => r.user_id === userId && r.role === sourceRole && (r.setlist_id === selectedSetlistId || (!r.setlist_id && isLegacyFallback)));
-      if (itemToRemove && !itemToRemove.id.startsWith('temp-')) removedLegacyId = itemToRemove.id;
+      if (itemToRemove && !itemToRemove.id.startsWith('temp-')) sourceRosterId = itemToRemove.id;
       newRoster = newRoster.filter(r => r !== itemToRemove);
     }
     
     const p = profiles.find(x => x.id === userId);
     setStagedRoster([...newRoster, { id: `temp-${Date.now()}`, role: targetRole, user_id: userId, profiles: p || null, isNew: true, setlist_id: selectedSetlistId }]);
     
-    // 2. Background Database Sync
+    // 2. Persist the assignment atomically; restore the optimistic state on failure.
     try {
-      if (removedLegacyId) await supabase.from("event_rosters").delete().eq("id", removedLegacyId);
-      
-      const targetTeamId = activeEvent?.team_id || team?.id;
-      const payload: any = { event_id: eventId, user_id: userId, role: targetRole, setlist_id: selectedSetlistId };
-      if (targetTeamId && targetTeamId !== "00000000-0000-0000-0000-000000000000") { payload.team_id = targetTeamId; }
-      
-      await supabase.from("event_rosters").insert(payload);
-      
-      // Silently re-fetch to anchor the new database IDs to the UI
-      await syncRosterUI(targetTeamId, profiles);
-    } catch (err) { console.error(err); }
+      const { error } = await supabase.rpc("assign_event_roster", {
+        p_event_id: eventId,
+        p_user_id: userId,
+        p_role: targetRole,
+        p_setlist_id: selectedSetlistId || null,
+        p_source_roster_id: sourceRosterId,
+      });
+      if (error) throw error;
+      if (!(await syncRosterUI(profiles))) {
+        alert("The roster change was saved, but the updated roster could not be loaded.");
+      }
+    } catch (err) {
+      console.error("Failed to save event roster assignment.", err);
+      setStagedRoster(previousRoster);
+      alert("The roster change could not be saved. Please try again.");
+    }
   }
   
   async function handleOriginalLocalRemove(rowId: string) { 
     if (!canEditEvent) return; 
     
-    // 1. Optimistic UI Update
-    setStagedRoster(prev => prev.filter(r => r.id !== rowId)); 
+    const previousRoster = stagedRoster;
+    setStagedRoster(prev => prev.filter(r => r.id !== rowId));
     
-    // 2. Background Database Sync
     if (!rowId.startsWith('temp-')) {
-      await supabase.from("event_rosters").delete().eq("id", rowId);
-      await syncRosterUI(activeEvent?.team_id || team?.id, profiles);
+      try {
+        const { data, error } = await supabase.rpc("remove_event_roster_assignment", {
+          p_event_id: eventId,
+          p_roster_id: rowId,
+        });
+        if (error) throw error;
+        if (data !== rowId) throw new Error("The roster assignment was not removed.");
+      } catch (error) {
+        console.error("Failed to remove event roster assignment.", error);
+        setStagedRoster(previousRoster);
+        alert("The roster assignment could not be removed. Please try again.");
+        return;
+      }
+      if (!(await syncRosterUI(profiles))) {
+        alert("The roster assignment was removed, but the updated roster could not be loaded.");
+      }
     }
   }
 
@@ -446,18 +480,37 @@ export default function EventCockpitPage() {
     const songToAdd = allDatabaseSongs.find(s => s.id === selectedNewSongId);
     if (!songToAdd) return;
     
-    const newOrder = setlistSongs.length + 1;
+    const newOrder = stagedSetlistSongsRef.current.length + 1;
     const optimisticItem: SetlistSongItem = { id: `temp-${Date.now()}`, sequence_order: newOrder, start_time: "08:30", assigned_user_ids: [], parent_group: null, group_name: null, songs: songToAdd };
+    const previousSongs = stagedSetlistSongsRef.current;
     
     setSetlistSongs(prev => [...prev, optimisticItem]);
     setStagedSetlistSongs(prev => [...prev, optimisticItem]);
-    setSelectedNewSongId(""); setSongSearchQuery(""); setIsSongDropdownOpen(false);
+    stagedSetlistSongsRef.current = [...previousSongs, optimisticItem];
 
-    await supabase.from('setlist_songs').insert({ 
-      setlist_id: selectedSetlistId, song_id: songToAdd.id, sequence_order: newOrder, start_time: "08:30" 
-    });
-    
-    await fetchEventSetlists(eventId);
+    try {
+      const { error } = await supabase.rpc("add_song_to_setlist", {
+        p_setlist_id: selectedSetlistId,
+        p_song_id: songToAdd.id,
+        p_sequence_order: newOrder,
+        p_start_time: "08:30",
+      });
+      if (error) throw error;
+    } catch (error) {
+      console.error("Failed to add song to setlist.", error);
+      setSetlistSongs(previousSongs);
+      setStagedSetlistSongs(previousSongs);
+      stagedSetlistSongsRef.current = previousSongs;
+      alert("The song could not be added to this setlist. Please try again.");
+      return;
+    }
+
+    setSelectedNewSongId("");
+    setSongSearchQuery("");
+    setIsSongDropdownOpen(false);
+    if (!(await fetchEventSetlists(eventId))) {
+      alert("The song was added, but the updated setlist could not be loaded.");
+    }
   }
 
   function handleDragStart(index: number) { 
@@ -483,7 +536,8 @@ export default function EventCockpitPage() {
 
     setIsSavingTracks(true); // Trigger Saving Indicator
 
-    const reorderedSongs = [...stagedSetlistSongsRef.current];
+    const previousSongs = stagedSetlistSongsRef.current;
+    const reorderedSongs = [...previousSongs];
     const [removed] = reorderedSongs.splice(startIndex, 1);
     reorderedSongs.splice(targetIndex, 0, removed);
 
@@ -500,18 +554,34 @@ export default function EventCockpitPage() {
     setSetlistSongs(finalArray);
     stagedSetlistSongsRef.current = finalArray;
 
-    // Save to Supabase
-    const promises = finalArray
+    // Save the reorder and group changes together in one database transaction.
+    const updates = finalArray
       .filter(s => !s.id.startsWith('temp-'))
-      .map(song => supabase.from('setlist_songs').update({ 
-          sequence_order: song.sequence_order,
-          group_name: song.group_name,
-          group_color: song.group_color
-      }).eq('id', song.id));
-      
-    await Promise.all(promises);
-    await fetchEventSetlists(eventId);
-    setIsSavingTracks(false);
+      .map(song => ({
+        id: song.id,
+        sequence_order: song.sequence_order,
+        group_name: song.group_name,
+        group_color: song.group_color,
+      }));
+
+    try {
+      const { error } = await supabase.rpc("update_setlist_song_details", {
+        p_setlist_id: selectedSetlistId,
+        p_updates: updates,
+      });
+      if (error) throw error;
+      if (!(await fetchEventSetlists(eventId))) {
+        alert("The order was saved, but the updated setlist could not be loaded.");
+      }
+    } catch (error) {
+      console.error("Failed to reorder setlist songs.", error);
+      setStagedSetlistSongs(previousSongs);
+      setSetlistSongs(previousSongs);
+      stagedSetlistSongsRef.current = previousSongs;
+      alert("The song order could not be saved. Please try again.");
+    } finally {
+      setIsSavingTracks(false);
+    }
   }
 
   function handleDragEnd() {
@@ -526,16 +596,33 @@ export default function EventCockpitPage() {
     if (!confirm(`Remove the "${groupName}" grouping?`)) return;
     
     setIsSavingTracks(true);
-    const idsToUpdate = stagedSetlistSongsRef.current.filter(s => s.group_name === groupName).map(s => s.id);
-    
-    setStagedSetlistSongs(prev => prev.map(s => s.group_name === groupName ? { ...s, group_name: null, group_color: null } : s));
-    
-    await supabase.from('setlist_songs')
-      .update({ group_name: null, group_color: null })
-      .in('id', idsToUpdate.filter(id => !id.startsWith('temp-')));
-      
-    await fetchEventSetlists(eventId);
-    setIsSavingTracks(false);
+    const previousSongs = stagedSetlistSongsRef.current;
+    const updatedSongs = previousSongs.map(s => s.group_name === groupName ? { ...s, group_name: null, group_color: null } : s);
+    setStagedSetlistSongs(updatedSongs);
+    setSetlistSongs(updatedSongs);
+    stagedSetlistSongsRef.current = updatedSongs;
+    const updates = updatedSongs
+      .filter(s => s.group_name === null && previousSongs.some(previous => previous.id === s.id && previous.group_name === groupName) && !s.id.startsWith('temp-'))
+      .map(s => ({ id: s.id, group_name: null, group_color: null }));
+
+    try {
+      const { error } = await supabase.rpc("update_setlist_song_details", {
+        p_setlist_id: selectedSetlistId,
+        p_updates: updates,
+      });
+      if (error) throw error;
+      if (!(await fetchEventSetlists(eventId))) {
+        alert("The group was removed, but the updated setlist could not be loaded.");
+      }
+    } catch (error) {
+      console.error("Failed to remove setlist song grouping.", error);
+      setStagedSetlistSongs(previousSongs);
+      setSetlistSongs(previousSongs);
+      stagedSetlistSongsRef.current = previousSongs;
+      alert("The group could not be removed. Please try again.");
+    } finally {
+      setIsSavingTracks(false);
+    }
   }
 
   function handleToggleCheckboxSelect(id: string) { setSelectedForGroup(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); }
@@ -544,11 +631,14 @@ export default function EventCockpitPage() {
     if (selectedForGroup.length === 0 || !canEditEvent) return;
     const finalGroupName = customGroupName.trim() || null;
     const selectedIds = [...selectedForGroup];
+    const previousSelection = selectedForGroup;
+    const previousCustomGroupName = customGroupName;
     
     setIsSavingTracks(true); // ✅ Trigger the SAVING... indicator
     
     // Use the Ref to safely calculate the new array
-    const updatedSongs = stagedSetlistSongsRef.current.map(song => 
+    const previousSongs = stagedSetlistSongsRef.current;
+    const updatedSongs = previousSongs.map(song => 
       selectedIds.includes(song.id) ? { ...song, group_name: finalGroupName, group_color: selectedGroupColor } : song
     );
     
@@ -561,12 +651,29 @@ export default function EventCockpitPage() {
     setCustomGroupName("");
 
     // Save to Database
-    await supabase.from('setlist_songs')
-      .update({ group_name: finalGroupName, group_color: selectedGroupColor })
-      .in('id', selectedIds.filter(id => !id.startsWith('temp-')));
-
-    await fetchEventSetlists(eventId);
-    setIsSavingTracks(false); // ✅ Hide the SAVING... indicator
+    const updates = updatedSongs
+      .filter(song => selectedIds.includes(song.id) && !song.id.startsWith('temp-'))
+      .map(song => ({ id: song.id, group_name: finalGroupName, group_color: selectedGroupColor }));
+    try {
+      const { error } = await supabase.rpc("update_setlist_song_details", {
+        p_setlist_id: selectedSetlistId,
+        p_updates: updates,
+      });
+      if (error) throw error;
+      if (!(await fetchEventSetlists(eventId))) {
+        alert("The group was saved, but the updated setlist could not be loaded.");
+      }
+    } catch (error) {
+      console.error("Failed to update setlist song group.", error);
+      setStagedSetlistSongs(previousSongs);
+      setSetlistSongs(previousSongs);
+      stagedSetlistSongsRef.current = previousSongs;
+      setSelectedForGroup(previousSelection);
+      setCustomGroupName(previousCustomGroupName);
+      alert("The group could not be saved. Please try again.");
+    } finally {
+      setIsSavingTracks(false);
+    }
   }
 
   // ✅ ENHANCED SETLIST CLIPBOARD ENGINE (Extracts titles + Artist + YouTube Playlist URL only)
@@ -722,16 +829,32 @@ export default function EventCockpitPage() {
               <button 
                 onClick={async (e) => {
                   e.stopPropagation(); 
+                  const previousSongs = stagedSetlistSongsRef.current;
                   setStagedSetlistSongs(prev => prev.filter(s => s.id !== item.id));
                   setSetlistSongs(prev => prev.filter(s => s.id !== item.id)); 
+                  stagedSetlistSongsRef.current = previousSongs.filter(s => s.id !== item.id);
                   
                   if (!item.id.startsWith('temp-')) {
-                    setIsSavingTracks(true); // ✅ Trigger indicator
-                    const { error } = await supabase.from('setlist_songs').delete().eq('id', item.id);
-                    if (error) console.error("Auto-save delete failed:", error.message);
-                    
-                    await fetchEventSetlists(eventId);
-                    setIsSavingTracks(false); // ✅ Hide indicator
+                    setIsSavingTracks(true);
+                    try {
+                      const { data, error } = await supabase.rpc("remove_song_from_setlist", {
+                        p_setlist_id: selectedSetlistId,
+                        p_setlist_song_id: item.id,
+                      });
+                      if (error) throw error;
+                      if (data !== item.id) throw new Error("The setlist song was not removed.");
+                      if (!(await fetchEventSetlists(eventId))) {
+                        alert("The song was removed, but the updated setlist could not be loaded.");
+                      }
+                    } catch (error) {
+                      console.error("Failed to remove setlist song.", error);
+                      setStagedSetlistSongs(previousSongs);
+                      setSetlistSongs(previousSongs);
+                      stagedSetlistSongsRef.current = previousSongs;
+                      alert("The song could not be removed from this setlist. Please try again.");
+                    } finally {
+                      setIsSavingTracks(false);
+                    }
                   }
                 }}
                 className="w-8 h-8 rounded-full bg-error/10 text-error hover:bg-error/20 flex items-center justify-center transition-colors border border-error/20 cursor-pointer"

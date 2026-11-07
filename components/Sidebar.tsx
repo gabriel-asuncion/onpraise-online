@@ -9,6 +9,8 @@ import { useEngine } from "../app/context/EngineContext";
 import { DayPicker, DateRange } from "react-day-picker";
 import "react-day-picker/dist/style.css";
 import { format, eachDayOfInterval } from "date-fns";
+import { QRCodeSVG } from "qrcode.react";
+import { createInvitationUrl } from "../lib/invitations";
 
 // ✅ SURGICAL FIX: Added YouTube ID extractor
 function extractYouTubeID(url: string) {
@@ -51,7 +53,7 @@ export default function Sidebar() {
   const handleLogout = async () => {
     try {
       await supabase.auth.signOut();
-      router.push("/login"); 
+      router.replace("/");
     } catch (error) {
       console.error("Error logging out:", error);
     }
@@ -60,7 +62,12 @@ export default function Sidebar() {
   const [teamNamesMap, setTeamNamesMap] = useState<Record<string, string>>({});
   const [modalJoinCode, setModalJoinCode] = useState("");
   const [isJoining, setIsJoining] = useState(false);
-  const [copyText, setCopyText] = useState("Copy Code");
+  const [copyText, setCopyText] = useState("Copy Link");
+  const [teamInviteResult, setTeamInviteResult] = useState<{
+    teamId: string;
+    url: string | null;
+    error: string;
+  } | null>(null);
 
   const [isNavVisible, setIsNavVisible] = useState(true);
   const [isPlaymodeActive, setIsPlaymodeActive] = useState(false);
@@ -184,9 +191,53 @@ export default function Sidebar() {
   }, [simulatedUserId, supabase]);
 
   const openAccountModal = useCallback(async () => {
+    setTeamInviteResult(null);
     setIsAccountModalOpen(true); 
     await fetchActiveProfileContext(); 
   }, [fetchActiveProfileContext]);
+
+  useEffect(() => {
+    if (!isAccountModalOpen || !userTeamId) return;
+
+    let active = true;
+    const teamId = userTeamId;
+
+    async function fetchTeamInvite() {
+      try {
+        const { data, error } = await supabase
+          .from("teams")
+          .select("join_code")
+          .eq("id", teamId)
+          .maybeSingle();
+        if (error) throw error;
+
+        const inviteUrl = createInvitationUrl(window.location.origin, data?.join_code);
+        if (!inviteUrl) {
+          if (active) setTeamInviteResult({
+            teamId,
+            url: null,
+            error: "A valid invitation code is not available for this team.",
+          });
+          return;
+        }
+        if (active) setTeamInviteResult({ teamId, url: inviteUrl, error: "" });
+      } catch (error) {
+        console.error("Could not load the team's invitation link.", error);
+        if (active) setTeamInviteResult({
+          teamId,
+          url: null,
+          error: "We couldn't load the invitation. Please try again later.",
+        });
+      }
+    }
+
+    void fetchTeamInvite();
+    return () => { active = false; };
+  }, [isAccountModalOpen, userTeamId, supabase]);
+
+  const isLoadingInvite = Boolean(isAccountModalOpen && userTeamId && teamInviteResult?.teamId !== userTeamId);
+  const teamInviteUrl = teamInviteResult?.teamId === userTeamId ? teamInviteResult.url : null;
+  const inviteLoadError = teamInviteResult?.teamId === userTeamId ? teamInviteResult.error : "";
 
   useEffect(() => {
     let lastScrollY = 0;
@@ -240,14 +291,21 @@ export default function Sidebar() {
     }
   }
 
-  async function handleCopyJoinCode() {
-    if (!userTeamId) return;
-    const { data } = await supabase.from("teams").select("join_code").eq("id", userTeamId).single();
-    if (data?.join_code) {
-      const inviteUrl = `${window.location.origin}/?invite=${data.join_code.toUpperCase()}`;
-      navigator.clipboard.writeText(inviteUrl);
-      setCopyText("Link Copied! ✅");
-      setTimeout(() => setCopyText("Copy Code"), 2000);
+  async function handleCopyJoinLink() {
+    if (!teamInviteUrl || teamInviteResult?.teamId !== userTeamId) return;
+    try {
+      await navigator.clipboard.writeText(teamInviteUrl);
+      setCopyText("Link Copied!");
+      window.setTimeout(() => setCopyText("Copy Link"), 2000);
+    } catch (error) {
+      console.error("Could not copy the invitation link.", error);
+      if (userTeamId) {
+        setTeamInviteResult({
+          teamId: userTeamId,
+          url: teamInviteUrl,
+          error: "Copying the link failed. You can scan the QR code instead.",
+        });
+      }
     }
   }
 
@@ -288,6 +346,7 @@ export default function Sidebar() {
     { icon: "music_note", label: "Songs", href: "/songs", activePattern: "/songs" },
     { icon: "playlist_play", label: "Setlist", isAction: true },
     { icon: "group", label: "Team", href: "/events", activePattern: "/events" },
+    { icon: "person", label: "Account", isAccount: true },
   ];
 
   return (
@@ -299,7 +358,9 @@ export default function Sidebar() {
           </Link>
           <div className="flex flex-col items-center gap-4 w-full px-2">
             {navItems.map((item) => {
-              const isActive = item.isAction 
+              const isActive = item.isAccount
+                ? isAccountModalOpen
+                : item.isAction 
                 ? (pathname.includes("/events/") || pathname.includes("/setlists")) 
                 : (item.label === "Team" ? pathname === "/events" : pathname.startsWith(item.activePattern!));
 
@@ -320,6 +381,20 @@ export default function Sidebar() {
                 </>
               );
 
+              if (item.isAccount) {
+                return (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={() => void openAccountModal()}
+                    className={btnClass}
+                    aria-label="Account"
+                    title="Account"
+                  >
+                    {content}
+                  </button>
+                );
+              }
               if (item.isAction) return <button key={item.label} onClick={handleSetlistClick} className={btnClass}>{content}</button>;
               return <Link key={item.href} href={item.href!} className={btnClass}>{content}</Link>;
             })}
@@ -343,13 +418,15 @@ export default function Sidebar() {
         <div id="media-player-portal-slot" className="w-full empty:hidden border-b border-white/5 relative z-10"></div>
 
         {/* Navigation Icons Row (Explicitly 68px tall) */}
-        <div className="flex items-center justify-around h-[68px] px-4 relative z-0">
+        <div className="flex items-center justify-around h-[68px] px-2 relative z-0">
           {navItems.map((item) => {
-            const isActive = item.isAction 
+            const isActive = item.isAccount
+              ? isAccountModalOpen
+              : item.isAction 
               ? (pathname.includes("/events/") || pathname.includes("/setlists")) 
               : (item.label === "Team" ? pathname === "/events" : pathname.startsWith(item.activePattern!));
               
-            const btnClass = `flex flex-col items-center justify-center min-w-[64px] h-[52px] rounded-xl transition-all border cursor-pointer ${
+            const btnClass = `flex flex-1 min-w-0 max-w-[76px] flex-col items-center justify-center h-[52px] px-1 rounded-xl transition-all border cursor-pointer ${
               isActive ? "text-primary bg-surface-container-high border-outline-variant/30 shadow-sm" : "text-on-surface-variant border-transparent hover:text-on-surface"
             }`;
 
@@ -367,6 +444,19 @@ export default function Sidebar() {
               </>
             );
 
+            if (item.isAccount) {
+              return (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={() => void openAccountModal()}
+                  className={btnClass}
+                  aria-label="Account"
+                >
+                  {content}
+                </button>
+              );
+            }
             if (item.isAction) return <button key={item.label} onClick={handleSetlistClick} className={btnClass}>{content}</button>;
             return <Link key={item.href} href={item.href!} className={btnClass}>{content}</Link>;
           })}
@@ -502,13 +592,45 @@ export default function Sidebar() {
                       </label>
                       {userTeamId && (
                         <button
-                          onClick={handleCopyJoinCode}
-                          className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest hover:text-secondary transition-colors cursor-pointer"
+                          onClick={handleCopyJoinLink}
+                          disabled={!teamInviteUrl}
+                          className="text-[9px] font-black text-on-surface-variant uppercase tracking-widest hover:text-secondary disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
                         >
                           {copyText}
                         </button>
                       )}
                     </div>
+
+                    {userTeamId && (
+                      <div className="flex flex-col items-center gap-2 rounded-xl border border-outline-variant/50 bg-surface-container-high p-3">
+                        {isLoadingInvite ? (
+                          <span className="py-8 text-xs font-semibold text-on-surface-variant" role="status">Loading invitation QR code…</span>
+                        ) : teamInviteUrl ? (
+                          <>
+                            <div className="rounded-lg bg-white p-3" aria-label="Team invitation QR code">
+                              <QRCodeSVG
+                                value={teamInviteUrl}
+                                size={144}
+                                level="M"
+                                includeMargin
+                                bgColor="#ffffff"
+                                fgColor="#000000"
+                              />
+                            </div>
+                            <p className="text-center text-[10px] font-bold text-on-surface-variant">
+                              Scan to join {new URL(teamInviteUrl).searchParams.get("invite")}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="py-6 text-center text-xs font-semibold text-on-surface-variant" role={inviteLoadError ? "alert" : "status"}>
+                            {inviteLoadError || "Invitation link unavailable."}
+                          </p>
+                        )}
+                        {inviteLoadError && teamInviteUrl && (
+                          <p className="text-center text-[10px] font-semibold text-error" role="alert">{inviteLoadError}</p>
+                        )}
+                      </div>
+                    )}
                     
                     {!userTeamId ? (
                       <div className="bg-surface-container-high border border-outline-variant rounded-xl p-1.5 flex gap-2 shadow-inner">

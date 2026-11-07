@@ -3,6 +3,7 @@
 import React, { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
+import { normalizeJoinCode } from "../../lib/invitations";
 
 const MINISTRY_OPTIONS = [
   "Pastor",
@@ -76,53 +77,65 @@ function OnboardingContent() {
 
   const [joinCode, setJoinCode] = useState<string>("");
   const [joinError, setJoinError] = useState<string>("");
+  const invalidInviteError = urlInvite && !normalizeJoinCode(urlInvite)
+    ? "The invitation link is invalid. Ask the team owner for a new link."
+    : "";
+  const displayedJoinError = invalidInviteError || joinError;
+  const [initializationError, setInitializationError] = useState("");
   
   const [isVerifyingLink, setIsVerifyingLink] = useState(false);
   const [stagedMagicTeam, setStagedMagicTeam] = useState<{name: string, code: string} | null>(null);
 
-  // ✅ SURGICAL FIX: Safely extract code from URL OR LocalStorage and auto-format it
   useEffect(() => {
-    const stashedCode = localStorage.getItem("onpraise_pending_invite");
-    const activeInvite = urlInvite || stashedCode;
-    
-    if (activeInvite && !joinCode) {
-      const raw = activeInvite.toUpperCase();
-      const clean = raw.replace(/-/g, '');
-      const letters = clean.substring(0, 4).replace(/[^A-Z]/g, '');
-      const numbers = clean.substring(4, 9).replace(/[^0-9]/g, '');
-      
-      if (clean.length >= 4) {
-        setJoinCode(`${letters}${letters.length === 4 ? '-' : ''}${numbers}`);
-      } else {
-        setJoinCode(letters);
-      }
+    const activeInvite = urlInvite
+      ? normalizeJoinCode(urlInvite)
+      : normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+    if (urlInvite && !activeInvite) {
+      localStorage.removeItem("onpraise_pending_invite");
+      return;
+    }
+    if (activeInvite) {
+      setJoinCode(activeInvite);
+      localStorage.setItem("onpraise_pending_invite", activeInvite);
     }
   }, [urlInvite]);
 
   useEffect(() => {
-    async function verifyStashedLink() {
-      const stashedCode = localStorage.getItem("onpraise_pending_invite");
-      if (!stashedCode) return;
-      
+    const invite = urlInvite
+      ? normalizeJoinCode(urlInvite)
+      : normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+    if (!invite || !userId) return;
+    const invitationCode = invite;
+    let active = true;
+
+    async function verifyInvite() {
       setIsVerifyingLink(true);
-      localStorage.removeItem("onpraise_pending_invite"); 
+      try {
+        const { data, error } = await supabase
+          .from("teams")
+          .select("name")
+          .eq("join_code", invitationCode.toLowerCase())
+          .maybeSingle();
+        if (error) throw error;
 
-      const { data } = await supabase
-        .from("teams")
-        .select("name")
-        .eq("join_code", stashedCode.toLowerCase().trim())
-        .maybeSingle();
-
-      if (data) {
-        setStagedMagicTeam({ name: data.name, code: stashedCode });
-      } else {
-        setJoinError("The invite link expired or is invalid.");
+        if (!active) return;
+        if (data) {
+          setStagedMagicTeam({ name: data.name, code: invitationCode });
+        } else {
+          setJoinError("The invite link expired or is invalid.");
+          localStorage.removeItem("onpraise_pending_invite");
+        }
+      } catch (error) {
+        console.error("Could not verify the invitation.", error);
+        if (active) setJoinError("We couldn't verify this invite right now. Check your connection and try again.");
+      } finally {
+        if (active) setIsVerifyingLink(false);
       }
-      setIsVerifyingLink(false);
     }
 
-    verifyStashedLink();
-  }, [supabase]);
+    void verifyInvite();
+    return () => { active = false; };
+  }, [supabase, urlInvite, userId]);
 
   async function handleJoinTeam(overrideCode?: string) {
     setJoinError("");
@@ -133,9 +146,10 @@ function OnboardingContent() {
       return;
     }
 
-    const { data: { user } } = await supabase.auth.getUser();
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
     
-    if (!user) {
+    if (authError || !user) {
+      if (authError) console.error("Could not verify the current user before joining.", authError);
       setJoinError("Authentication error. Please log in again.");
       return;
     }
@@ -146,7 +160,12 @@ function OnboardingContent() {
       .eq("join_code", activeCode.toLowerCase().trim())
       .maybeSingle();
 
-    if (teamError || !teamData) {
+    if (teamError) {
+      console.error("Could not look up the invitation team.", teamError);
+      setJoinError("We couldn't verify this code right now. Check your connection and try again.");
+      return;
+    }
+    if (!teamData) {
       setJoinError("Invalid code. Please check your spelling and try again.");
       return;
     }
@@ -161,34 +180,67 @@ function OnboardingContent() {
   }
 
   useEffect(() => {
+    let active = true;
     async function fetchInitialData() {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        router.push("/login");
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError) {
+        console.error("Could not restore the onboarding session.", authError);
+        if (active) {
+          setInitializationError("We couldn't verify your sign-in. Return to the sign-in page and try again.");
+          setLoading(false);
+        }
         return;
       }
-      setUserId(user.id);
+      if (!user) {
+        const invite = normalizeJoinCode(urlInvite) ||
+          normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+        if (invite) localStorage.setItem("onpraise_pending_invite", invite);
+        const loginUrl = new URL("/", window.location.origin);
+        if (invite) loginUrl.searchParams.set("invite", invite);
+        router.replace(`${loginUrl.pathname}${loginUrl.search}`);
+        return;
+      }
+      if (active) setUserId(user.id);
 
-      const { data: profile } = await supabase
+      const { data: profile, error: profileError } = await supabase
         .from("profiles")
-        .select("full_name")
+        .select("full_name, ministries")
         .eq("id", user.id)
         .maybeSingle();
-      
-      if (profile?.full_name) {
-        setFullName(profile.full_name);
+      if (profileError) {
+        console.error("Could not load the onboarding profile.", profileError);
+        if (active) {
+          setInitializationError("We couldn't load your account details. Check your connection and try again.");
+          setLoading(false);
+        }
+        return;
       }
+      if (profile?.full_name) {
+        if (active) setFullName(profile.full_name);
+      }
+      if (profile?.ministries?.length && active) setSelectedMinistries(profile.ministries);
 
-      const { data: teamsData } = await supabase
+      const { data: teamsData, error: teamsError } = await supabase
         .from("teams")
         .select("id, name")
         .order("name", { ascending: true });
-        
-      if (teamsData) setTeams(teamsData);
-      setLoading(false);
+      if (teamsError) {
+        console.error("Could not load onboarding teams.", teamsError);
+        if (active) setInitializationError("We couldn't load teams. You can try again after refreshing.");
+      } else if (teamsData && active) {
+        setTeams(teamsData);
+      }
+      if (active) setLoading(false);
     }
-    fetchInitialData();
-  }, [router, supabase]);
+    void fetchInitialData().catch((error: unknown) => {
+      console.error("Could not initialize onboarding.", error);
+      if (active) {
+        setInitializationError("We couldn't load your account details. Check your connection and try again.");
+        setLoading(false);
+      }
+    });
+    return () => { active = false; };
+  }, [router, supabase, urlInvite]);
 
   const handleToggleMinistry = (ministry: string) => {
     setSelectedMinistries(prev => 
@@ -228,6 +280,7 @@ function OnboardingContent() {
 
       if (error) throw error;
 
+      localStorage.removeItem("onpraise_pending_invite");
       window.location.href = "/dashboard"; 
     } catch (error) {
       console.error("Error saving profile:", error);
@@ -242,6 +295,11 @@ function OnboardingContent() {
 
   return (
     <main className="w-full min-h-[100dvh] bg-[#0d0e12] relative overflow-hidden flex flex-col text-white selection:bg-blue-600 selection:text-white font-sans items-center sm:p-4">
+      {(initializationError || (displayedJoinError && step === 1)) && (
+        <p className="absolute top-4 z-30 mx-4 max-w-md rounded-xl border border-red-500/30 bg-red-950/90 px-4 py-3 text-center text-xs font-bold text-red-200" role="alert">
+          {initializationError || displayedJoinError}
+        </p>
+      )}
       
       {/* ======================================================= */}
       {/* 1. BACKGROUND AMBIENT EFFECTS                             */}
@@ -438,8 +496,8 @@ function OnboardingContent() {
                         className="w-full bg-[#141417] text-white font-mono text-center font-bold text-xl py-4 px-4 rounded-xl border border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 tracking-[0.25em] uppercase transition-all shadow-inner outline-none" 
                       />
                     </div>
-                    {joinError && (
-                      <p className="text-red-400 text-xs font-bold text-center mt-2 animate-in slide-in-from-top-1">{joinError}</p>
+                    {displayedJoinError && (
+                      <p className="text-red-400 text-xs font-bold text-center mt-2 animate-in slide-in-from-top-1">{displayedJoinError}</p>
                     )}
                   </div>
 

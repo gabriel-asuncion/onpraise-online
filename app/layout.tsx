@@ -21,8 +21,6 @@ export const viewport: Viewport = {
   themeColor: "#09090B",
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false, 
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -64,7 +62,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                       document.head.appendChild(meta);
                     }
                     // Force the browser back to the physical device width
-                    meta.content = 'width=' + physicalWidth + ', initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+                    meta.content = 'width=' + physicalWidth + ', initial-scale=1.0';
                   }
                 } catch(e) {}
               })();

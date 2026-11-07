@@ -2,6 +2,8 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { createClient } from "../../utils/supabase/client";
+import { resolveAccountLandingDecision } from "../../lib/account-routing";
+import { normalizeJoinCode } from "../../lib/invitations";
 
 export type RoleType = "admin" | "moderator" | "musician" | "member" | "none";
 
@@ -49,65 +51,95 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   
   // Track the authentic user ID session in the background
   useEffect(() => {
+    let active = true;
     async function fetchRealUserSession() {
-      const { data: { user } } = await supabase.auth.getUser();
-      
-      // ✅ SURGICAL FIX: The Bouncer. If there is NO user, kick them to the root page immediately!
-      if (!user) {
-        if (typeof window !== "undefined" && window.location.pathname !== "/") {
-          window.location.href = "/";
-        }
-        return; // Stop executing so we don't load phantom fallback data
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError) {
+        console.error("Could not restore the Supabase session for the application.", authError);
+        return;
       }
 
-      if (user) {
-        setRealUserId(user.id);
-        
-        // Fetch the profile
-        const { data: profile, error } = await supabase
-          .from("profiles")
-          .select("team_id, secondary_team_ids, full_name, is_super_admin, role") 
-          .eq("id", user.id)
-          .maybeSingle();
+      if (!user) {
+        if (typeof window !== "undefined" && window.location.pathname !== "/" && !window.location.pathname.startsWith("/auth/")) {
+          const invite = normalizeJoinCode(new URLSearchParams(window.location.search).get("invite")) ||
+            normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+          if (invite) localStorage.setItem("onpraise_pending_invite", invite);
+          const loginUrl = new URL("/", window.location.origin);
+          if (invite) loginUrl.searchParams.set("invite", invite);
+          window.location.replace(`${loginUrl.pathname}${loginUrl.search}`);
+        }
+        return;
+      }
 
-        // ✅ SURGICAL FIX: The Bouncer now checks for a full_name instead of a team_id!
-        if (!profile || !profile.full_name) {
-          if (typeof window !== "undefined" && !window.location.pathname.includes("/onboarding") && window.location.pathname !== "/") {
-            window.location.href = "/onboarding";
-          }
+      setRealUserId(user.id);
+      let accountDecision: Awaited<ReturnType<typeof resolveAccountLandingDecision>>;
+      try {
+        accountDecision = await resolveAccountLandingDecision(async () => {
+          const { data: profile, error: profileError } = await supabase
+            .from("profiles")
+            .select("team_id, secondary_team_ids, ministries, full_name, is_super_admin, role")
+            .eq("id", user.id)
+            .maybeSingle();
+          if (profileError) throw profileError;
+          return profile;
+        }, async () => {
+          const { data: membership, error: membershipError } = await supabase
+            .from("team_members")
+            .select("id")
+            .eq("user_id", user.id)
+            .limit(1);
+          if (membershipError) throw membershipError;
+          return Boolean(membership?.length);
+        });
+      } catch (error) {
+        console.error("Could not resolve the authenticated user's account setup state.", error);
+        return;
+      }
+      const profile = accountDecision.profile;
+
+      if (!active) return;
+      if (profile) {
+        if (profile.team_id) {
+          setPrimaryTeamId(profile.team_id);
+          setSecondaryTeamIds(profile.secondary_team_ids || []);
+
+          const savedWorkspace = localStorage.getItem("active_workspace_id");
+          const isAuthorized = Boolean(savedWorkspace && (
+            savedWorkspace === profile.team_id ||
+            (profile.secondary_team_ids || []).includes(savedWorkspace)
+          ));
+
+          setUserTeamId(savedWorkspace && isAuthorized ? savedWorkspace : profile.team_id);
         } else {
-          // They are fully onboarded! Now we safely set up their workspace (even if team_id is null)
-          if (profile.team_id) {
-            setPrimaryTeamId(profile.team_id);
-            setSecondaryTeamIds(profile.secondary_team_ids || []);
-            
-            const savedWorkspace = localStorage.getItem("active_workspace_id");
-            const isAuthorized = savedWorkspace === profile.team_id || (profile.secondary_team_ids || []).includes(savedWorkspace);
-            
-            if (savedWorkspace && isAuthorized) {
-              setUserTeamId(savedWorkspace);
-            } else {
-              setUserTeamId(profile.team_id); 
-            }
-          } else {
-            // They are a Lone Wolf!
-            setPrimaryTeamId(null);
-            setUserTeamId(null);
-            setSecondaryTeamIds([]);
-          }
-          
-          if (profile.is_super_admin) setIsSuperAdmin(true);
-          if (profile.role) setRealRole(profile.role);
+          setPrimaryTeamId(null);
+          setUserTeamId(null);
+          setSecondaryTeamIds([]);
         }
-        
-        const cached = localStorage.getItem("onpraise_sim_role") as RoleType;
-        if (cached === "none" || !cached) {
-          setSimulatedUserId(user.id);
-        }
+
+        setIsSuperAdmin(Boolean(profile.is_super_admin));
+        if (profile.role) setRealRole(profile.role);
+      }
+
+      if (typeof window !== "undefined" &&
+          !window.location.pathname.includes("/onboarding") &&
+          window.location.pathname !== "/" &&
+          accountDecision.destination === "/onboarding") {
+        const invite = normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+        const onboardingUrl = new URL("/onboarding", window.location.origin);
+        if (invite) onboardingUrl.searchParams.set("invite", invite);
+        window.location.replace(`${onboardingUrl.pathname}${onboardingUrl.search}`);
+      }
+
+      const cached = localStorage.getItem("onpraise_sim_role") as RoleType;
+      if (cached === "none" || !cached) {
+        setSimulatedUserId(user.id);
       }
     }
-    fetchRealUserSession();
-  }, []);
+    void fetchRealUserSession().catch((error: unknown) => {
+      console.error("Could not initialize the authenticated account context.", error);
+    });
+    return () => { active = false; };
+  }, [supabase]);
   
 
   const setSimulatedRole = (role: RoleType) => {

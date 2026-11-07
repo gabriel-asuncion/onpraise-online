@@ -71,7 +71,8 @@ export function useYouTubeSync({
         }
       } else if (!ytPlayerRef.current) {
         loadedVideoIdRef.current = youtubeVideoId;
-        ytPlayerRef.current = new youtubeApi.Player("yt-live-player-container", {
+        try {
+          ytPlayerRef.current = new youtubeApi.Player("yt-live-player-container", {
           height: "10px", width: "10px", videoId: youtubeVideoId,
           playerVars: { playsinline: 1, controls: 0, disablekb: 1 },
           events: {
@@ -107,7 +108,12 @@ export function useYouTubeSync({
               console.warn("YouTube playback failed; the shared visual timeline will continue.", event.data);
             }
           }
-        });
+          });
+        } catch (error) {
+          loadedVideoIdRef.current = null;
+          console.warn("Could not initialize the optional YouTube player.", error);
+          onPlaybackErrorRef.current?.();
+        }
       }
     };
 

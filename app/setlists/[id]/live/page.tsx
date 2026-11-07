@@ -18,6 +18,7 @@ import {
   getTimelineMeter,
   getYoutubeTimeForTimeline
 } from "./utils/timeline";
+import { startPlaybackWithSupplementaryAudio } from "./utils/playback-start";
 
 import { useWakeLock } from "./hooks/useWakeLock";
 import { useWebAudioEngine } from "./hooks/useWebAudioEngine";
@@ -447,6 +448,15 @@ export default function SetlistPerformanceRoomPage() {
   const queuedTrackIndexRef = useRef<number | null>(null);
   const queuedSectionIndexRef = useRef<number | null>(null);
   const clickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingYoutubeStartRef = useRef<{
+    trackIndex: number;
+    sectionIndex: number;
+    exactBeat: number | null;
+    startTimestamp: number;
+  } | null>(null);
+  const youtubePlaybackStartedHandlerRef = useRef<(currentTimeSeconds: number) => void>(() => {});
+  const youtubePlaybackErrorHandlerRef = useRef<() => void>(() => {});
+  const beginYoutubeBackedStartRef = useRef<() => void>(() => {});
   const pendingQuantizedJumpRef = useRef<{ trackIndex: number; sectionIndex: number; jumpTime: number } | null>(null);
   const isYtBackingTrackStartRef = useRef<boolean>(false);
   const activeLineIndexRef = useRef<number>(0);
@@ -481,14 +491,6 @@ export default function SetlistPerformanceRoomPage() {
     sectionStartTime: number;
     mode: "start" | "explicit-jump" | "snapshot";
   } | null>(null);
-  const pendingYoutubeStartRef = useRef<{
-    trackIndex: number;
-    sectionIndex: number;
-    exactBeat?: number | null;
-  } | null>(null);
-  const youtubePlaybackStartedHandlerRef = useRef<(currentTimeSeconds: number) => void>(() => {});
-  const youtubePlaybackErrorHandlerRef = useRef<() => void>(() => {});
-  const beginYoutubeBackedStartRef = useRef<() => void>(() => {});
 
   const backdropProgressRef = useRef<HTMLDivElement | null>(null);
   const accentProgressBarRef = useRef<HTMLDivElement | null>(null);
@@ -1348,15 +1350,28 @@ export default function SetlistPerformanceRoomPage() {
       pendingYoutubeStartRef.current = {
         trackIndex: currentTrackIndexRef.current,
         sectionIndex: currentSectionIndexRef.current,
-        exactBeat: exactScrubBeat
+        exactBeat: exactScrubBeat,
+        startTimestamp
       };
       pendingYoutubeSyncRef.current = null;
 
-      if (isYtPlayerReadyRef.current && ytPlayerRef.current) beginYoutubeBackedStart();
+      startPlaybackWithSupplementaryAudio(
+        () => completeLiveStart(
+          currentTrackIndexRef.current,
+          currentSectionIndexRef.current,
+          startTimestamp,
+          true,
+          exactScrubBeat,
+          true
+        ),
+        beginYoutubeBackedStart
+      );
       return;
     }
 
-    completeLiveStart(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, false, exactScrubBeat);
+    startPlaybackWithSupplementaryAudio(
+      () => completeLiveStart(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, false, exactScrubBeat)
+    );
   }
 
   function beginYoutubeBackedStart() {
@@ -1365,82 +1380,45 @@ export default function SetlistPerformanceRoomPage() {
     if (!player || typeof player.seekTo !== "function" || typeof player.playVideo !== "function") return;
     const pendingStart = pendingYoutubeStartRef.current;
 
-    const startVisualTimelineWithoutYoutube = () => {
-      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
-      const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
-      const now = getGlobalTime();
-      const startTimestamp = pendingStart.exactBeat == null
-        ? now
-        : now - (pendingStart.exactBeat - sectionStartBeat) * beatDurationMs;
-      completeLiveStart(
-        pendingStart.trackIndex,
-        pendingStart.sectionIndex,
-        startTimestamp,
-        false,
-        pendingStart.exactBeat
-      );
-    };
+    if (
+      !isPlayingRef.current ||
+      pendingStart.trackIndex !== playingTrackIndexRef.current ||
+      pendingStart.trackIndex !== currentTrackIndexRef.current ||
+      pendingStart.sectionIndex !== currentSectionIndexRef.current
+    ) {
+      pendingYoutubeStartRef.current = null;
+      return;
+    }
 
     try {
       const song = activeSongRef.current;
       const offsetMs = song?.youtube_sync_offset_ms || 0;
-      let expectedYoutubeTime;
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+      const startBeat = pendingStart.exactBeat ?? sectionStartBeat;
+      const elapsedTimelineMs = Math.max(0, getGlobalTime() - pendingStart.startTimestamp);
+      const expectedYoutubeTime = getYoutubeTimeForTimeline(
+        startBeat,
+        elapsedTimelineMs,
+        song?.tempo || 75,
+        offsetMs
+      );
 
-      if (pendingStart.exactBeat !== undefined && pendingStart.exactBeat !== null) {
-        expectedYoutubeTime = getYoutubeTimeForTimeline(pendingStart.exactBeat, 0, song?.tempo || 75, offsetMs);
-      } else {
-        const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
-        expectedYoutubeTime = getYoutubeTimeForTimeline(sectionStartBeat, 0, song?.tempo || 75, offsetMs);
-        const isFreshStart = mdSectionStartTimeRef.current ? Math.abs(getGlobalTime() - mdSectionStartTimeRef.current) < 500 : true;
-        if (pendingStart.sectionIndex === 0 && isFreshStart) expectedYoutubeTime = 0;
+      player.seekTo(expectedYoutubeTime, true);
+      player.playVideo();
+      if (player.getPlayerState?.() === 1) {
+        handleYoutubePlaybackStarted(player.getCurrentTime?.() ?? expectedYoutubeTime);
       }
-
-      setTimeout(() => {
-        if (pendingYoutubeStartRef.current !== pendingStart) return;
-        try {
-          player.seekTo(Math.max(0, expectedYoutubeTime), true);
-          player.playVideo();
-          if (player.getPlayerState?.() === 1) {
-            handleYoutubePlaybackStarted(player.getCurrentTime?.() ?? expectedYoutubeTime);
-          }
-        } catch (error) {
-          console.warn("Could not start the optional YouTube player.", error);
-          startVisualTimelineWithoutYoutube();
-        }
-      }, 0);
     } catch (error) {
       console.warn("Could not start the optional YouTube player.", error);
-      startVisualTimelineWithoutYoutube();
+      handleYoutubePlaybackError();
     }
   }
 
-  function handleYoutubePlaybackStarted(currentTimeSeconds: number) {
+  function handleYoutubePlaybackStarted(_currentTimeSeconds: number) {
     const pendingStart = pendingYoutubeStartRef.current;
     if (!pendingStart) return;
 
-    const song = activeSongRef.current;
-    const offsetMs = song?.youtube_sync_offset_ms || 0;
-    const beatDurationMs = 60000 / (song?.tempo || 75);
-    const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
-
-    let expectedYoutubeTime;
-    if (pendingStart.exactBeat !== undefined && pendingStart.exactBeat !== null) {
-      expectedYoutubeTime = getYoutubeTimeForTimeline(pendingStart.exactBeat, 0, song?.tempo || 75, offsetMs);
-    } else {
-      expectedYoutubeTime = getYoutubeTimeForTimeline(sectionStartBeat, 0, song?.tempo || 75, offsetMs);
-      const isFreshStart = mdSectionStartTimeRef.current ? Math.abs(getGlobalTime() - mdSectionStartTimeRef.current) < 500 : true;
-      if (pendingStart.sectionIndex === 0 && isFreshStart) expectedYoutubeTime = 0;
-    }
-
-    const actualTimeSecs = Math.abs(currentTimeSeconds - expectedYoutubeTime) > 2.0 ? expectedYoutubeTime : currentTimeSeconds;
-    const totalSongElapsedMs = (actualTimeSecs * 1000) - offsetMs;
-
-    // ✅ MUST BE RELATIVE TO SECTION START BEAT so the engine doesn't wipe out negative pre-rolls!
-    const theoreticalSectionStartMs = sectionStartBeat * beatDurationMs;
-    const sectionElapsedMs = totalSongElapsedMs - theoreticalSectionStartMs;
-    const startTimestamp = getGlobalTime() - sectionElapsedMs;
-
-    completeLiveStart(pendingStart.trackIndex, pendingStart.sectionIndex, startTimestamp, true, pendingStart.exactBeat);
+    pendingYoutubeStartRef.current = null;
   }
 
   function completeLiveStart(
@@ -1448,20 +1426,21 @@ export default function SetlistPerformanceRoomPage() {
     sectionIndex: number,
     startTimestamp: number,
     isYtSource: boolean,
-    exactStartBeat?: number | null
+    exactStartBeat?: number | null,
+    preservePendingYoutubeStart = false
   ) {
     if (
       !hasCurrentPlaybackAuthority() ||
       trackIndex !== currentTrackIndexRef.current ||
       sectionIndex !== currentSectionIndexRef.current
     ) {
-      pendingYoutubeStartRef.current = null;
+      if (!preservePendingYoutubeStart) pendingYoutubeStartRef.current = null;
       isYtBackingTrackStartRef.current = false;
       ytPlayerRef.current?.pauseVideo?.();
       return;
     }
 
-    pendingYoutubeStartRef.current = null;
+    if (!preservePendingYoutubeStart) pendingYoutubeStartRef.current = null;
     isYtBackingTrackStartRef.current = isYtSource;
     playingTrackIndexRef.current = trackIndex;
     setPlayingTrackIndex(trackIndex);
@@ -1485,22 +1464,7 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   function handleYoutubePlaybackError() {
-    const pendingStart = pendingYoutubeStartRef.current;
-    if (pendingStart) {
-      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
-      const beatDurationMs = (60 / (activeSongRef.current?.tempo || 75)) * 1000;
-      const now = getGlobalTime();
-      const startTimestamp = pendingStart.exactBeat == null
-        ? now
-        : now - (pendingStart.exactBeat - sectionStartBeat) * beatDurationMs;
-      completeLiveStart(
-        pendingStart.trackIndex,
-        pendingStart.sectionIndex,
-        startTimestamp,
-        false,
-        pendingStart.exactBeat
-      );
-    }
+    pendingYoutubeStartRef.current = null;
   }
 
   const {
@@ -2001,9 +1965,7 @@ export default function SetlistPerformanceRoomPage() {
     if (!hasCurrentPlaybackAuthority()) { setIsMdLockModalOpen(true); return; }
     if (pendingYoutubeStartRef.current) {
       pendingYoutubeStartRef.current = null;
-      isYtBackingTrackStartRef.current = false;
       ytPlayerRef.current?.pauseVideo?.();
-      return;
     }
     if (isPlayingFlow) {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();

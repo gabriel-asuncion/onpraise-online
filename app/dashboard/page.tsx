@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
 import { useEngine } from "../context/EngineContext";
 import PageSkeleton from '../../components/PageSkeleton';
+import { resolveAccountLandingDecision } from "../../lib/account-routing";
+import { normalizeJoinCode } from "../../lib/invitations";
 
 // Helper to extract YouTube ID
 function extractYouTubeID(url: string) {
@@ -86,12 +88,12 @@ export default function DashboardPage() {
   const { simulatedRole, simulatedUserId, userTeamId } = useEngine();
 
   const [loading, setLoading] = useState(true);
+  const hasRedirectedRef = useRef(false);
   const [eventsList, setEventsList] = useState<EventItem[]>([]);
   const [allocationsList, setAllocationsList] = useState<TeamMemberAllocation[]>([]);
   
   // User & Workspace States
   const [userName, setUserName] = useState("Worshipper");
-  const [userAvatar, setUserAvatar] = useState<string | null>(null);
   const [teamName, setTeamName] = useState("Your Team");
   
   const [currentGreeting, setCurrentGreeting] = useState("Shalom");
@@ -243,28 +245,47 @@ export default function DashboardPage() {
 
   async function loadDashboardMetrics() {
     try {
-      // ✅ SURGICAL FIX: Strict Auth & Onboarding Bounce
       const { data: authData, error: authError } = await supabase.auth.getUser();
 
-      // 1. If no valid user session exists, bounce to login
-      if (authError || !authData?.user) {
-        router.push("/login"); // (or your sign-in route)
+      if (authError) throw authError;
+      if (!authData?.user) {
+        if (!hasRedirectedRef.current) {
+          hasRedirectedRef.current = true;
+          router.replace("/");
+        }
         return;
       }
 
-      // 2. Fetch the user's core profile data
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("full_name, team_id, avatar_url")
-        .eq("id", authData.user.id)
-        .maybeSingle();
+      const accountDecision = await resolveAccountLandingDecision(async () => {
+        const { data: profile, error: profileError } = await supabase
+          .from("profiles")
+          .select("full_name, team_id, secondary_team_ids, ministries, avatar_url")
+          .eq("id", authData.user.id)
+          .maybeSingle();
+        if (profileError) throw profileError;
+        return profile;
+      }, async () => {
+        const { data: membership, error: membershipError } = await supabase
+          .from("team_members")
+          .select("id")
+          .eq("user_id", authData.user.id)
+          .limit(1);
+        if (membershipError) throw membershipError;
+        return Boolean(membership?.length);
+      });
 
-      // 3. If the profile row is missing, or the name is empty, aggressively route to onboarding
-      if (!profile || !profile.full_name || profile.full_name.trim() === "") { 
-        router.push("/onboarding"); 
+      if (accountDecision.destination === "/onboarding") {
+        const invite = normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+        const onboardingUrl = new URL("/onboarding", window.location.origin);
+        if (invite) onboardingUrl.searchParams.set("invite", invite);
+        if (!hasRedirectedRef.current) {
+          hasRedirectedRef.current = true;
+          router.replace(`${onboardingUrl.pathname}${onboardingUrl.search}`);
+        }
         return; 
       }
 
+      const profile = accountDecision.profile;
       const activeProfileData = profile;
 
       const targetTeamIdToFetch = userTeamId || activeProfileData?.team_id;
@@ -375,14 +396,12 @@ export default function DashboardPage() {
 
       let userBookmarks: string[] = [];
       if (simulatedUserId && simulatedUserId !== "00000000-0000-0000-0000-000000000000") {
-        const { data: profileData } = await supabase.from("profiles").select("full_name, bookmarked_songs, avatar_url").eq("id", simulatedUserId).maybeSingle();
+        const { data: profileData } = await supabase.from("profiles").select("full_name, bookmarked_songs").eq("id", simulatedUserId).maybeSingle();
         setUserName(profileData?.full_name ? profileData.full_name.split(" ")[0] : "Worshipper");
         userBookmarks = profileData?.bookmarked_songs || [];
         setBookmarkedSongIds(userBookmarks);
-        if (profileData?.avatar_url) setUserAvatar(profileData.avatar_url);
       } else if (activeProfileData) {
-        setUserName(activeProfileData.full_name.split(" ")[0]);
-        if (activeProfileData.avatar_url) setUserAvatar(activeProfileData.avatar_url);
+        setUserName(activeProfileData.full_name?.split(" ")[0] || "Worshipper");
       }
 
       const { data: songsData } = await supabase.from("songs").select("*");
@@ -568,18 +587,6 @@ export default function DashboardPage() {
               <span className="font-headline-title-mobile text-[16px] text-on-surface tracking-tight leading-tight font-extrabold">OnPraise</span>
               <span className="font-label-sm text-[11px] text-on-surface-variant leading-tight">Home</span>
             </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => window.dispatchEvent(new CustomEvent('onpraise-open-account'))}
-              className="w-8 h-8 rounded-full bg-primary flex items-center justify-center hover:bg-primary/80 transition-colors cursor-pointer shadow-md overflow-hidden border border-primary/50"
-            >
-              {userAvatar ? (
-                <img src={userAvatar} alt="Profile" className="w-full h-full object-cover" />
-              ) : (
-                <span className="material-symbols-outlined text-on-primary text-[18px]">person</span>
-              )}
-            </button>
           </div>
         </div>
       </header>

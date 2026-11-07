@@ -287,8 +287,7 @@ export default function SongEditPage() {
   const editingSongId = params.id as string;
 
   const editorContentContainerRef = useRef<HTMLDivElement | null>(null);
-  // ✅ SURGICAL FIX: Extract the simulatedUserId to stamp new songs
-  const { activeRole, simulatedUserId } = useEngine();
+  const { activeRole } = useEngine();
 
   useEffect(() => {
     if (activeRole === "member") {
@@ -2828,15 +2827,9 @@ function formatTimeWithMs(seconds: number) {
       let finalSongId = editingSongId;
       const isNewSong = editingSongId === "new";
 
-      if (isNewSong) {
-        const { data: { user } } = await supabase.auth.getUser();
-        let currentTeamId = null;
-        if (user) {
-          const { data: profile } = await supabase.from("profiles").select("team_id").eq("id", user.id).single();
-          currentTeamId = profile?.team_id;
-        }
-
-        const insertPayload: any = {
+      const { data: savedSongId, error: saveError } = await supabase.rpc("save_song_with_sections", {
+        p_song_id: isNewSong ? null : editingSongId,
+        p_song_data: {
           title: formTitle.trim(),
           artist: formArtist.trim() || "Unknown Artist",
           tempo: parseInt(formTempo, 10) || 75,
@@ -2846,50 +2839,18 @@ function formatTimeWithMs(seconds: number) {
           chordpro_content: compiledChordPro,
           youtube_url: formYoutubeUrl.trim(),
           youtube_sync_offset_ms: formYoutubeSyncOffset,
-          is_youtube_sync_validated: formIsYoutubeSyncValidated, 
-          // ✅ SURGICAL FIX: Force all new creations to pending status unconditionally
-          approval_status: "pending",
-          created_by: simulatedUserId
-        };
-
-        if (currentTeamId) insertPayload.team_id = currentTeamId;
-
-        const { data: newSong, error: insertError } = await supabase.from("songs").insert(insertPayload).select("id").single();
-        if (insertError) throw insertError;
-        finalSongId = newSong.id; 
-      } else {
-        const { error: songUpdateError } = await supabase.from("songs").update({ 
-            title: formTitle.trim(),
-            artist: formArtist.trim() || "Unknown Artist",
-            tempo: parseInt(formTempo, 10) || 75,
-            original_key: formKey,
-            themes: formThemes.join(", "),
-            section_timings: updatedSectionTimings,
-            chordpro_content: compiledChordPro,
-            youtube_url: formYoutubeUrl.trim(),
-            youtube_sync_offset_ms: formYoutubeSyncOffset,
-            is_youtube_sync_validated: formIsYoutubeSyncValidated,
-            // ✅ SURGICAL FIX: Force all edits to revert to pending status unconditionally
-            approval_status: "pending",
-            reviewer_feedback: null 
-          }).eq("id", finalSongId);
-        if (songUpdateError) throw songUpdateError;
-
-        const { error: deleteError } = await supabase.from("song_sections").delete().eq("song_id", finalSongId);
-        if (deleteError) throw deleteError;
+          is_youtube_sync_validated: formIsYoutubeSyncValidated,
+        },
+        p_sections: formSections.map((section) => ({
+          section_name: section.type,
+          content: section.content || "",
+        })),
+      });
+      if (saveError) throw saveError;
+      if (typeof savedSongId !== "string") {
+        throw new Error("The song save operation did not return an ID.");
       }
-
-      const sectionsToInsert = formSections.map((sec, index) => ({
-        song_id: finalSongId,
-        section_name: sec.type,
-        content: sec.content || "",
-        sequence_order: index
-      }));
-
-      if (sectionsToInsert.length > 0) {
-        const { error: insertError } = await supabase.from("song_sections").insert(sectionsToInsert);
-        if (insertError) throw insertError;
-      }
+      finalSongId = savedSongId;
 
       setHasUnsavedChanges(false);
       setSaveStatus("success");
