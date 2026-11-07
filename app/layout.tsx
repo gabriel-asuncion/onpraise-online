@@ -72,7 +72,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       
       <body 
-        className="bg-surface text-on-surface font-sans h-[100dvh] w-screen overflow-hidden flex flex-col antialiased select-none" 
+        className="bg-surface text-on-surface font-sans h-[100dvh] w-screen overflow-x-hidden overflow-y-auto flex flex-col antialiased select-none"
         suppressHydrationWarning
       >
         <Script 

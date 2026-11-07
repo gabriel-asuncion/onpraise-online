@@ -179,13 +179,26 @@ export async function getTeamSetlists(teamId: string) {
 /**
  * Downloads the global indexed songs catalog array.
  */
-export async function getAllSongs() {
+export async function getAllSongs(options?: {
+  visibilityScope?: "workspace" | "global";
+  workspaceId?: string | null;
+}) {
   const supabase = createClient();
-  const { data, error } = await supabase
+  let query = supabase
     .from("songs")
     .select("*")
     .order("title", { ascending: true });
 
+  if (options?.visibilityScope) {
+    query = query.eq("visibility_scope", options.visibilityScope);
+    if (options.visibilityScope === "workspace" && options.workspaceId) {
+      query = query.eq("team_id", options.workspaceId);
+    } else if (options.visibilityScope === "workspace") {
+      return [];
+    }
+  }
+
+  const { data, error } = await query;
   if (error) throw error;
   return data || [];
 }

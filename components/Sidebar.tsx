@@ -11,6 +11,13 @@ import "react-day-picker/dist/style.css";
 import { format, eachDayOfInterval } from "date-fns";
 import { QRCodeSVG } from "qrcode.react";
 import { createInvitationUrl } from "../lib/invitations";
+import {
+  SERVICE_POSITIONS,
+  formatCooldownDuration,
+  getCooldownRemainingMs,
+  normalizeServicePosition,
+  type ServicePosition,
+} from "../lib/positions";
 
 // ✅ SURGICAL FIX: Added YouTube ID extractor
 function extractYouTubeID(url: string) {
@@ -68,6 +75,20 @@ export default function Sidebar() {
     url: string | null;
     error: string;
   } | null>(null);
+  const [positionStatusResult, setPositionStatusResult] = useState<{
+    workspaceId: string;
+    status: {
+    current_position: string | null;
+    pending_request_id: string | null;
+    requested_position: string | null;
+    pending_submitted_at: string | null;
+    cooldown_until: string | null;
+    } | null;
+  } | null>(null);
+  const [requestedPosition, setRequestedPosition] = useState<ServicePosition | "">("");
+  const [isSubmittingPositionRequest, setIsSubmittingPositionRequest] = useState(false);
+  const [positionRequestMessage, setPositionRequestMessage] = useState("");
+  const [positionClock, setPositionClock] = useState<number | null>(null);
 
   const [isNavVisible, setIsNavVisible] = useState(true);
   const [isPlaymodeActive, setIsPlaymodeActive] = useState(false);
@@ -238,6 +259,86 @@ export default function Sidebar() {
   const isLoadingInvite = Boolean(isAccountModalOpen && userTeamId && teamInviteResult?.teamId !== userTeamId);
   const teamInviteUrl = teamInviteResult?.teamId === userTeamId ? teamInviteResult.url : null;
   const inviteLoadError = teamInviteResult?.teamId === userTeamId ? teamInviteResult.error : "";
+
+  useEffect(() => {
+    if (!isAccountModalOpen || !userTeamId) return;
+
+    let active = true;
+    const workspaceId = userTeamId;
+    async function fetchPositionStatus() {
+      try {
+        const { data, error } = await supabase.rpc("get_my_position_reassignment_status", {
+          p_workspace_id: workspaceId,
+        });
+        if (error) throw error;
+        if (active) setPositionStatusResult({ workspaceId, status: data?.[0] || null });
+      } catch (error) {
+        console.error("Could not load service position status.", error);
+        if (active) {
+          setPositionStatusResult({ workspaceId, status: null });
+          setPositionRequestMessage("Position requests are temporarily unavailable.");
+        }
+      }
+    }
+
+    void fetchPositionStatus();
+    return () => { active = false; };
+  }, [isAccountModalOpen, userTeamId, supabase]);
+
+  const positionStatus = positionStatusResult?.workspaceId === userTeamId
+    ? positionStatusResult.status
+    : null;
+
+  useEffect(() => {
+    if (!isAccountModalOpen) return;
+    const timer = window.setInterval(() => setPositionClock(Date.now()), 60_000);
+    const firstTick = window.setTimeout(() => setPositionClock(Date.now()), 1);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(firstTick);
+    };
+  }, [isAccountModalOpen]);
+
+  const refreshPositionStatus = async () => {
+    if (!userTeamId) return;
+    const { data, error } = await supabase.rpc("get_my_position_reassignment_status", {
+      p_workspace_id: userTeamId,
+    });
+    if (error) throw error;
+    setPositionStatusResult({ workspaceId: userTeamId, status: data?.[0] || null });
+  };
+
+  const handleRequestPosition = async () => {
+    const position = normalizeServicePosition(requestedPosition);
+    if (!position || !userTeamId || positionStatus?.pending_request_id) return;
+    if (!window.confirm(`Request to change your position to ${position}? A workspace administrator or moderator must review the request; your current position will not change until it is approved.`)) {
+      return;
+    }
+
+    setIsSubmittingPositionRequest(true);
+    setPositionRequestMessage("");
+    try {
+      const { error } = await supabase.rpc("create_position_reassignment_request", {
+        p_workspace_id: userTeamId,
+        p_requested_position: position,
+      });
+      if (error) throw error;
+      setRequestedPosition("");
+      await refreshPositionStatus();
+      setPositionRequestMessage("Your request has been submitted for review.");
+    } catch (error) {
+      console.error("Could not submit the service position request.", error);
+      setPositionRequestMessage(
+        error instanceof Error ? error.message : "The request could not be submitted. Please try again.",
+      );
+    } finally {
+      setIsSubmittingPositionRequest(false);
+    }
+  };
+
+  const cooldownRemaining = positionClock === null
+    ? 0
+    : getCooldownRemainingMs(positionStatus?.cooldown_until || null, positionClock);
 
   useEffect(() => {
     let lastScrollY = 0;
@@ -669,6 +770,68 @@ export default function Sidebar() {
                       </div>
                     )}
                   </div>
+
+                  {userTeamId && simulatedRole === "none" && (
+                    <section className="space-y-3 rounded-xl border border-outline-variant/50 bg-surface-container-high p-3" aria-labelledby="position-request-heading">
+                      <div>
+                        <h4 id="position-request-heading" className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">
+                          Service Position
+                        </h4>
+                        <p className="mt-1 text-xs font-bold text-on-surface">
+                          Current: {positionStatus?.current_position || "No position assigned (Member access)"}
+                        </p>
+                      </div>
+
+                      {positionStatus?.pending_request_id ? (
+                        <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-3 text-xs">
+                          <p className="font-black uppercase tracking-wider text-amber-300">Pending</p>
+                          <p className="mt-1 text-on-surface">
+                            Requested: <span className="font-bold">{positionStatus.requested_position}</span>
+                          </p>
+                          {positionStatus.pending_submitted_at && (
+                            <p className="mt-1 text-[10px] text-on-surface-variant">
+                              Submitted {new Date(positionStatus.pending_submitted_at).toLocaleDateString()}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <>
+                          {cooldownRemaining > 0 && (
+                            <p className="text-[11px] font-semibold text-amber-300" role="status">
+                              You can request another change in {formatCooldownDuration(cooldownRemaining)}.
+                            </p>
+                          )}
+                          <label htmlFor="position-request-select" className="sr-only">Choose a requested service position</label>
+                          <select
+                            id="position-request-select"
+                            value={requestedPosition}
+                            onChange={(event) => setRequestedPosition(normalizeServicePosition(event.target.value) || "")}
+                            disabled={cooldownRemaining > 0 || !positionStatus}
+                            className="h-10 w-full rounded-lg border border-outline-variant bg-surface px-3 text-xs text-on-surface disabled:opacity-50"
+                          >
+                            <option value="">Request a different position…</option>
+                            {SERVICE_POSITIONS.map((position) => (
+                              <option key={position} value={position}>{position}</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => void handleRequestPosition()}
+                            disabled={!requestedPosition || isSubmittingPositionRequest || cooldownRemaining > 0 || !positionStatus}
+                            className="w-full rounded-lg bg-primary px-3 py-2 text-[10px] font-black uppercase tracking-widest text-on-primary disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {isSubmittingPositionRequest ? "Submitting…" : "Request Position Change"}
+                          </button>
+                        </>
+                      )}
+                      {positionRequestMessage && (
+                        <p className="text-[11px] font-semibold text-on-surface-variant" role="status">{positionRequestMessage}</p>
+                      )}
+                      <p className="text-[10px] leading-relaxed text-on-surface-variant">
+                        Requests require administrator or moderator approval. Your position stays unchanged until approved.
+                      </p>
+                    </section>
+                  )}
                 </div>
 
                 <div className="space-y-4 flex flex-col justify-between">

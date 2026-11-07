@@ -4,6 +4,8 @@ import React, { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "../../utils/supabase/client";
 import { normalizeJoinCode } from "../../lib/invitations";
+import { useEngine } from "../context/EngineContext";
+import { SERVICE_POSITIONS, normalizeServicePosition, type ServicePosition } from "../../lib/positions";
 
 const MINISTRY_OPTIONS = [
   "Pastor",
@@ -59,6 +61,7 @@ function OnboardingLoadingSkeleton() {
 function OnboardingContent() {
   const supabase = createClient();
   const router = useRouter();
+  const { resetAuthContext } = useEngine();
   
   // Extract query parameters correctly on mount
   const searchParams = useSearchParams();
@@ -74,6 +77,10 @@ function OnboardingContent() {
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState<string>("");
   const [selectedMinistries, setSelectedMinistries] = useState<string[]>([]);
+  const [selectedPosition, setSelectedPosition] = useState<ServicePosition | null>(null);
+  const [hasExistingProfile, setHasExistingProfile] = useState(false);
+  const [isSwitchingAccount, setIsSwitchingAccount] = useState(false);
+  const [switchAccountError, setSwitchAccountError] = useState("");
 
   const [joinCode, setJoinCode] = useState<string>("");
   const [joinError, setJoinError] = useState<string>("");
@@ -86,6 +93,38 @@ function OnboardingContent() {
   const [isVerifyingLink, setIsVerifyingLink] = useState(false);
   const [stagedMagicTeam, setStagedMagicTeam] = useState<{name: string, code: string} | null>(null);
 
+  const handleSwitchAccount = async () => {
+    if (!window.confirm("You will be signed out of the current Google account. Your valid invitation will be kept so you can continue onboarding with another account. Continue?")) {
+      return;
+    }
+
+    setIsSwitchingAccount(true);
+    setSwitchAccountError("");
+    const invite = normalizeJoinCode(urlInvite) ||
+      normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+    if (invite) localStorage.setItem("onpraise_pending_invite", invite);
+    localStorage.setItem("onpraise_switch_account", "1");
+
+    try {
+      const { error } = await supabase.auth.signOut({ scope: "local" });
+      if (error) throw error;
+
+      localStorage.removeItem("active_workspace_id");
+      localStorage.removeItem("onpraise_sim_role");
+      resetAuthContext();
+
+      const loginUrl = new URL("/", window.location.origin);
+      if (invite) loginUrl.searchParams.set("invite", invite);
+      loginUrl.searchParams.set("switch_account", "1");
+      window.location.replace(`${loginUrl.pathname}${loginUrl.search}`);
+    } catch (error) {
+      localStorage.removeItem("onpraise_switch_account");
+      console.error("Could not switch the signed-in account.", error);
+      setSwitchAccountError("We couldn't sign out this account. Please try again or return to sign-in.");
+      setIsSwitchingAccount(false);
+    }
+  };
+
   useEffect(() => {
     const activeInvite = urlInvite
       ? normalizeJoinCode(urlInvite)
@@ -95,8 +134,9 @@ function OnboardingContent() {
       return;
     }
     if (activeInvite) {
-      setJoinCode(activeInvite);
       localStorage.setItem("onpraise_pending_invite", activeInvite);
+      const timer = window.setTimeout(() => setJoinCode(activeInvite), 0);
+      return () => window.clearTimeout(timer);
     }
   }, [urlInvite]);
 
@@ -204,7 +244,7 @@ function OnboardingContent() {
 
       const { data: profile, error: profileError } = await supabase
         .from("profiles")
-        .select("full_name, ministries")
+        .select("full_name, ministries, team_id")
         .eq("id", user.id)
         .maybeSingle();
       if (profileError) {
@@ -219,6 +259,19 @@ function OnboardingContent() {
         if (active) setFullName(profile.full_name);
       }
       if (profile?.ministries?.length && active) setSelectedMinistries(profile.ministries);
+      if (profile && active) setHasExistingProfile(true);
+      if (profile?.team_id && active) {
+        setSelectedTeamId(profile.team_id);
+        const { data: positionStatus, error: positionError } = await supabase.rpc(
+          "get_my_position_reassignment_status",
+          { p_workspace_id: profile.team_id },
+        );
+        if (positionError) {
+          console.error("Could not restore the onboarding service position.", positionError);
+        } else if (positionStatus?.[0]?.current_position && active) {
+          setSelectedPosition(normalizeServicePosition(positionStatus[0].current_position));
+        }
+      }
 
       const { data: teamsData, error: teamsError } = await supabase
         .from("teams")
@@ -250,7 +303,7 @@ function OnboardingContent() {
     );
   };
 
-  const handleCompleteOnboarding = async () => {
+  const handleCompleteOnboarding = async (skipPosition = false) => {
     if (!userId || selectedMinistries.length === 0 || !fullName.trim()) return;
 
     setSaving(true);
@@ -263,22 +316,33 @@ function OnboardingContent() {
       const gmailAddress = user?.email || user?.user_metadata?.email || null;
 
       // ✅ SURGICAL FIX: Combine everything into one robust profile creation payload!
-      const payload: any = { 
+      const payload = {
         id: userId,
         full_name: fullName.trim(), 
         ministries: selectedMinistries,
         avatar_url: googleAvatarUrl,
         email: gmailAddress,
-        role: "member" // Standardize new users securely
+        ...(!hasExistingProfile ? { role: "member" } : {})
       };
 
       if (selectedTeamId) {
-        payload.team_id = selectedTeamId;
+        const { error } = await supabase.from("profiles").upsert({
+          ...payload,
+          team_id: selectedTeamId,
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("profiles").upsert(payload);
+        if (error) throw error;
       }
 
-      const { error } = await supabase.from("profiles").upsert(payload);
-
-      if (error) throw error;
+      if (selectedTeamId) {
+        const { error: positionError } = await supabase.rpc("set_initial_workspace_position", {
+          p_workspace_id: selectedTeamId,
+          p_position: skipPosition ? null : selectedPosition,
+        });
+        if (positionError) throw positionError;
+      }
 
       localStorage.removeItem("onpraise_pending_invite");
       window.location.href = "/dashboard"; 
@@ -336,12 +400,13 @@ function OnboardingContent() {
               <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
               <span className="text-xs tracking-wider uppercase font-semibold text-slate-400">OnPraise • Setup</span>
             </div>
-            <button aria-label="Quick Switch Profile" className="w-8 h-8 rounded-full bg-[#1b1d26] border border-slate-700/60 flex items-center justify-center text-slate-300 active:scale-95 transition-transform" type="button">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" strokeLinecap="round" strokeLinejoin="round"></path>
-              </svg>
-            </button>
+            {step === 1 && <button type="button" onClick={() => void handleSwitchAccount()} disabled={isSwitchingAccount} className="rounded-lg border border-slate-700/70 bg-[#1b1d26] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-200 transition-colors hover:bg-[#262936] disabled:opacity-60">{isSwitchingAccount ? "Signing out…" : "Switch Account"}</button>}
           </div>
+          {step === 1 && switchAccountError && (
+            <p className="mb-3 rounded-lg border border-red-500/30 bg-red-950/50 px-3 py-2 text-xs text-red-200" role="alert">
+              {switchAccountError}
+            </p>
+          )}
 
           <nav className="space-y-2">
             <div className="flex items-center justify-between text-[11px] font-medium tracking-wide">
@@ -565,14 +630,49 @@ function OnboardingContent() {
                 })}
               </div>
 
-              <div className="w-full grid grid-cols-12 gap-3 pt-2 border-t border-white/5">
-                <button onClick={() => setStep(2)} className="col-span-4 py-3.5 px-3 rounded-2xl bg-[#25252C] hover:bg-[#2E2E36] active:scale-95 text-slate-300 hover:text-white font-semibold text-xs tracking-wider uppercase transition-all duration-150 border border-white/5 cursor-pointer">
+              <div className="mb-5 w-full max-w-[340px] space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-4 text-left">
+                <label htmlFor="service-position" className="block text-[10px] font-bold uppercase tracking-widest text-slate-300">
+                  Optional service position
+                </label>
+                {selectedTeamId ? (
+                  <select
+                    id="service-position"
+                    value={selectedPosition || ""}
+                    onChange={(event) => setSelectedPosition(normalizeServicePosition(event.target.value))}
+                    className="h-11 w-full rounded-lg border border-white/10 bg-[#141417] px-3 text-sm text-white focus:border-purple-400 focus:outline-none"
+                  >
+                    <option value="">No position yet</option>
+                    {SERVICE_POSITIONS.map((position) => (
+                      <option key={position} value={position}>{position}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-xs text-slate-400">Join a workspace to choose a service position. Your workspace access remains Member-level.</p>
+                )}
+                <p className="text-[11px] leading-relaxed text-amber-200/90">
+                  Your selected position will be locked after onboarding. Changes later require workspace administrator or moderator approval.
+                </p>
+              </div>
+
+              <div className="w-full grid grid-cols-12 gap-2 pt-2 border-t border-white/5">
+                <button onClick={() => setStep(2)} className="col-span-3 py-3.5 px-2 rounded-2xl bg-[#25252C] hover:bg-[#2E2E36] active:scale-95 text-slate-300 hover:text-white font-semibold text-[10px] tracking-wide uppercase transition-all duration-150 border border-white/5 cursor-pointer">
                   Back
                 </button>
-                <button 
-                  onClick={handleCompleteOnboarding} 
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedPosition(null);
+                    void handleCompleteOnboarding(true);
+                  }}
                   disabled={selectedMinistries.length === 0 || saving}
-                  className="col-span-8 py-3.5 px-4 rounded-2xl bg-gradient-to-r from-purple-600 via-[#9A2FFB] to-purple-600 hover:from-purple-500 hover:to-purple-500 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs tracking-wider uppercase transition-all duration-200 shadow-[0_0_25px_-3px_rgba(168,43,251,0.45)] flex items-center justify-center gap-1.5 border border-purple-300/30 cursor-pointer"
+                  className="col-span-4 rounded-2xl border border-white/10 bg-[#25252C] px-2 py-3.5 text-[10px] font-semibold uppercase tracking-wide text-slate-300 transition-all hover:bg-[#2E2E36] disabled:opacity-50"
+                >
+                  Skip for now
+                </button>
+                <button 
+                  onClick={() => void handleCompleteOnboarding()}
+                  disabled={selectedMinistries.length === 0 || saving}
+                  className="col-span-5 py-3.5 px-2 rounded-2xl bg-gradient-to-r from-purple-600 via-[#9A2FFB] to-purple-600 hover:from-purple-500 hover:to-purple-500 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-[10px] tracking-wide uppercase transition-all duration-200 shadow-[0_0_25px_-3px_rgba(168,43,251,0.45)] flex items-center justify-center gap-1.5 border border-purple-300/30 cursor-pointer"
                 >
                   <span>{saving ? "Finalizing..." : "Complete Setup"}</span>
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">

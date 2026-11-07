@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import * as cheerio from "cheerio";
+import { requireRateLimitedUser } from "../../../lib/server/api-access";
 
 interface SongBpmResult {
   title: string;
@@ -26,6 +27,9 @@ export async function POST(request: Request) {
   if (!title || !artist) {
     return NextResponse.json({ error: "Enter both a song title and artist." }, { status: 400 });
   }
+
+  const access = await requireRateLimitedUser("lyrics", 20);
+  if (!access.ok) return access.response;
 
   try {
     const response = await fetch("https://songbpm.com/searches", {
@@ -100,5 +104,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("SongBPM lookup failed.", error);
     return NextResponse.json({ error: "Could not reach SongBPM. Please try again." }, { status: 502 });
+  } finally {
+    await access.release();
   }
 }

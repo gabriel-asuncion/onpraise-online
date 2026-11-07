@@ -4,10 +4,12 @@ import { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
+import { extractYouTubeVideoId } from "../../../../lib/youtube-import";
 import { useEngine } from "../../../context/EngineContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
 import { getYoutubeTimeForTimeline } from "../../../setlists/[id]/live/utils/timeline";
+import { parseAllowedGeniusSongUrl } from "../../../api/lyrics/url-validation";
 import TimelineArrangement, { type TimelineSection, type TimelineLyricPreview, type TimelineSnap } from "./TimelineArrangement";
 
 // =======================================================
@@ -81,6 +83,18 @@ interface SongMetadataResult {
   key: string;
 }
 
+interface WorkspaceChoice {
+  id: string;
+  name: string;
+}
+
+interface GeniusSongSource {
+  title: string;
+  artist: string;
+  url: string;
+  thumbnail?: string;
+}
+
 // ✅ SURGICAL FIX: Dark-mode ready section palette colors matching the dashboard aesthetic
 const SECTION_BASE_CATALOG = [
   { id: "V", display: "Verse", abbr: "V", color: "text-sky-400 border-sky-500/30 bg-sky-500/10" },
@@ -111,6 +125,47 @@ const BASE_LETTER_ROOTS = ["C", "D", "E", "F", "G", "A", "B"];
 const normalizeKeyNote = (note: string): string => {
   const flatMap: { [key: string]: string } = { "Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#" };
   return flatMap[note] || note;
+};
+
+const parseImportedLyrics = (lyrics: string): SongSectionBlock[] => {
+  const sections: SongSectionBlock[] = [];
+  let sectionName = "Verse 1";
+  let lines: string[] = [];
+  let hasSectionHeader = false;
+  const flush = () => {
+    if (lines.length === 0) return;
+    sections.push({
+      id: `sec-import-${sections.length + 1}`,
+      type: sectionName,
+      label: sectionName,
+      content: lines.join("\n").trim(),
+      repetitions: 1,
+    });
+    lines = [];
+  };
+
+  lyrics.split(/\r?\n/).forEach((line) => {
+    const header = line.trim().match(/^\[([^\]]+)\]$/);
+    if (header) {
+      flush();
+      sectionName = header[1].trim();
+      hasSectionHeader = true;
+    } else {
+      lines.push(line);
+    }
+  });
+  flush();
+
+  if (!hasSectionHeader && sections.length > 1) {
+    return sections.map((section, index) => ({ ...section, type: `Verse ${index + 1}`, label: `Verse ${index + 1}` }));
+  }
+  return sections.length ? sections : [{
+    id: "sec-import-1",
+    type: "Verse 1",
+    label: "Verse 1",
+    content: lyrics.trim(),
+    repetitions: 1,
+  }];
 };
 
 const normalizeMetadataKey = (key: string): string => {
@@ -284,10 +339,12 @@ export default function SongEditPage() {
   const router = useRouter();
   const params = useParams();
   const searchParams = useSearchParams(); 
+  const searchParamsString = searchParams.toString();
   const editingSongId = params.id as string;
 
   const editorContentContainerRef = useRef<HTMLDivElement | null>(null);
-  const { activeRole } = useEngine();
+  const { activeRole, simulatedUserId, userTeamId, primaryTeamId } = useEngine();
+  const canSaveSong = ["admin", "moderator", "musician"].includes(activeRole);
 
   useEffect(() => {
     if (activeRole === "member") {
@@ -309,11 +366,26 @@ export default function SongEditPage() {
   const [formTitle, setFormTitle] = useState("");
   const [formTempo, setFormTempo] = useState("");
   const [formYoutubeUrl, setFormYoutubeUrl] = useState("");
+  const youtubeVideoId = useMemo(() => extractYouTubeVideoId(formYoutubeUrl), [formYoutubeUrl]);
+  const youtubeDuplicateCheckControllerRef = useRef<AbortController | null>(null);
+  const [youtubeDuplicateCheck, setYoutubeDuplicateCheck] = useState<{
+    status: "idle" | "checking" | "clear" | "duplicate" | "error";
+    title: string | null;
+    songId: string | null;
+    visibility: "workspace" | "global" | null;
+    message: string | null;
+  }>({ status: "idle", title: null, songId: null, visibility: null, message: null });
   const [formYoutubeSyncOffset, setFormYoutubeSyncOffset] = useState<number>(0);
   const [formIsYoutubeSyncValidated, setFormIsYoutubeSyncValidated] = useState<boolean>(false);
-  const [youtubeVideoId, setYoutubeVideoId] = useState<string | null>(null);
   const [formArtist, setFormArtist] = useState("");
   const [formKey, setFormKey] = useState("");
+  const [formVisibilityScope, setFormVisibilityScope] = useState<"workspace" | "global">("workspace");
+  const [availableWorkspaces, setAvailableWorkspaces] = useState<WorkspaceChoice[]>([]);
+  const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState<string[]>([]);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState("");
+  const [workspaceOptionsLoaded, setWorkspaceOptionsLoaded] = useState(false);
+  const workspaceDefaultsInitializedRef = useRef(false);
+  const [songCreatorId, setSongCreatorId] = useState<string | null>(null);
   const [formThemes, setFormThemes] = useState<string[]>([]);
   const [formSections, setFormSections] = useState<SongSectionBlock[]>([]);
   const [sectionTimings, setSectionTimings] = useState<SectionTimingMap>({});
@@ -335,6 +407,66 @@ export default function SongEditPage() {
     lineChange?: { sourceLineIndex: number; field: "measures" | "beats"; value: number };
   } | null>(null);
   const seekTimelineLineRef = useRef<(direction: "previous" | "next") => void>(() => {});
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadWorkspaceChoices() {
+      try {
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError) throw authError;
+        if (!user) throw new Error("You must be signed in to select workspaces.");
+
+        const [{ data: profile, error: profileError }, { data: memberships, error: membershipsError }] = await Promise.all([
+          supabase.from("profiles").select("team_id, secondary_team_ids").eq("id", user.id).maybeSingle(),
+          supabase.from("team_members").select("team_id").eq("user_id", user.id),
+        ]);
+        if (profileError) throw profileError;
+        if (membershipsError) throw membershipsError;
+
+        const workspaceIds = Array.from(new Set([
+          profile?.team_id,
+          ...(profile?.secondary_team_ids || []),
+          ...(memberships || []).map((membership) => membership.team_id),
+        ].filter((id): id is string => typeof id === "string" && id.length > 0)));
+
+        const { data: teams, error: teamsError } = workspaceIds.length
+          ? await supabase.from("teams").select("id, name").in("id", workspaceIds)
+          : { data: [], error: null };
+        if (teamsError) throw teamsError;
+        if (!active) return;
+
+        const choices = (teams || [])
+          .map((team) => ({ id: team.id, name: team.name || "Unnamed workspace" }))
+          .sort((left, right) => left.name.localeCompare(right.name));
+        setAvailableWorkspaces(choices);
+        setWorkspaceLoadError("");
+
+        if (editingSongId === "new" && !workspaceDefaultsInitializedRef.current) {
+          const preferredWorkspaceId = userTeamId || primaryTeamId ||
+            (typeof window !== "undefined" ? localStorage.getItem("active_workspace_id") : null) ||
+            profile?.team_id;
+          const defaultWorkspaceId = choices.some((workspace) => workspace.id === preferredWorkspaceId)
+            ? preferredWorkspaceId
+            : choices[0]?.id;
+          setSelectedWorkspaceIds(defaultWorkspaceId ? [defaultWorkspaceId] : []);
+          workspaceDefaultsInitializedRef.current = true;
+        }
+        setWorkspaceOptionsLoaded(true);
+      } catch (error) {
+        console.error("Could not load the user's workspace memberships for song sharing.", error);
+        if (active) {
+          setWorkspaceLoadError("Workspace memberships could not be loaded. Refresh before saving so song access is preserved.");
+          setWorkspaceOptionsLoaded(false);
+        }
+      }
+    }
+
+    loadWorkspaceChoices();
+    return () => {
+      active = false;
+    };
+  }, [editingSongId, primaryTeamId, supabase, userTeamId]);
 
   // ✅ SURGICAL ADDITION: Track Markers Engine
   interface TrackMarker { id: string; sectionId: string; time: number; type: string; label: string; color: string; }
@@ -831,6 +963,7 @@ export default function SongEditPage() {
 
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [saveErrorMessage, setSaveErrorMessage] = useState("");
+  const [isDeletingSong, setIsDeletingSong] = useState(false);
   const [isScrollingDown, setIsScrollingDown] = useState(false);
   const lastScrollY = useRef(0);
 
@@ -898,6 +1031,16 @@ export default function SongEditPage() {
   const [isSongMetadataLoading, setIsSongMetadataLoading] = useState(false);
   const [songMetadataError, setSongMetadataError] = useState<string | null>(null);
   const [songMetadataResults, setSongMetadataResults] = useState<SongMetadataResult[]>([]);
+  const [isImportDiscoveryModalOpen, setIsImportDiscoveryModalOpen] = useState(false);
+  const [importDiscoveryTab, setImportDiscoveryTab] = useState<"bpm-key" | "lyrics">("bpm-key");
+  const [importDiscoveryMetadataState, setImportDiscoveryMetadataState] = useState<"loading" | "found" | "empty" | "error">("loading");
+  const [importDiscoveryMetadataError, setImportDiscoveryMetadataError] = useState("");
+  const [importDiscoveryMetadataResults, setImportDiscoveryMetadataResults] = useState<SongMetadataResult[]>([]);
+  const [importDiscoveryLyricsState, setImportDiscoveryLyricsState] = useState<"loading" | "found" | "empty" | "error">("loading");
+  const [importDiscoveryLyricsError, setImportDiscoveryLyricsError] = useState("");
+  const [importDiscoveryLyricsResults, setImportDiscoveryLyricsResults] = useState<GeniusSongSource[]>([]);
+  const [importDiscoveryLyricsSelection, setImportDiscoveryLyricsSelection] = useState<string | null>(null);
+  const importDiscoveryStartedRef = useRef(false);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1015,19 +1158,51 @@ function formatTimeWithMs(seconds: number) {
   const ytPlayerRef = useRef<any>(null);
   const isYtPlayerReadyRef = useRef<boolean>(false);
 
-  useEffect(() => {
-    if (!formYoutubeUrl.trim()) {
-      setYoutubeVideoId(null);
-      return;
+  const checkYoutubeDuplicate = async () => {
+    if (!formYoutubeUrl.trim() || !youtubeVideoId) return;
+    youtubeDuplicateCheckControllerRef.current?.abort();
+    const controller = new AbortController();
+    youtubeDuplicateCheckControllerRef.current = controller;
+    setYoutubeDuplicateCheck({ status: "checking", title: null, songId: null, visibility: null, message: null });
+    try {
+      const response = await fetch("/api/song-import/inspect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: formYoutubeUrl.trim(),
+          excludeSongId: editingSongId === "new" ? null : editingSongId,
+          duplicateOnly: true,
+        }),
+        signal: controller.signal,
+      });
+      const data = await response.json() as {
+        error?: string;
+        duplicate?: boolean;
+        existingSongId?: string | null;
+        existingSongTitle?: string | null;
+        existingSongVisibility?: "workspace" | "global" | null;
+      };
+      if (!response.ok) throw new Error(data.error || "The YouTube duplicate check could not be completed.");
+      if (controller.signal.aborted) return;
+      setYoutubeDuplicateCheck(data.duplicate ? {
+        status: "duplicate",
+        title: data.existingSongTitle || null,
+        songId: data.existingSongId || null,
+        visibility: data.existingSongVisibility || null,
+        message: null,
+      } : { status: "clear", title: null, songId: null, visibility: null, message: null });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      console.error("Could not check the song's YouTube URL for duplicates.", error);
+      setYoutubeDuplicateCheck({
+        status: "error",
+        title: null,
+        songId: null,
+        visibility: null,
+        message: error instanceof Error ? error.message : "The duplicate check could not be completed.",
+      });
     }
-    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-    const match = formYoutubeUrl.match(regExp);
-    if (match && match[2].length === 11) {
-      setYoutubeVideoId(match[2]);
-    } else {
-      setYoutubeVideoId(null);
-    }
-  }, [formYoutubeUrl]);
+  };
 
   useEffect(() => {
     if (tapTimestamps.length > 0) {
@@ -1136,13 +1311,31 @@ function formatTimeWithMs(seconds: number) {
 
   const [isFetchingLyrics, setIsFetchingLyrics] = useState(false);
   const [isScrapingSelection, setIsScrapingSelection] = useState(false);
-  const [fetchedLyricsOptions, setFetchedLyricsOptions] = useState<{title: string, artist: string, url?: string, lyrics?: string, type?: string, thumbnail?: string}[] | null>(null);
+  const [fetchedLyricsOptions, setFetchedLyricsOptions] = useState<{
+    title: string;
+    artist: string;
+    url?: string;
+    lyrics?: string;
+    type?: string;
+    thumbnail?: string;
+    sourceOnly?: boolean;
+  }[] | null>(null);
+  const [selectedGeniusSource, setSelectedGeniusSource] = useState<GeniusSongSource | null>(null);
 
   const handleSmartLyricsFetch = async () => {
     if (!formTitle.trim()) {
       alert("Please enter a Track Title first to search for lyrics.");
       return;
     }
+    if (selectedGeniusSource) {
+      setFetchedLyricsOptions([{
+        ...selectedGeniusSource,
+        type: "Selected for this song",
+        sourceOnly: true,
+      }]);
+      return;
+    }
+
     setIsFetchingLyrics(true);
     setFetchedLyricsOptions(null); 
 
@@ -1241,6 +1434,83 @@ function formatTimeWithMs(seconds: number) {
     } finally {
       setIsSongMetadataLoading(false);
     }
+  };
+
+  const runNewSongMetadataDiscovery = async (title: string, artist: string) => {
+    setIsImportDiscoveryModalOpen(true);
+    setImportDiscoveryTab("bpm-key");
+    setImportDiscoveryMetadataState("loading");
+    setImportDiscoveryMetadataError("");
+    setImportDiscoveryMetadataResults([]);
+    setImportDiscoveryLyricsState("loading");
+    setImportDiscoveryLyricsError("");
+    setImportDiscoveryLyricsResults([]);
+    setImportDiscoveryLyricsSelection(null);
+
+    const metadataSearch = fetch("/api/song-metadata", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, artist }),
+    }).then(async (response) => {
+      const data = await response.json() as { error?: string; results?: unknown };
+      if (!response.ok) throw new Error(data.error || "BPM and key search failed.");
+      if (!Array.isArray(data.results)) throw new Error("SongBPM returned an invalid response.");
+
+      const results = data.results.flatMap((result): SongMetadataResult[] => {
+        if (!result || typeof result !== "object") return [];
+        const candidate = result as Partial<SongMetadataResult>;
+        const key = typeof candidate.key === "string" ? normalizeMetadataKey(candidate.key) : "";
+        if (
+          typeof candidate.title !== "string" ||
+          typeof candidate.artist !== "string" ||
+          typeof candidate.bpm !== "number" ||
+          !Number.isInteger(candidate.bpm) ||
+          !key
+        ) return [];
+        return [{ title: candidate.title, artist: candidate.artist, bpm: candidate.bpm, key }];
+      });
+      setImportDiscoveryMetadataResults(results);
+      setImportDiscoveryMetadataState(results.length ? "found" : "empty");
+    }).catch((error: unknown) => {
+      console.error("New-song BPM and key discovery failed.", error);
+      setImportDiscoveryMetadataError(error instanceof Error ? error.message : "BPM and key search failed.");
+      setImportDiscoveryMetadataState("error");
+    });
+
+    const lyricsSearch = fetch(`/api/lyrics?action=search&q=${encodeURIComponent(`${title} ${artist}`)}`)
+      .then(async (response) => {
+        const data = await response.json() as {
+          error?: string;
+          results?: { title?: unknown; artist?: unknown; url?: unknown; thumbnail?: unknown }[];
+        };
+        if (response.status === 404) {
+          setImportDiscoveryLyricsState("empty");
+          return;
+        }
+        if (!response.ok) throw new Error(data.error || "Lyrics search failed.");
+        const results = (Array.isArray(data.results) ? data.results : []).flatMap((result): GeniusSongSource[] => {
+          if (
+            typeof result.title !== "string" ||
+            typeof result.artist !== "string" ||
+            typeof result.url !== "string" ||
+            !parseAllowedGeniusSongUrl(result.url)
+          ) return [];
+          return [{
+            title: result.title,
+            artist: result.artist,
+            url: result.url,
+            ...(typeof result.thumbnail === "string" ? { thumbnail: result.thumbnail } : {}),
+          }];
+        });
+        setImportDiscoveryLyricsResults(results);
+        setImportDiscoveryLyricsState(results.length ? "found" : "empty");
+      }).catch((error: unknown) => {
+        console.error("New-song lyrics discovery failed.", error);
+        setImportDiscoveryLyricsError(error instanceof Error ? error.message : "Lyrics search failed.");
+        setImportDiscoveryLyricsState("error");
+      });
+
+    await Promise.all([metadataSearch, lyricsSearch]);
   };
 
   const handleSelectSongMetadata = (result: SongMetadataResult) => {
@@ -1387,19 +1657,65 @@ function formatTimeWithMs(seconds: number) {
       if (!editingSongId) return;
       
       if (editingSongId === "new") {
-        const prefillTitle = searchParams.get("title") || "";
-        const prefillArtist = searchParams.get("artist") || "";
-        const prefillYoutubeUrl = searchParams.get("youtube_url") || "";
+        const routeSearchParams = new URLSearchParams(searchParamsString);
+        const prefillTitle = routeSearchParams.get("title") || "";
+        const prefillArtist = routeSearchParams.get("artist") || "";
+        const prefillYoutubeUrl = routeSearchParams.get("youtube_url") || "";
+        const prefillTempo = Number(routeSearchParams.get("tempo"));
+        const prefillKey = normalizeMetadataKey(routeSearchParams.get("key") || "");
+        const importedLyrics = window.sessionStorage.getItem("onpraise_song_import_lyrics") || "";
+        const selectedGeniusSourceValue = window.sessionStorage.getItem("onpraise_song_import_genius_source");
+        window.sessionStorage.removeItem("onpraise_song_import_lyrics");
+        window.sessionStorage.removeItem("onpraise_song_import_genius_source");
+
+        if (selectedGeniusSourceValue) {
+          try {
+            const candidate = JSON.parse(selectedGeniusSourceValue) as Partial<GeniusSongSource>;
+            if (
+              typeof candidate.title === "string" &&
+              typeof candidate.artist === "string" &&
+              typeof candidate.url === "string" &&
+              parseAllowedGeniusSongUrl(candidate.url)
+            ) {
+              setSelectedGeniusSource({
+                title: candidate.title,
+                artist: candidate.artist,
+                url: candidate.url,
+                ...(typeof candidate.thumbnail === "string" ? { thumbnail: candidate.thumbnail } : {}),
+              });
+              setEditorActiveTab("content");
+            }
+          } catch (error) {
+            console.error("Could not restore the selected Genius source.", error);
+          }
+        }
 
         if (prefillTitle) setFormTitle(prefillTitle);
         if (prefillArtist) setFormArtist(prefillArtist);
         if (prefillYoutubeUrl) setFormYoutubeUrl(prefillYoutubeUrl);
+        if (Number.isInteger(prefillTempo) && prefillTempo >= 30 && prefillTempo <= 300) setFormTempo(String(prefillTempo));
+        if (prefillKey) setFormKey(prefillKey);
+        if (
+          routeSearchParams.get("discover_metadata") === "1" &&
+          !importDiscoveryStartedRef.current &&
+          prefillTitle.trim() &&
+          prefillArtist.trim()
+        ) {
+          importDiscoveryStartedRef.current = true;
+          void runNewSongMetadataDiscovery(prefillTitle.trim(), prefillArtist.trim());
+        }
+        const prefillVisibility = routeSearchParams.get("visibility_scope");
+        setFormVisibilityScope(prefillVisibility === "global" ? "global" : "workspace");
+        if (importedLyrics.trim()) setFormSections(parseImportedLyrics(importedLyrics));
+        if (importedLyrics.trim()) setEditorActiveTab("content");
         
-        if (prefillTitle || prefillArtist || prefillYoutubeUrl) {
+        if (prefillTitle || prefillArtist || prefillYoutubeUrl || prefillTempo || prefillKey || importedLyrics.trim()) {
           setHasUnsavedChanges(true);
         }
 
-        setFormSections([{ id: "sec-1", type: "Verse 1", label: "Verse 1", content: "", repetitions: 1 }]);
+        if (!importedLyrics.trim()) {
+          setFormSections([{ id: "sec-1", type: "Verse 1", label: "Verse 1", content: "", repetitions: 1 }]);
+        }
         setLoading(false);
         return;
       }
@@ -1412,10 +1728,20 @@ function formatTimeWithMs(seconds: number) {
           .single();
 
         if (songFetchError || !song) throw songFetchError;
-        
+
+        const { data: songWorkspaces, error: songWorkspacesError } = await supabase
+          .from("song_workspace_access")
+          .select("team_id")
+          .eq("song_id", editingSongId);
+        if (songWorkspacesError) throw songWorkspacesError;
+        const assignedWorkspaceIds = Array.from(new Set((songWorkspaces || []).map((assignment) => assignment.team_id)));
+
         setFormTitle(song.title || "");
         setFormTempo(song.tempo || "");
-        setFormKey(song.original_key || ""); // ✅ SURGICAL FIX: Changed fallback from "G" to ""
+        setFormKey(song.key_signature || song.original_key || "");
+        setFormVisibilityScope(song.visibility_scope === "workspace" ? "workspace" : "global");
+        setSelectedWorkspaceIds(assignedWorkspaceIds.length ? assignedWorkspaceIds : song.team_id ? [song.team_id] : []);
+        setSongCreatorId(song.created_by || null);
         setFormArtist(song.artist || "");
         setFormYoutubeUrl(song.youtube_url || "");
         setFormYoutubeSyncOffset(song.youtube_sync_offset_ms || 0);
@@ -1495,15 +1821,20 @@ function formatTimeWithMs(seconds: number) {
       }
     };
     hydrateArrangementWorkspace();
-  }, [editingSongId]);
+  }, [editingSongId, searchParamsString]);
 
   useEffect(() => {
     const handleModalHardwareEscapeKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") handleAttemptDismissal();
+      if (e.key !== "Escape") return;
+      if (isImportDiscoveryModalOpen) {
+        setIsImportDiscoveryModalOpen(false);
+        return;
+      }
+      handleAttemptDismissal();
     };
     window.addEventListener("keydown", handleModalHardwareEscapeKey);
     return () => window.removeEventListener("keydown", handleModalHardwareEscapeKey);
-  }, [hasUnsavedChanges]);
+  }, [hasUnsavedChanges, isImportDiscoveryModalOpen]);
 
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -1660,6 +1991,7 @@ function formatTimeWithMs(seconds: number) {
         isKeyPopupOpen ||
         isTapBpmModalOpen ||
         isSongMetadataModalOpen ||
+        isImportDiscoveryModalOpen ||
         isTimelineChaptersOpen ||
         sectionModalConfig.isOpen ||
         sectionAdjustmentsConfig.isOpen ||
@@ -1740,6 +2072,7 @@ function formatTimeWithMs(seconds: number) {
     isKeyPopupOpen,
     isTapBpmModalOpen,
     isSongMetadataModalOpen,
+    isImportDiscoveryModalOpen,
     isTimelineChaptersOpen,
     sectionModalConfig.isOpen,
     sectionAdjustmentsConfig.isOpen,
@@ -1819,7 +2152,8 @@ function formatTimeWithMs(seconds: number) {
       sectionAdjustmentsConfig.isOpen || 
       sectionModalConfig.isOpen ||
       pendingTimelineSectionType !== null ||
-      isSongMetadataModalOpen;
+      isSongMetadataModalOpen ||
+      isImportDiscoveryModalOpen;
     
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("onpraise-ui-focus", { detail: isEditingFocused }));
@@ -1830,7 +2164,7 @@ function formatTimeWithMs(seconds: number) {
         window.dispatchEvent(new CustomEvent("onpraise-ui-focus", { detail: false }));
       }
     };
-  }, [chordMode, chordPickerConfig.isOpen, isSongMetadataModalOpen, pendingTimelineSectionType, sectionAdjustmentsConfig.isOpen, sectionModalConfig.isOpen]);
+  }, [chordMode, chordPickerConfig.isOpen, isImportDiscoveryModalOpen, isSongMetadataModalOpen, pendingTimelineSectionType, sectionAdjustmentsConfig.isOpen, sectionModalConfig.isOpen]);
 
 
   const handleCaptureSyncPoint = () => {
@@ -2583,6 +2917,11 @@ function formatTimeWithMs(seconds: number) {
   };
 
   const handleOpenImportModal = () => {
+    setFetchedLyricsOptions(selectedGeniusSource ? [{
+      ...selectedGeniusSource,
+      type: "Selected in song setup",
+      sourceOnly: true,
+    }] : null);
     const hasRealContent = formSections.some(sec => sec.content.trim() !== "");
     if (hasRealContent) {
       const rawString = formSections.map((sec) => {
@@ -2766,6 +3105,14 @@ function formatTimeWithMs(seconds: number) {
       alert("⚠️ Track Title is required before saving.");
       return;
     }
+    if (!workspaceOptionsLoaded) {
+      alert(workspaceLoadError || "Workspace memberships are still loading. Please wait before saving.");
+      return;
+    }
+    if (formVisibilityScope === "workspace" && selectedWorkspaceIds.length === 0) {
+      alert("Select at least one workspace or choose Global visibility.");
+      return;
+    }
     setSaveStatus("saving");
 
     try {
@@ -2834,6 +3181,10 @@ function formatTimeWithMs(seconds: number) {
           artist: formArtist.trim() || "Unknown Artist",
           tempo: parseInt(formTempo, 10) || 75,
           original_key: formKey,
+          key_signature: formKey,
+          visibility_scope: formVisibilityScope,
+          team_id: userTeamId || primaryTeamId || selectedWorkspaceIds[0] || null,
+          workspace_ids: selectedWorkspaceIds,
           themes: formThemes.join(", "),
           section_timings: updatedSectionTimings,
           chordpro_content: compiledChordPro,
@@ -3044,6 +3395,7 @@ function formatTimeWithMs(seconds: number) {
         isKeyPopupOpen ||
         isTapBpmModalOpen ||
         isSongMetadataModalOpen ||
+        isImportDiscoveryModalOpen ||
         isTimelineChaptersOpen ||
         chordPickerConfig.isOpen ||
         chordMode === "Keyboard" && chordTargetCoordinate !== null
@@ -3088,6 +3440,7 @@ function formatTimeWithMs(seconds: number) {
     handleAddTimelineSection,
     handleEditorTabChange,
     isConfirmExitModalOpen,
+    isImportDiscoveryModalOpen,
     isImportModalOpen,
     isKeyPopupOpen,
     isSongMetadataModalOpen,
@@ -3166,7 +3519,32 @@ function formatTimeWithMs(seconds: number) {
   });
 
   const isMismatched = isRealtimePreviewActive && isAnySectionMismatchedAcrossModal; 
-  const isSaveDisabled = isMismatched || !hasUnsavedChanges; 
+  const isSaveDisabled = isMismatched || !hasUnsavedChanges || isDeletingSong;
+  const canDeleteSong = editingSongId !== "new" && (
+    activeRole === "admin" ||
+    activeRole === "moderator" ||
+    (activeRole === "musician" && Boolean(simulatedUserId && songCreatorId === simulatedUserId))
+  );
+
+  const handleDeleteSong = async () => {
+    if (!canDeleteSong || isDeletingSong) return;
+    if (!window.confirm(`Permanently delete "${formTitle || "this song"}" and its arrangement sections?`)) return;
+
+    setIsDeletingSong(true);
+    try {
+      const { error } = await supabase.rpc("delete_song_with_sections", {
+        p_song_id: editingSongId,
+      });
+      if (error) throw error;
+      router.replace("/songs");
+      router.refresh();
+    } catch (error) {
+      console.error("Could not delete the song and its sections.", error);
+      const message = error instanceof Error ? error.message : "An unexpected error occurred.";
+      window.alert(`Could not delete this song: ${message}`);
+      setIsDeletingSong(false);
+    }
+  };
   
   return (
     <div 
@@ -3190,7 +3568,19 @@ function formatTimeWithMs(seconds: number) {
           
          {/* Desktop Control Panel */}
           <div className="hidden md:flex items-center gap-2 select-none">
-            {editorActiveTab === "content" && (
+           {canDeleteSong && (
+             <button
+               type="button"
+               disabled={isDeletingSong}
+               onClick={() => void handleDeleteSong()}
+               className="px-3 py-1.5 rounded-lg border border-error/30 bg-error/10 text-error hover:bg-error/20 disabled:opacity-50 font-black text-[11px] uppercase tracking-wider transition-colors flex items-center"
+               title="Delete song"
+             >
+               <span className="material-symbols-outlined !text-[14px] mr-1">delete</span>
+               {isDeletingSong ? "Deleting…" : "Delete"}
+             </button>
+           )}
+           {editorActiveTab === "content" && (
               <>
                 <button type="button" onClick={handleOpenImportModal} className="px-3 py-1.5 text-[11px] font-black text-primary bg-primary-container/20 border border-primary/20 hover:bg-primary-container/40 rounded-lg shadow-sm flex items-center transition-colors">
                   <span className="material-symbols-outlined !text-[14px] mr-1">download</span> Import Raw
@@ -3212,7 +3602,7 @@ function formatTimeWithMs(seconds: number) {
             )}
 
             <div className="w-px h-6 bg-outline-variant/30 mx-1" />
-            {(activeRole === "admin" || activeRole === "member") && (
+            {canSaveSong && (
               <button 
                 type="button" 
                 disabled={isSaveDisabled} 
@@ -3234,7 +3624,19 @@ function formatTimeWithMs(seconds: number) {
             </div>
 
             <div className="md:hidden flex items-center py-1.5">
-              {(activeRole === "admin" || activeRole === "member") && (
+              {canDeleteSong && (
+                <button
+                  type="button"
+                  disabled={isDeletingSong}
+                  onClick={() => void handleDeleteSong()}
+                  className="mr-2 rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-error disabled:opacity-50"
+                  title="Delete song"
+                  aria-label="Delete song"
+                >
+                  <span className="material-symbols-outlined !text-[16px]">delete</span>
+                </button>
+              )}
+              {canSaveSong && (
                 <button 
                   type="button" 
                   disabled={isSaveDisabled} 
@@ -3335,6 +3737,89 @@ function formatTimeWithMs(seconds: number) {
                   <div className="absolute top-full left-0 right-0 mt-0.5 bg-surface-container-high border border-outline-variant/50 rounded-xl max-h-36 overflow-y-auto z-[3000] shadow-xl">{filteredThemeCatalogSuggestions.map(th => <button key={th} type="button" className="w-full px-3 py-2 text-left text-xs font-bold block border-b border-outline-variant/30 text-on-surface hover:bg-surface-bright" onClick={() => { setHasUnsavedChanges(true); setFormThemes([...formThemes, th]); setThemeInputSearchValue(""); }}>{th}</button>)}</div>
                 )}
               </div>
+              <div className="rounded-xl border border-outline-variant/30 bg-surface-container p-3">
+                <div className="grid gap-3">
+                  <div>
+                    <label htmlFor="song-visibility" className="text-[10px] font-black uppercase tracking-widest text-on-surface">Song Availability</label>
+                    <p className="mt-1 text-[10px] leading-relaxed text-on-surface-variant">
+                      {formVisibilityScope === "global"
+                        ? "Global songs appear in every workspace's shared library. Approval status and review rules still apply."
+                        : "Choose the workspaces whose members can access this song."}
+                    </p>
+                  </div>
+                  <select
+                    id="song-visibility"
+                    value={formVisibilityScope}
+                    disabled={editingSongId !== "new" && songCreatorId !== simulatedUserId && activeRole !== "admin" && activeRole !== "moderator"}
+                    onChange={(event) => {
+                      const nextScope = event.target.value as "workspace" | "global";
+                      if (nextScope === formVisibilityScope) return;
+                      setFormVisibilityScope(nextScope);
+                      if (nextScope === "workspace" && selectedWorkspaceIds.length === 0) {
+                        const defaultWorkspaceId = userTeamId || primaryTeamId || availableWorkspaces[0]?.id;
+                        if (defaultWorkspaceId && availableWorkspaces.some((workspace) => workspace.id === defaultWorkspaceId)) {
+                          setSelectedWorkspaceIds([defaultWorkspaceId]);
+                        }
+                      }
+                      setHasUnsavedChanges(true);
+                    }}
+                    className="w-full rounded-lg border border-outline-variant/40 bg-surface-container-lowest px-3 py-2 text-xs font-bold text-on-surface outline-none focus:border-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="workspace">Selected workspaces</option>
+                    <option value="global">Global library</option>
+                  </select>
+
+                  {formVisibilityScope === "workspace" && (
+                    <details className="group relative">
+                      <summary
+                        aria-label="Choose workspaces for this song"
+                        className="flex cursor-pointer list-none items-center justify-between rounded-lg border border-outline-variant/40 bg-surface-container-lowest px-3 py-2 text-xs font-bold text-on-surface"
+                      >
+                        <span>
+                          {selectedWorkspaceIds.length
+                            ? `${selectedWorkspaceIds.length} workspace${selectedWorkspaceIds.length === 1 ? "" : "s"} selected`
+                            : "Select workspaces"}
+                        </span>
+                        <span className="material-symbols-outlined text-base transition-transform group-open:rotate-180">expand_more</span>
+                      </summary>
+                      <div className="absolute left-0 right-0 top-full z-[3000] mt-1 max-h-56 overflow-y-auto rounded-xl border border-outline-variant/40 bg-surface-container-high p-2 shadow-xl">
+                        {!workspaceOptionsLoaded && !workspaceLoadError && (
+                          <p className="px-2 py-2 text-[10px] text-on-surface-variant">Loading your workspace memberships…</p>
+                        )}
+                        {workspaceLoadError && (
+                          <p role="alert" className="px-2 py-2 text-[10px] font-bold text-error">{workspaceLoadError}</p>
+                        )}
+                        {workspaceOptionsLoaded && availableWorkspaces.length === 0 && (
+                          <p className="px-2 py-2 text-[10px] text-on-surface-variant">No workspace memberships were found.</p>
+                        )}
+                        {availableWorkspaces.map((workspace) => (
+                          <label key={workspace.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs text-on-surface hover:bg-surface-container-highest">
+                            <input
+                              type="checkbox"
+                              checked={selectedWorkspaceIds.includes(workspace.id)}
+                              disabled={!workspaceOptionsLoaded || (editingSongId !== "new" && songCreatorId !== simulatedUserId && activeRole !== "admin" && activeRole !== "moderator")}
+                              onChange={(event) => {
+                                setSelectedWorkspaceIds((current) => event.target.checked
+                                  ? Array.from(new Set([...current, workspace.id]))
+                                  : current.filter((id) => id !== workspace.id));
+                                setHasUnsavedChanges(true);
+                              }}
+                              className="accent-primary"
+                            />
+                            <span>{workspace.name}</span>
+                            {workspace.id === (userTeamId || primaryTeamId) && (
+                              <span className="ml-auto text-[9px] font-bold uppercase tracking-wide text-primary">Current</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                  {formVisibilityScope === "workspace" && selectedWorkspaceIds.length === 0 && (
+                    <p className="text-[10px] font-bold text-error">Select at least one workspace.</p>
+                  )}
+                </div>
+              </div>
               <div className="pt-4 mt-2 border-t border-outline-variant/30 space-y-4">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-full bg-error/10 text-error flex items-center justify-center font-black text-xs shrink-0 shadow-inner">
@@ -3366,12 +3851,40 @@ function formatTimeWithMs(seconds: number) {
                     <input 
                       type="text" 
                       value={formYoutubeUrl} 
-                      onChange={e => { setHasUnsavedChanges(true); setFormYoutubeUrl(e.target.value); }} 
+                      onChange={e => { youtubeDuplicateCheckControllerRef.current?.abort(); setHasUnsavedChanges(true); setYoutubeDuplicateCheck({ status: "idle", title: null, songId: null, visibility: null, message: null }); setFormYoutubeUrl(e.target.value); }} 
+                      onBlur={() => void checkYoutubeDuplicate()}
                       className={`w-full border focus:border-error rounded-xl p-2.5 text-xs font-bold text-on-surface outline-none transition-all ${formYoutubeUrl && !youtubeVideoId ? 'border-error/50 bg-error/10' : 'border-outline-variant/30 bg-surface-container'}`} 
                       placeholder="https://youtu.be/..." 
                     />
                     {formYoutubeUrl && !youtubeVideoId && <span className="text-[9px] font-bold text-error absolute top-1 right-2">Invalid Link</span>}
                   </div>
+                  {youtubeDuplicateCheck.status === "checking" && (
+                    <p role="status" className="text-xs text-on-surface-variant">Checking whether this video is already used…</p>
+                  )}
+                  {youtubeDuplicateCheck.status === "clear" && (
+                    <p role="status" className="text-xs text-emerald-500">No other song currently uses this YouTube video.</p>
+                  )}
+                  {youtubeDuplicateCheck.status === "duplicate" && (
+                    <div className="rounded-xl border border-secondary/30 bg-secondary/5 p-3 text-xs text-on-surface">
+                      <p className="font-bold">Another song already uses this video.</p>
+                      <p className="mt-1 text-on-surface-variant">
+                        {youtubeDuplicateCheck.title
+                          ? `Existing ${youtubeDuplicateCheck.visibility === "global" ? "global" : "workspace"} song: ${youtubeDuplicateCheck.title}.`
+                          : "The existing song is not available in your workspace, so its details are hidden."}
+                        {" "}You can still save this song as a separate variant, such as a medley.
+                      </p>
+                      {youtubeDuplicateCheck.songId && (
+                        <a href={`/songs/${youtubeDuplicateCheck.songId}`} className="mt-2 inline-block font-bold text-secondary underline">
+                          Open existing song
+                        </a>
+                      )}
+                    </div>
+                  )}
+                  {youtubeDuplicateCheck.status === "error" && (
+                    <p role="alert" className="text-xs text-error">
+                      {youtubeDuplicateCheck.message} You can retry by leaving the URL field again.
+                    </p>
+                  )}
 
                 </div>
               </div>
@@ -4751,7 +5264,9 @@ function formatTimeWithMs(seconds: number) {
             
             <div className="flex justify-between items-center">
               <h4 className="text-base font-black">
-                {fetchedLyricsOptions ? "Select Lyrics Version" : "Import / Edit Plain Text"}
+                {fetchedLyricsOptions?.some((option) => option.sourceOnly)
+                  ? "Selected Genius Source"
+                  : fetchedLyricsOptions ? "Select Lyrics Version" : "Import / Edit Plain Text"}
               </h4>
               
               {!fetchedLyricsOptions && (
@@ -4771,14 +5286,25 @@ function formatTimeWithMs(seconds: number) {
 
             {fetchedLyricsOptions ? (
               <div className="space-y-3 max-h-[55vh] overflow-y-auto custom-scrollbar pr-2 animate-in fade-in zoom-in-95 duration-200">
+                {fetchedLyricsOptions.some((option) => option.sourceOnly) && (
+                  <p className="text-xs text-on-surface-variant">
+                    This is the exact Genius result selected during song setup. Lyrics are not copied into the editor; open the source and use text you have permission to enter.
+                  </p>
+                )}
                 {fetchedLyricsOptions.map((opt, idx) => (
                   <button 
                     key={idx}
                     type="button"
-                    disabled={isScrapingSelection}
-                    onClick={() => handleSelectLyricsCard(opt)}
+                    disabled={isScrapingSelection && !opt.sourceOnly}
+                    onClick={() => {
+                      if (opt.sourceOnly && opt.url) {
+                        window.open(opt.url, "_blank", "noopener,noreferrer");
+                        return;
+                      }
+                      void handleSelectLyricsCard(opt);
+                    }}
                     className={`w-full text-left p-3.5 border border-outline-variant/30 rounded-xl transition-all group shadow-sm bg-surface-container-lowest flex gap-4 items-center ${
-                      isScrapingSelection ? 'opacity-50 cursor-wait' : 'hover:bg-purple-500/10 hover:border-purple-500/30 cursor-pointer'
+                      isScrapingSelection && !opt.sourceOnly ? 'opacity-50 cursor-wait' : 'hover:bg-purple-500/10 hover:border-purple-500/30 cursor-pointer'
                     }`}
                   >
                     {opt.thumbnail ? (
@@ -4792,12 +5318,17 @@ function formatTimeWithMs(seconds: number) {
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-start mb-0.5">
                         <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded shadow-sm ${idx === 0 ? 'text-purple-400 bg-purple-500/20' : 'text-on-surface-variant bg-surface-container-high'}`}>
-                        {isScrapingSelection ? "Processing Plain Lyrics..." : opt.type || "Alternative Version"}
+                        {opt.sourceOnly ? "Selected Genius source" : isScrapingSelection ? "Processing Plain Lyrics..." : opt.type || "Alternative Version"}
                       </span>
                       </div>
                       <h5 className="font-black text-on-surface text-[15px] tracking-tight truncate">{opt.title}</h5>
                       <p className="text-[11px] font-bold text-on-surface-variant truncate">{opt.artist}</p>
                     </div>
+                    {opt.sourceOnly && (
+                      <span className="shrink-0 rounded-lg border border-outline-variant/40 px-3 py-2 text-[10px] font-black text-on-surface-variant">
+                        Open Genius
+                      </span>
+                    )}
                   </button>
                 ))}
                 
@@ -4923,6 +5454,147 @@ function formatTimeWithMs(seconds: number) {
             <div className="text-5xl font-black text-on-surface tracking-tighter">{formTempo || "--"} <span className="text-sm font-bold text-on-surface-variant tracking-normal">BPM</span></div>
             <button type="button" onClick={(e) => { e.preventDefault(); const now = Date.now(); setTapTimestamps(prev => { if (prev.length > 0 && now - prev[prev.length - 1] > 2500) return [now]; const newTaps = [...prev, now]; if (newTaps.length >= 2) { const intervals = []; for (let i = 1; i < newTaps.length; i++) intervals.push(newTaps[i] - newTaps[i - 1]); const averageInterval = intervals.reduce((sum, val) => sum + val, 0) / intervals.length; setFormTempo(Math.round(60000 / averageInterval).toString()); setHasUnsavedChanges(true); } return newTaps; }); }} className="w-full h-32 bg-primary hover:bg-primary/90 text-on-primary font-black text-3xl rounded-3xl shadow-lg flex items-center justify-center cursor-pointer active:scale-95 transition-transform">TAP</button>
             <button type="button" onClick={() => setIsTapBpmModalOpen(false)} className="w-full py-3.5 bg-surface-container-high hover:bg-surface-bright text-on-surface font-black text-[11px] uppercase rounded-xl cursor-pointer border border-outline-variant/30">Confirm & Close</button>
+          </div>
+        </div>
+      )}
+
+      {isImportDiscoveryModalOpen && (
+        <div className="fixed inset-0 z-[200000] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-song-discovery-title"
+            className="flex max-h-[88dvh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-outline-variant/30 bg-surface-container shadow-2xl"
+          >
+            <header className="border-b border-outline-variant/30 p-5">
+              <h2 id="new-song-discovery-title" className="text-base font-black text-on-surface">Song metadata suggestions</h2>
+              <p className="mt-1 text-xs text-on-surface-variant">
+                Searching for {formTitle} — {formArtist}. Select only results that match this song version. You can continue without any result.
+              </p>
+            </header>
+            <div className="grid grid-cols-2 gap-1 border-b border-outline-variant/30 bg-surface-container-low p-2" role="tablist" aria-label="New song metadata">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={importDiscoveryTab === "bpm-key"}
+                onClick={() => setImportDiscoveryTab("bpm-key")}
+                className={`rounded-lg px-3 py-2 text-xs font-black ${importDiscoveryTab === "bpm-key" ? "bg-primary text-on-primary" : "text-on-surface-variant hover:bg-surface-container-high"}`}
+              >
+                Key &amp; BPM
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={importDiscoveryTab === "lyrics"}
+                onClick={() => setImportDiscoveryTab("lyrics")}
+                className={`rounded-lg px-3 py-2 text-xs font-black ${importDiscoveryTab === "lyrics" ? "bg-primary text-on-primary" : "text-on-surface-variant hover:bg-surface-container-high"}`}
+              >
+                Lyrics · Genius
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+              {importDiscoveryTab === "bpm-key" ? (
+                <section role="tabpanel" className="space-y-3">
+                  <p className="text-[11px] text-on-surface-variant">
+                    BPM and key suggestions are from SongBPM. Choose them independently; selecting a suggestion fills the Details fields.
+                  </p>
+                  {importDiscoveryMetadataState === "loading" && <p role="status" className="py-4 text-center text-sm text-on-surface-variant">Searching SongBPM…</p>}
+                  {importDiscoveryMetadataState === "empty" && <p className="text-sm text-on-surface-variant">No BPM/key results. You can enter these manually in Details.</p>}
+                  {importDiscoveryMetadataState === "error" && <p role="alert" className="text-sm text-error">{importDiscoveryMetadataError} You can continue and fill these in later.</p>}
+                  {importDiscoveryMetadataResults.map((result, index) => (
+                    <div key={`${result.title}-${result.artist}-${result.bpm}-${index}`} className="rounded-xl border border-outline-variant/30 bg-surface-container-lowest p-3">
+                      <p className="text-sm font-bold text-on-surface">{result.title} · {result.artist}</p>
+                      <p className="mt-1 text-xs text-on-surface-variant">{result.bpm} BPM · Key {result.key}</p>
+                      <div className="mt-2 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => { setFormTempo(String(result.bpm)); setHasUnsavedChanges(true); }}
+                          className={`rounded-lg px-3 py-1.5 text-xs font-bold ${formTempo === String(result.bpm) ? "bg-secondary text-on-secondary" : "bg-surface-container-high text-on-surface"}`}
+                        >
+                          Use {result.bpm} BPM
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setFormKey(result.key); setHasUnsavedChanges(true); }}
+                          className={`rounded-lg px-3 py-1.5 text-xs font-bold ${formKey === result.key ? "bg-secondary text-on-secondary" : "bg-surface-container-high text-on-surface"}`}
+                        >
+                          Use key {result.key}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {importDiscoveryMetadataState !== "loading" && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="text-xs font-bold text-on-surface-variant">
+                        BPM
+                        <input
+                          type="number"
+                          min="30"
+                          max="300"
+                          value={formTempo}
+                          onChange={(event) => { setFormTempo(event.target.value); setHasUnsavedChanges(true); }}
+                          className="mt-1 w-full rounded-lg border border-outline-variant/40 bg-surface-container-lowest px-3 py-2 text-on-surface"
+                        />
+                      </label>
+                      <label className="text-xs font-bold text-on-surface-variant">
+                        Key
+                        <input
+                          value={formKey}
+                          onChange={(event) => { setFormKey(event.target.value); setHasUnsavedChanges(true); }}
+                          className="mt-1 w-full rounded-lg border border-outline-variant/40 bg-surface-container-lowest px-3 py-2 text-on-surface"
+                        />
+                      </label>
+                    </div>
+                  )}
+                </section>
+              ) : (
+                <section role="tabpanel" className="space-y-3">
+                  <p className="text-[11px] text-on-surface-variant">
+                    Select the correct Genius source for this version. Lyrics are not copied automatically; use Genius to view the source and only enter text you are authorized to use.
+                  </p>
+                  {importDiscoveryLyricsState === "loading" && <p role="status" className="py-4 text-center text-sm text-on-surface-variant">Searching Genius…</p>}
+                  {importDiscoveryLyricsState === "empty" && <p className="text-sm text-on-surface-variant">No Genius matches found. You can continue without selecting a source.</p>}
+                  {importDiscoveryLyricsState === "error" && <p role="alert" className="text-sm text-error">{importDiscoveryLyricsError} You can continue without a lyrics source.</p>}
+                  {importDiscoveryLyricsResults.map((result) => (
+                    <div key={result.url} className={`flex items-center gap-3 rounded-xl border p-3 ${importDiscoveryLyricsSelection === result.url ? "border-secondary/50 bg-secondary/5" : "border-outline-variant/30 bg-surface-container-lowest"}`}>
+                      {result.thumbnail && <img src={result.thumbnail} alt="" className="h-12 w-12 shrink-0 rounded-lg object-cover" />}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-bold text-on-surface">{result.title}</p>
+                        <p className="truncate text-xs text-on-surface-variant">{result.artist}</p>
+                      </div>
+                      <button
+                        type="button"
+                        aria-pressed={importDiscoveryLyricsSelection === result.url}
+                        onClick={() => {
+                          setSelectedGeniusSource(result);
+                          setImportDiscoveryLyricsSelection(result.url);
+                        }}
+                        className={`shrink-0 rounded-lg px-3 py-2 text-xs font-bold ${importDiscoveryLyricsSelection === result.url ? "bg-secondary text-on-secondary" : "bg-surface-container-high text-on-surface"}`}
+                      >
+                        {importDiscoveryLyricsSelection === result.url ? "Selected" : "Select"}
+                      </button>
+                      <a href={result.url} target="_blank" rel="noreferrer" className="shrink-0 rounded-lg border border-outline-variant/40 px-3 py-2 text-xs font-bold text-on-surface-variant">
+                        Open
+                      </a>
+                    </div>
+                  ))}
+                  {selectedGeniusSource && (
+                    <p className="text-xs text-secondary">
+                      Selected source: {selectedGeniusSource.title} · {selectedGeniusSource.artist}
+                    </p>
+                  )}
+                </section>
+              )}
+            </div>
+            <footer className="border-t border-outline-variant/30 p-4">
+              <button
+                type="button"
+                onClick={() => setIsImportDiscoveryModalOpen(false)}
+                className="w-full rounded-xl bg-primary px-4 py-3 text-xs font-black uppercase tracking-wide text-on-primary"
+              >
+                Continue to song editor
+              </button>
+            </footer>
           </div>
         </div>
       )}

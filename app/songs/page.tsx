@@ -8,6 +8,10 @@ import { getAllSongs } from "../../utils/supabase/actions";
 import PageSkeleton from '../../components/PageSkeleton';
 
 import { getSongContentType, SongContentType } from "../setlists/[id]/live/utils/setlist-helpers";
+import {
+  extractYouTubeVideoId,
+  suggestSongFromYouTubeTitle,
+} from "../../lib/youtube-import";
 
 const KEYWORD_SUGGESTIONS_CATALOG = [
   { token: ":artist:", hint: "Filter by author or band name" },
@@ -82,6 +86,7 @@ export default function SongsListPage() {
     title?: string;
     artist?: string;
     original_key?: string;
+    key_signature?: string;
     tempo?: number | string;
     chordpro_content?: string;
     approval_status?: string;
@@ -89,6 +94,7 @@ export default function SongsListPage() {
     is_youtube_sync_validated?: boolean;
     themes?: string;
     created_by?: string; // ✅ SURGICAL ADDITION: Needed to track ownership
+    visibility_scope?: "workspace" | "global";
   };
 
   const [loading, setLoading] = useState(true);
@@ -151,6 +157,53 @@ export default function SongsListPage() {
   const [ytUrlInput, setYtUrlInput] = useState("");
   const [ytLoading, setYtLoading] = useState(false);
   const [ytError, setYtError] = useState("");
+  const [importStep, setImportStep] = useState<"url" | "confirm">("url");
+  const [importVideo, setImportVideo] = useState<{
+    id: string;
+    url: string;
+    title: string;
+    thumbnailUrl: string | null;
+    versionNote: string | null;
+  } | null>(null);
+  const [importTitle, setImportTitle] = useState("");
+  const [importArtist, setImportArtist] = useState("");
+  const [duplicateSong, setDuplicateSong] = useState<{
+    id: string | null;
+    title: string | null;
+    visibility: "workspace" | "global" | null;
+  } | null>(null);
+  const importInspectionInFlight = useRef(false);
+  const importGenerationRef = useRef(0);
+  const importControllersRef = useRef<AbortController[]>([]);
+
+  const resetSongImport = () => {
+    importGenerationRef.current += 1;
+    importControllersRef.current.forEach((controller) => controller.abort());
+    importControllersRef.current = [];
+    importInspectionInFlight.current = false;
+    setYtUrlInput("");
+    setYtLoading(false);
+    setYtError("");
+    setYtSearchQuery("");
+    setYtResults([]);
+    setIsSearchingYt(false);
+    setIsYtDropdownOpen(false);
+    setImportStep("url");
+    setImportVideo(null);
+    setImportTitle("");
+    setImportArtist("");
+    setDuplicateSong(null);
+  };
+
+  const openSongImport = () => {
+    resetSongImport();
+    setIsAddModalOpen(true);
+  };
+
+  const closeSongImport = () => {
+    setIsAddModalOpen(false);
+    resetSongImport();
+  };
 
   // YouTube Search Engine States
   const [ytSearchQuery, setYtSearchQuery] = useState("");
@@ -179,6 +232,7 @@ export default function SongsListPage() {
   const userSubmittedSongsCount = allDatabaseSongs.filter(song => song.created_by === simulatedUserId).length;
 
   const loadSongsData = async () => {
+    setLoading(true);
     try {
       const songs = await getAllSongs();
       setAllDatabaseSongs(songs || []);
@@ -250,8 +304,12 @@ export default function SongsListPage() {
         });
       }
       setSongUsageData(usageMap);
-    } catch (e) { console.error("Failed to load songs assets:", e); }
-    setLoading(false);
+    } catch (e) {
+      console.error("Failed to load songs assets:", e);
+      setAllDatabaseSongs([]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -266,7 +324,7 @@ export default function SongsListPage() {
     syncActiveUserBookmarksMatrix();
   }, [simulatedUserId]);
 
-  useEffect(() => { loadSongsData(); }, [userTeamId]);
+  useEffect(() => { void loadSongsData(); }, [userTeamId]);
 
   const handleToggleBookmark = async (e: React.MouseEvent, songId: string) => {
     e.stopPropagation();
@@ -312,52 +370,95 @@ export default function SongsListPage() {
     }
   };
 
-  const handleSelectYouTubeVideo = async (videoId: string, title: string) => {
-    const generatedUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    
-    const { data: existingSong } = await supabase
-      .from('songs')
-      .select('id')
-      .ilike('youtube_url', `%${videoId}%`)
-      .maybeSingle();
-
-    if (existingSong) {
-      alert(`"${title}" is already in the database! Redirecting you now...`);
-      router.push(`/songs/${existingSong.id}`);
-    } else {
-      setYtUrlInput(generatedUrl);
-      setYtSearchQuery("");
-      setYtResults([]);
-      setIsYtDropdownOpen(false);
-    }
+  const handleSelectYouTubeVideo = (videoId: string) => {
+    setYtUrlInput(`https://www.youtube.com/watch?v=${videoId}`);
+    setYtSearchQuery("");
+    setYtResults([]);
+    setIsYtDropdownOpen(false);
   };
 
   const handleProcessYoutubeLink = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!ytUrlInput.trim()) return;
-    setYtLoading(true); setYtError("");
+    if (!ytUrlInput.trim() || importInspectionInFlight.current) return;
+    const generation = importGenerationRef.current;
+    const controller = new AbortController();
+    importControllersRef.current.push(controller);
+    importInspectionInFlight.current = true;
+    setYtLoading(true);
+    setYtError("");
+    setDuplicateSong(null);
     try {
-      const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-      const match = ytUrlInput.match(regExp);
-      const ytId = match && match[2].length === 11 ? match[2] : null;
-      if (!ytId) throw new Error("Invalid YouTube link.");
-      const { data: existingSongs, error: dbError } = await supabase.from("songs").select("id, title").ilike("youtube_url", `%${ytId}%`).limit(1);
-      if (dbError) throw new Error("Database scan failed.");
-      if (existingSongs && existingSongs.length > 0) {
-        alert(`"${existingSongs[0].title}" is already in the database! Redirecting...`);
-        router.push(`/songs/${existingSongs[0].id}`);
-        return;
+      const response = await fetch("/api/song-import/inspect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: ytUrlInput }),
+        signal: controller.signal,
+      });
+      if (generation !== importGenerationRef.current) return;
+      const data = await response.json() as {
+        error?: string;
+        duplicate?: boolean;
+        existingSongId?: string | null;
+        existingSongTitle?: string | null;
+        existingSongVisibility?: "workspace" | "global" | null;
+        videoId?: string;
+        youtubeUrl?: string;
+        videoTitle?: string;
+        thumbnailUrl?: string | null;
+      };
+      if (!response.ok) throw new Error(data.error || "The YouTube link could not be checked.");
+
+      if (!data.videoId || !data.youtubeUrl || !data.videoTitle) {
+        throw new Error("YouTube returned incomplete video details.");
       }
-      const oembedRes = await fetch(`https://noembed.com/embed?url=${encodeURIComponent(ytUrlInput)}`);
-      const metadata = await oembedRes.json();
-      if (metadata.error) throw new Error("Could not fetch video metadata.");
-      const searchParams = new URLSearchParams({ title: metadata.title || "", artist: metadata.author_name || "", youtube_url: ytUrlInput });
-      setIsAddModalOpen(false); setYtUrlInput("");
-      router.push(`/songs/new/edit?${searchParams.toString()}`);
+
+      setDuplicateSong(data.duplicate ? {
+        id: data.existingSongId || null,
+        title: data.existingSongTitle || null,
+        visibility: data.existingSongVisibility || null,
+      } : null);
+      const suggestion = suggestSongFromYouTubeTitle(data.videoTitle);
+      setImportVideo({
+        id: data.videoId,
+        url: data.youtubeUrl,
+        title: data.videoTitle,
+        thumbnailUrl: data.thumbnailUrl || null,
+        versionNote: suggestion.versionNote,
+      });
+      setImportTitle(suggestion.title);
+      setImportArtist(suggestion.artist === "Unknown Artist" ? "" : suggestion.artist);
+      setImportStep("confirm");
     } catch (err: unknown) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      if (generation !== importGenerationRef.current) return;
       const message = err instanceof Error ? err.message : "An unexpected error occurred.";
       setYtError(message);
-    } finally { setYtLoading(false); }
+    } finally {
+      if (generation === importGenerationRef.current) {
+        importInspectionInFlight.current = false;
+        setYtLoading(false);
+      }
+    }
+  };
+
+  const continueToSongEditor = () => {
+    if (!importVideo || !importTitle.trim() || !importArtist.trim()) return;
+    try {
+      sessionStorage.removeItem("onpraise_song_import_lyrics");
+      sessionStorage.removeItem("onpraise_song_import_genius_source");
+    } catch (error) {
+      console.error("Could not clear previous imported song metadata.", error);
+    }
+
+    const params = new URLSearchParams({
+      title: importTitle.trim(),
+      artist: importArtist.trim(),
+      youtube_url: importVideo.url,
+      imported: "1",
+      discover_metadata: "1",
+    });
+    setIsAddModalOpen(false);
+    router.push(`/songs/new/edit?${params.toString()}`);
   };
 
   const handleSearchInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -434,10 +535,11 @@ export default function SongsListPage() {
   // Filter Engine
   const filteredSongs = allDatabaseSongs.filter(song => {
     const q = songSearchQuery.replace(/:[a-z-]*$/i, "").trim().toLowerCase();
-    if (q && !(song.title?.toLowerCase().includes(q) || song.artist?.toLowerCase().includes(q) || song.original_key?.toLowerCase().includes(q))) return false;
+    const songKey = song.key_signature || song.original_key;
+    if (q && !(song.title?.toLowerCase().includes(q) || song.artist?.toLowerCase().includes(q) || songKey?.toLowerCase().includes(q))) return false;
     
     if (activeFilters.artist && !song.artist?.toLowerCase().includes(activeFilters.artist.toLowerCase())) return false;
-    if (activeFilters.key && !song.original_key?.toLowerCase().includes(activeFilters.key.toLowerCase())) return false;
+    if (activeFilters.key && !songKey?.toLowerCase().includes(activeFilters.key.toLowerCase())) return false;
     if (activeFilters.theme && !song.themes?.toLowerCase().includes(activeFilters.theme.toLowerCase())) return false;
     if (activeFilters.lyrics && !song.chordpro_content?.toLowerCase().includes(activeFilters.lyrics.toLowerCase())) return false;
     if (activeFilters.bpm && String(song.tempo) !== activeFilters.bpm) return false;
@@ -510,7 +612,7 @@ export default function SongsListPage() {
         <div className="flex items-center gap-3">
           {canEditLibrary && (
             <button 
-              onClick={() => setIsAddModalOpen(true)}
+              onClick={openSongImport}
               className="w-10 h-10 rounded-full bg-primary-container text-on-primary flex items-center justify-center shadow-lg active:scale-95 transition-transform cursor-pointer border border-primary/20"
             >
               <span className="material-symbols-outlined text-[24px]">add</span>
@@ -518,10 +620,10 @@ export default function SongsListPage() {
           )}
           <div className="flex flex-col">
             <h1 className="text-[20px] font-extrabold tracking-tight leading-tight">Songs</h1>
-            <span className="font-label-sm text-[11px] text-on-surface-variant">{allDatabaseSongs.length} Live Arrangements</span>
+            <span className="font-label-sm text-[11px] text-on-surface-variant">{allDatabaseSongs.length} Songs in library</span>
           </div>
         </div>
-        
+
         {/* ✅ SURGICAL FIX: Stacked Action Buttons */}
         <div className="flex flex-col items-end shrink-0">
           {canApproveSongs && pendingSongsCount > 0 && (
@@ -697,9 +799,13 @@ export default function SongsListPage() {
           const isBookmarked = bookmarkedSongIds.includes(song.id);
           const contentType = getSongContentType(song.chordpro_content);
           const usageInfo = songUsageData[song.id] || { pastEventCount: 0 };
+          const canEditThisSong = canEditLibrary && (
+            song.visibility_scope !== "global" ||
+            song.created_by === simulatedUserId ||
+            canApproveSongs
+          );
           
-          // Extract the 11-character YouTube ID if a link exists
-          const ytId = song.youtube_url ? song.youtube_url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/)?.[1] : null;
+          const ytId = song.youtube_url ? extractYouTubeVideoId(song.youtube_url) : null;
 
           return (
             <article 
@@ -724,6 +830,12 @@ export default function SongsListPage() {
 
               {/* Badges Row */}
               <div className="flex flex-wrap items-center gap-1.5 mb-4 pr-8 relative z-10">
+                {song.visibility_scope === "global" && (
+                  <span className="h-5 inline-flex items-center gap-1 rounded-full border border-secondary/30 bg-secondary/10 px-2 text-[8px] font-black uppercase tracking-widest text-secondary">
+                    <span className="material-symbols-outlined leading-none" style={{ fontSize: "11px" }}>public</span>
+                    Global
+                  </span>
+                )}
                 <ContentTypeBadge type={contentType} />
 
                 {song.approval_status === 'pending' && (
@@ -762,7 +874,7 @@ export default function SongsListPage() {
               <div className="flex items-center gap-2.5 mb-5 relative z-10">
                 <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-outline-variant/30 text-primary font-medium text-[11px] shadow-sm">
                   <span className="material-symbols-outlined leading-none" style={{ fontSize: '12px' }}>music_note</span>
-                  <span>Key: <span className="text-on-surface ml-0.5">{song.original_key || "G"}</span></span>
+                  <span>Key: <span className="text-on-surface ml-0.5">{song.key_signature || song.original_key || "G"}</span></span>
                 </div>
                 <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-outline-variant/30 text-on-surface-variant font-medium text-[11px] shadow-sm tnum">
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-80">
@@ -781,7 +893,7 @@ export default function SongsListPage() {
                       For Review
                     </span>
                     <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
-                      {canEditLibrary && (
+                      {canEditThisSong && (
                         <button 
                           onClick={() => router.push(`/songs/${song.id}/edit`)}
                           className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold hover:bg-surface-bright flex items-center justify-center gap-1 cursor-pointer border border-outline-variant/30 shadow-sm shrink-0 transition-colors active:scale-95"
@@ -820,7 +932,7 @@ export default function SongsListPage() {
                       )}
                     </span>
                     <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
-                      {canEditLibrary && (
+                      {canEditThisSong && (
                         <button 
                           onClick={() => router.push(`/songs/${song.id}/edit`)}
                           className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold active:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm flex items-center justify-center gap-1 shrink-0"
@@ -902,13 +1014,13 @@ export default function SongsListPage() {
     {/* ========================================= */}
     {isAddModalOpen && (
       <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200000] flex items-center justify-center p-4">
-        <div className="absolute inset-0" onClick={() => setIsAddModalOpen(false)} />
+        <div className="absolute inset-0" onClick={closeSongImport} />
         
-        <div className="bg-surface-container-low border border-outline-variant/30 w-full max-w-lg rounded-[2rem] shadow-2xl flex flex-col relative animate-in zoom-in-95 duration-200 p-6">
+        <div className="bg-surface-container-low border border-outline-variant/30 w-full max-w-2xl max-h-[92dvh] overflow-y-auto rounded-[2rem] shadow-2xl flex flex-col relative animate-in zoom-in-95 duration-200 p-6">
           
           <button 
             type="button" 
-            onClick={() => setIsAddModalOpen(false)} 
+            onClick={closeSongImport} 
             className="absolute top-5 right-5 w-8 h-8 rounded-full bg-surface-container-high hover:bg-surface-bright text-on-surface-variant hover:text-on-surface text-sm font-bold flex items-center justify-center transition-colors cursor-pointer border border-outline-variant/30"
           >
             ✕
@@ -919,10 +1031,11 @@ export default function SongsListPage() {
               <span className="text-primary material-symbols-outlined !text-[18px]">queue_music</span> Add New Song
             </h3>
             <p className="text-xs font-semibold text-on-surface-variant mt-1">
-              Auto-transcribe YouTube link or start blank sheet
+              Review the video, confirm the title and artist, then discover metadata in the song editor
             </p>
           </div>
 
+          {importStep === "url" ? (
           <form onSubmit={handleProcessYoutubeLink} className="space-y-4">
             
             <div className="space-y-3 p-4 bg-surface-container border border-outline-variant/30 rounded-2xl relative z-50 shadow-inner">
@@ -972,7 +1085,7 @@ export default function SongsListPage() {
                         <button
                           key={videoId}
                           type="button"
-                          onClick={() => handleSelectYouTubeVideo(videoId, title)}
+                          onClick={() => handleSelectYouTubeVideo(videoId)}
                           className="w-full flex gap-3 p-3 hover:bg-surface-bright transition-colors text-left group cursor-pointer"
                         >
                           {thumbnail && (
@@ -983,7 +1096,7 @@ export default function SongsListPage() {
                             />
                           )}
                           <div className="flex flex-col justify-center overflow-hidden">
-                            <span className="text-xs font-bold text-on-surface leading-tight line-clamp-2 group-hover:text-secondary transition-colors" dangerouslySetInnerHTML={{ __html: title }} />
+                            <span className="text-xs font-bold text-on-surface leading-tight line-clamp-2 group-hover:text-secondary transition-colors">{title}</span>
                             <span className="text-[9px] font-bold text-on-surface-variant mt-1 uppercase tracking-wider truncate">
                               {channelTitle}
                             </span>
@@ -1025,8 +1138,9 @@ export default function SongsListPage() {
                 className="w-full mt-2 bg-primary hover:bg-primary/90 disabled:bg-surface-container-highest disabled:text-on-surface-variant text-on-primary px-4 py-3.5 rounded-xl text-[12px] font-black uppercase tracking-widest shadow-md transition-colors active:scale-[0.98] cursor-pointer border border-primary/20 flex items-center justify-center gap-2"
               >
                 <span className="material-symbols-outlined !text-[18px]">{ytLoading ? "hourglass_empty" : "auto_awesome"}</span>
-                {ytLoading ? "SCANNING LINK..." : "CREATE FROM LINK"}
+                {ytLoading ? "CHECKING VIDEO..." : "REVIEW VIDEO"}
               </button>
+              {ytError && <p role="alert" className="text-sm font-semibold text-error">{ytError}</p>}
 
             </div>
 
@@ -1039,6 +1153,7 @@ export default function SongsListPage() {
             <button 
               type="button" 
               onClick={() => {
+                sessionStorage.removeItem("onpraise_song_import_lyrics");
                 setIsAddModalOpen(false);
                 router.push("/songs/new/edit");
               }}
@@ -1052,6 +1167,75 @@ export default function SongsListPage() {
             </button>
 
           </form>
+          ) : (
+            <div className="space-y-4">
+              {importVideo && (
+                <div className="flex items-start gap-3 rounded-2xl border border-outline-variant/30 bg-surface-container p-3">
+                  {importVideo.thumbnailUrl && (
+                    <div
+                      role="img"
+                      aria-label="YouTube video thumbnail"
+                      className="h-20 w-32 shrink-0 rounded-xl bg-cover bg-center"
+                      style={{ backgroundImage: `url("${importVideo.thumbnailUrl}")` }}
+                    />
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-xs font-black uppercase tracking-wider text-secondary">YouTube video</div>
+                    <div className="mt-1 text-sm font-bold text-on-surface">{importVideo.title}</div>
+                    <a href={importVideo.url} target="_blank" rel="noreferrer" className="mt-1 block truncate text-xs text-on-surface-variant underline">
+                      {importVideo.url}
+                    </a>
+                    {importVideo.versionNote && <p className="mt-1 text-xs text-on-surface-variant">Version note: {importVideo.versionNote}</p>}
+                  </div>
+                </div>
+              )}
+
+              {importStep === "confirm" ? (
+                <>
+                  {duplicateSong && (
+                    <div className="rounded-xl border border-secondary/30 bg-secondary/5 p-3 text-sm text-on-surface">
+                      <p className="font-bold">This YouTube video is already used by another song.</p>
+                      <p className="mt-1 text-on-surface-variant">
+                        {duplicateSong.title
+                          ? `Existing ${duplicateSong.visibility === "global" ? "global" : "workspace"} song: ${duplicateSong.title}.`
+                          : "The existing song is not available in your workspace, so its details are hidden."}
+                        {" "}You can continue to create a separate variant, such as a medley arrangement.
+                      </p>
+                      {duplicateSong.id && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            closeSongImport();
+                            router.push(`/songs/${duplicateSong.id}`);
+                          }}
+                          className="mt-2 text-xs font-bold text-secondary underline"
+                        >
+                          Open existing song
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="space-y-1 text-xs font-bold text-on-surface-variant">
+                      Suggested song title
+                      <input value={importTitle} onChange={(event) => setImportTitle(event.target.value)} className="w-full rounded-xl border border-outline-variant/40 bg-surface-container-lowest px-3 py-3 text-sm text-on-surface" />
+                    </label>
+                    <label className="space-y-1 text-xs font-bold text-on-surface-variant">
+                      Artist (review before using)
+                      <input value={importArtist} onChange={(event) => setImportArtist(event.target.value)} placeholder="Enter the original artist" className="w-full rounded-xl border border-outline-variant/40 bg-surface-container-lowest px-3 py-3 text-sm text-on-surface" />
+                    </label>
+                  </div>
+                  <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+                    <button type="button" onClick={() => setImportStep("url")} className="rounded-xl border border-outline-variant/40 px-4 py-3 text-sm font-bold text-on-surface">Back</button>
+                    <button type="button" onClick={continueToSongEditor} className="rounded-xl bg-primary px-5 py-3 text-sm font-black text-on-primary disabled:opacity-50" disabled={!importTitle.trim() || !importArtist.trim()}>
+                      Continue to song editor
+                    </button>
+                  </div>
+                </>
+              ) : null}
+
+            </div>
+          )}
         </div>
       </div>
     )}

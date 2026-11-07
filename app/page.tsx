@@ -98,6 +98,7 @@ export default function Home() {
   
   const searchParams = useSearchParams();
   const inviteCode = searchParams.get("invite");
+  const isAccountSwitch = searchParams.get("switch_account") === "1";
   const authErrorParam = searchParams.get("auth_error");
   const [authRoutingError, setAuthRoutingError] = useState(() => {
     if (authErrorParam) return "Sign-in could not be completed. Please try again.";
@@ -108,6 +109,10 @@ export default function Home() {
   });
   const [isResolvingAccount, setIsResolvingAccount] = useState(true);
   const routingAttemptRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (isAccountSwitch) localStorage.removeItem("onpraise_switch_account");
+  }, [isAccountSwitch]);
 
   const [activeSlide, setActiveSlide] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(true);
@@ -354,6 +359,7 @@ export default function Home() {
         provider: 'google',
         options: {
           redirectTo: callbackUrl.toString(),
+          ...(isAccountSwitch ? { queryParams: { prompt: "select_account" } } : {}),
         },
       });
       if (error) throw error;
@@ -370,7 +376,7 @@ export default function Home() {
       desc: "Realtime sets, connected bands, and zero paper. No pressure, just presence.",
       graphics: (
         // ✅ SURGICAL FIX: Bound the container to bottom-[250px] so it never touches the text below it
-        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs (Snappy & Morphing) */}
           <Blob color="#2563EB" w="110px" hasEyes animClass="animate-dart-x" delay="-1s" top="15%" left="15%" />
           <Blob color="#60A5FA" w="90px" hasEyes animClass="animate-morph-squish" delay="-3s" top="35%" right="20%" />
@@ -390,7 +396,7 @@ export default function Home() {
       title: "Perfectly timed.",
       desc: "Sample-accurate metronomes and vocal cues locked to your band's flow.",
       graphics: (
-        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs */}
           <Blob color="#EF4444" w="120px" hasEyes animClass="animate-dart-y" delay="-2s" top="10%" right="18%" />
           <Blob color="#FCA5A5" w="80px" hasEyes animClass="animate-pulse-ghost" delay="-4s" top="40%" left="22%" />
@@ -410,7 +416,7 @@ export default function Home() {
       title: "Build your set.",
       desc: "Arrange songs, map sections, and transpose keys on the fly. Total control.",
       graphics: (
-        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs */}
           <Blob color="#F59E0B" w="100px" hasEyes animClass="animate-morph-squish" delay="0s" top="35%" left="18%" />
           {/* Scatter Cluster */}
@@ -430,7 +436,7 @@ export default function Home() {
       title: "Ready to play.",
       desc: "Join your team's workspace and perform with absolute confidence.",
       graphics: (
-        <div className="absolute top-0 left-0 w-full bottom-[250px] md:bottom-[280px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
           {/* Main Eyed Blobs */}
           <Blob color="#A855F7" w="110px" hasEyes animClass="animate-float-spin" delay="-3s" top="25%" right="15%" />
           <Blob color="#C084FC" w="85px" hasEyes animClass="animate-dart-y" delay="-1s" top="40%" left="15%" />
@@ -469,7 +475,7 @@ export default function Home() {
   }, [activeSlide, slides.length]);
 
   return (
-    <main className="relative w-full h-screen bg-white overflow-hidden flex flex-col pointer-events-none select-none">
+    <main className="relative flex min-h-[100svh] min-h-[100dvh] w-full flex-col overflow-x-hidden bg-white pointer-events-none">
       
       {/* ======================================================= */}
       {/* ✅ SURGICAL ADDITION: THE ANIMATION BANK MASSIVE UPGRADE  */}
@@ -566,7 +572,7 @@ export default function Home() {
       `}} />
 
       {/* DYNAMIC PROGRESS DOTS */}
-      <div className="absolute top-0 left-0 w-full z-50 flex items-center justify-center pt-14 pb-4">
+      <div className="absolute top-0 left-0 w-full z-50 flex items-center justify-center pt-[calc(env(safe-area-inset-top)+1.5rem)] pb-4">
         <div className="flex items-center gap-2 bg-white/50 backdrop-blur-md px-3 py-1.5 rounded-full shadow-sm">
           {slides.map((_, idx) => {
             const isActive = activeSlide === idx || (activeSlide === slides.length && idx === 0);
@@ -583,9 +589,9 @@ export default function Home() {
       </div>
 
       {/* CAROUSEL TRACK */}
-      <div className="relative w-full h-full flex items-center">
+      <div className="relative h-[65svh] min-h-[360px] max-h-[720px] w-full flex-none supports-[height:65dvh]:h-[65dvh]">
         <div 
-          className="flex w-full h-full"
+          className="flex h-full w-full items-center"
           style={{
             transform: `translateX(-${activeSlide * 100}%)`,
             transition: isTransitioning ? 'transform 0.8s cubic-bezier(0.16, 1, 0.3, 1)' : 'none' 
@@ -594,7 +600,7 @@ export default function Home() {
           {extendedSlides.map((slide, idx) => (
             <div key={idx} className="w-full h-full flex-shrink-0 relative overflow-hidden">
               {slide.graphics}
-              <div className="absolute bottom-[200px] md:bottom-[220px] left-0 w-full z-40 px-8 flex flex-col text-center">
+              <div className="absolute bottom-[135px] md:bottom-[180px] left-0 w-full z-40 px-5 flex flex-col text-center">
                 <h1 className="text-4xl md:text-5xl font-black text-zinc-950 tracking-tighter leading-[1.1] mb-3 drop-shadow-sm">
                   {slide.title}
                 </h1>
@@ -609,7 +615,7 @@ export default function Home() {
 
 
       {/* BUTTONS */}
-      <div className="absolute bottom-0 left-0 w-full z-50 p-6 pb-10 pointer-events-auto flex flex-col items-center justify-center">
+      <div className="relative z-50 flex w-full flex-col items-center justify-center px-6 pt-3 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] pointer-events-auto">
         
         {/* ✅ SURGICAL FIX: Show button if native installable OR if it's an iOS device in the browser */}
         {((isInstallable || isIOS || isMobileDevice) && !hasInstalledApp && isInBrowserTab) && (

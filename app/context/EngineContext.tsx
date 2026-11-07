@@ -17,6 +17,7 @@ interface EngineContextProps {
   isSuperAdmin: boolean;
   setSimulatedRole: (role: RoleType) => void;
   switchWorkspace: (teamId: string) => void;
+  resetAuthContext: () => void;
 }
 
 const EngineContext = createContext<EngineContextProps | undefined>(undefined);
@@ -45,6 +46,21 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   const [isKickedOut, setIsKickedOut] = useState<boolean>(false);
   const isKickedOutRef = useRef<boolean>(false); 
   const instanceFingerprintRef = useRef(`${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
+  const authGenerationRef = useRef(0);
+
+  const resetAuthContext = () => {
+    authGenerationRef.current += 1;
+    setRealUserId("");
+    setSimulatedUserId("");
+    setSimulatedRoleState("none");
+    setRealRole("member");
+    setIsSuperAdmin(false);
+    setPrimaryTeamId(null);
+    setSecondaryTeamIds([]);
+    setUserTeamId(null);
+    setIsKickedOut(false);
+    isKickedOutRef.current = false;
+  };
 
   // Track the authentic user ID session in the background
 
@@ -53,8 +69,10 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let active = true;
     async function fetchRealUserSession() {
+      const authGeneration = authGenerationRef.current;
       const { data: { user }, error: authError } = await supabase.auth.getUser();
-      if (authError) {
+      if (!active || authGeneration !== authGenerationRef.current) return;
+      if (authError && authError.name !== "AuthSessionMissingError") {
         console.error("Could not restore the Supabase session for the application.", authError);
         return;
       }
@@ -97,7 +115,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       }
       const profile = accountDecision.profile;
 
-      if (!active) return;
+      if (!active || authGeneration !== authGenerationRef.current) return;
       if (profile) {
         if (profile.team_id) {
           setPrimaryTeamId(profile.team_id);
@@ -163,11 +181,18 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (event === "SIGNED_OUT" || (event === "TOKEN_REFRESHED" && !session)) {
         localStorage.removeItem("active_workspace_id");
         localStorage.removeItem("onpraise_sim_role");
+        resetAuthContext();
         
         // ONLY auto-redirect if they weren't explicitly kicked out (allowing the modal to show!)
         if (!isKickedOutRef.current) {
           if (typeof window !== "undefined" && window.location.pathname !== "/") {
-            window.location.href = "/"; 
+            const invite = normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+            const switchAccount = localStorage.getItem("onpraise_switch_account") === "1";
+            const loginUrl = new URL("/", window.location.origin);
+            if (invite) loginUrl.searchParams.set("invite", invite);
+            if (switchAccount) loginUrl.searchParams.set("switch_account", "1");
+            localStorage.removeItem("onpraise_switch_account");
+            window.location.replace(`${loginUrl.pathname}${loginUrl.search}`);
           }
         }
       }
@@ -259,7 +284,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       secondaryTeamIds,
       isSuperAdmin, 
       setSimulatedRole,
-      switchWorkspace
+      switchWorkspace,
+      resetAuthContext
     }}>
       {isKickedOut && (
         <div className="fixed inset-0 bg-zinc-950/90 backdrop-blur-sm z-[999999] flex flex-col items-center justify-center p-6 text-center select-none animate-in fade-in duration-200">

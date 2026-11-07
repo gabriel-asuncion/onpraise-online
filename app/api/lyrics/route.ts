@@ -72,7 +72,18 @@ async function fetchGeniusSongHtml(startUrl: URL): Promise<Response | null> {
       continue;
     }
 
-    if (!response.ok || !response.headers.get("content-type")?.toLowerCase().startsWith("text/html")) {
+    if (!response.ok) {
+      console.error("Genius song page request failed.", {
+        status: response.status,
+        path: currentUrl.pathname,
+      });
+      return null;
+    }
+    if (!response.headers.get("content-type")?.toLowerCase().startsWith("text/html")) {
+      console.error("Genius song page returned a non-HTML response.", {
+        contentType: response.headers.get("content-type"),
+        path: currentUrl.pathname,
+      });
       return null;
     }
     return response;
@@ -168,7 +179,9 @@ export async function GET(request: Request) {
     try {
       const response = await fetchGeniusSongHtml(targetUrl!);
       if (!response) {
-        return NextResponse.json({ error: "Genius did not return an allowed song page." }, { status: 502 });
+        return NextResponse.json({
+          error: "Genius could not serve a lyrics preview right now. Open the Genius result directly or continue without importing lyrics.",
+        }, { status: 502 });
       }
       const html = await readLimitedText(response, MAX_RESPONSE_BYTES);
       if (!html) {

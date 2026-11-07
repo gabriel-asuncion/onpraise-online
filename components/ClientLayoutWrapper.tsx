@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import Sidebar from "./Sidebar";
 import DevFab from "./DevFab";
 import { useEngine } from "../app/context/EngineContext";
+import PositionRequestsFab from "./PositionRequestsFab";
 
 export default function ClientLayoutWrapper({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -34,6 +35,7 @@ export default function ClientLayoutWrapper({ children }: { children: React.Reac
         {children}
       </main>
       
+      <PositionRequestsFab />
       {isSuperAdmin && <DevFab />}
     </div>
   );

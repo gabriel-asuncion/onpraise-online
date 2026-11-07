@@ -13,6 +13,17 @@ import { createInvitationUrl, getInvitationPath, normalizeJoinCode } from "../li
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QRCodeSVG } from "qrcode.react";
+import {
+  SERVICE_POSITIONS,
+  formatCooldownDuration,
+  getCooldownRemainingMs,
+  normalizeServicePosition,
+} from "../lib/positions.ts";
+import {
+  extractYouTubeVideoId,
+  getCanonicalYouTubeUrl,
+  suggestSongFromYouTubeTitle,
+} from "../lib/youtube-import.ts";
 
 test("account routing recognizes existing team and ministry members without optional names", () => {
   assert.equal(getAccountLandingPath({ full_name: null, team_id: "team-1", secondary_team_ids: [], ministries: [] }), "/dashboard");
@@ -99,6 +110,56 @@ test("QR code component renders a real invitation URL locally", () => {
   assert.match(markup, /<svg/);
   assert.match(markup, /width="144"/);
   assert.match(markup, /<path/);
+});
+
+test("service positions remain separate from permission roles and cooldown display uses server timestamps", () => {
+  assert.ok(SERVICE_POSITIONS.includes("Musician"));
+  assert.equal(normalizeServicePosition("admin"), null);
+  assert.equal(normalizeServicePosition("Music Leader"), "Music Leader");
+  assert.equal(getCooldownRemainingMs("2026-11-07T10:00:00.000Z", Date.parse("2026-11-07T09:00:00.000Z")), 60 * 60 * 1000);
+  assert.equal(getCooldownRemainingMs("2026-11-07T09:00:00.000Z", Date.parse("2026-11-07T10:00:00.000Z")), 0);
+  assert.equal(formatCooldownDuration((49 * 60 + 1) * 60_000), "49h 1m");
+});
+
+test("YouTube import validates and normalizes supported video URL formats", () => {
+  assert.equal(extractYouTubeVideoId("https://www.youtube.com/watch?v=abcdefghijk&t=15"), "abcdefghijk");
+  assert.equal(extractYouTubeVideoId("https://youtu.be/abcdefghijk"), "abcdefghijk");
+  assert.equal(extractYouTubeVideoId("https://youtube.com/shorts/abcdefghijk"), "abcdefghijk");
+  assert.equal(extractYouTubeVideoId("https://youtube.com/live/abcdefghijk"), "abcdefghijk");
+  assert.equal(extractYouTubeVideoId("https://youtube.com/u/channel/abcdefghijk"), "abcdefghijk");
+  assert.equal(extractYouTubeVideoId("https://www.youtube-nocookie.com/embed/abcdefghijk"), "abcdefghijk");
+  assert.equal(extractYouTubeVideoId("https://example.com/watch?v=abcdefghijk"), null);
+  assert.equal(extractYouTubeVideoId("javascript:alert(1)"), null);
+  assert.equal(getCanonicalYouTubeUrl("abcdefghijk"), "https://www.youtube.com/watch?v=abcdefghijk");
+});
+
+test("YouTube title suggestions remove edition labels without assigning cover channels as artists", () => {
+  assert.deepEqual(suggestSongFromYouTubeTitle("Artist Name - Song Title (Official Music Video)"), {
+    title: "Song Title",
+    artist: "Artist Name",
+    versionNote: null,
+  });
+  assert.deepEqual(suggestSongFromYouTubeTitle("SONG TITLE | ARTIST NAME | LIVE WORSHIP"), {
+    title: "SONG TITLE",
+    artist: "ARTIST NAME",
+    versionNote: "Live version",
+  });
+  assert.deepEqual(suggestSongFromYouTubeTitle("Song Title (Cover by Channel Name)"), {
+    title: "Song Title",
+    artist: "Unknown Artist",
+    versionNote: "Cover version",
+  });
+  assert.deepEqual(suggestSongFromYouTubeTitle("ARTIST - SONG TITLE [LYRICS]"), {
+    title: "SONG TITLE",
+    artist: "ARTIST",
+    versionNote: null,
+  });
+  assert.equal(suggestSongFromYouTubeTitle("Live Your Life").title, "Live Your Life");
+  assert.deepEqual(suggestSongFromYouTubeTitle("Song Title - Live Performance"), {
+    title: "Song Title",
+    artist: "Unknown Artist",
+    versionNote: "Live version",
+  });
 });
 
 test("Genius scraping accepts only valid HTTPS Genius song URLs", () => {
