@@ -9,6 +9,7 @@ import {
 
 export interface HardwareClockConfig {
   isPlayingFlow: boolean;
+  playbackSessionId?: number;
   isPlayingRef: React.MutableRefObject<boolean>;
   activeSongRef: React.MutableRefObject<SongRecord | null>;
   playingSongRef: React.MutableRefObject<SongRecord | null>;
@@ -61,6 +62,10 @@ export interface HardwareClockConfig {
   triggerMetronomeSound?: (beat: number, time: number) => void;
   audioContextStartTimeRef?: React.MutableRefObject<number | null>;
   scheduledClicksRef?: React.MutableRefObject<{ source: AudioBufferSourceNode, audioTime: number }[]>;
+  pendingAudioClockCorrectionRef?: React.MutableRefObject<{
+    correctionMs: number;
+    applyAtAudioTime: number | null;
+  } | null>;
 }
 
 export function useHardwareClock(config: HardwareClockConfig) {
@@ -72,7 +77,9 @@ export function useHardwareClock(config: HardwareClockConfig) {
   configRef.current = config;
 
   useEffect(() => {
+    let isActive = true;
     const killEngine = () => {
+      isActive = false;
       const worker = workerRef.current;
       const workerUrl = workerUrlRef.current;
       if (worker) {
@@ -102,6 +109,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
     let lastHeartbeatTime = 0;
     let lastYoutubeResyncTime = 0;
     const clockExecutionTick = () => {
+      if (!isActive) return;
       const c = configRef.current;
 
       if (!c.isPlayingRef.current || !c.activeSongRef.current || c.sectionsRef.current.length === 0) return;
@@ -235,9 +243,22 @@ export function useHardwareClock(config: HardwareClockConfig) {
         c.lastAudioBeatRef.current =
           Math.floor((c.lastAudioBeatRef.current + 0.000001) / beatUnitQuarter) * beatUnitQuarter;
 
+        let pendingAudioCorrection = c.pendingAudioClockCorrectionRef?.current ?? null;
+        if (pendingAudioCorrection && pendingAudioCorrection.applyAtAudioTime === null) {
+          pendingAudioCorrection.applyAtAudioTime =
+            c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
+        }
         let nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
 
         while (nextBeatTime < currentAudioTime + lookaheadSecs) {
+          if (
+            pendingAudioCorrection?.applyAtAudioTime !== null &&
+            pendingAudioCorrection?.applyAtAudioTime !== undefined &&
+            nextBeatTime > pendingAudioCorrection.applyAtAudioTime + 0.000001
+          ) {
+            break;
+          }
+
           // If the scheduled beat is accidentally in the past (due to pausing/seeking latency),
           // skip it to prevent a stacked machine-gun burst of clicks.
           if (nextBeatTime + audioOffsetSecs >= currentAudioTime) {
@@ -260,7 +281,18 @@ export function useHardwareClock(config: HardwareClockConfig) {
             }
           }
 
+          const isCorrectionBoundary =
+            pendingAudioCorrection?.applyAtAudioTime !== null &&
+            pendingAudioCorrection?.applyAtAudioTime !== undefined &&
+            Math.abs(nextBeatTime - pendingAudioCorrection.applyAtAudioTime) < 0.000001;
           c.lastAudioBeatRef.current += beatUnitQuarter;
+          if (isCorrectionBoundary && c.audioContextStartTimeRef) {
+            c.audioContextStartTimeRef.current += pendingAudioCorrection!.correctionMs / 1000;
+            if (c.pendingAudioClockCorrectionRef) {
+              c.pendingAudioClockCorrectionRef.current = null;
+            }
+            pendingAudioCorrection = null;
+          }
           nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
         }
 
@@ -353,7 +385,9 @@ export function useHardwareClock(config: HardwareClockConfig) {
         workerUrlRef.current = workerUrl;
         const worker = new Worker(workerUrl);
         workerRef.current = worker;
-        worker.onmessage = (e) => { if (e.data === 'tick') clockExecutionTick(); };
+        worker.onmessage = (e) => {
+          if (isActive && e.data === 'tick') clockExecutionTick();
+        };
         worker.postMessage('start');
       }
     } catch (err) {
@@ -371,5 +405,5 @@ export function useHardwareClock(config: HardwareClockConfig) {
     }
 
     return killEngine;
-  }, [config.isPlayingFlow]);
+  }, [config.isPlayingFlow, config.playbackSessionId]);
 }

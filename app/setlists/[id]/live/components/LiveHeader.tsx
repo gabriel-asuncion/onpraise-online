@@ -106,9 +106,9 @@ export function LiveHeader({
     </svg>
   );
   
-  const PauseIcon = () => (
+  const StopIcon = () => (
     <svg viewBox="0 0 24 24" className="w-8 h-8 fill-white">
-      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+      <path d="M6 6h12v12H6z" />
     </svg>
   );
 
@@ -210,7 +210,7 @@ export function LiveHeader({
           // ✅ SURGICAL FIX: Play button glows blue if you are the MD!
           className={`w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 ${isPlayingFlow || localPresenceUser?.isMD ? "text-primary" : "text-white"}`}
         >
-          {isPlayingFlow ? <PauseIcon /> : <PlayIcon />}
+          {isPlayingFlow ? <StopIcon /> : <PlayIcon />}
         </button>
       </div>
 
@@ -476,7 +476,7 @@ export function LiveHeader({
             // ✅ SURGICAL FIX: MD is Blue, non-MD is transparent/white
             className={`w-12 h-12 rounded-full flex items-center justify-center transition-transform active:scale-90 cursor-pointer shadow-sm ${isPlayingFlow ? 'bg-primary-container text-primary' : (localPresenceUser?.isMD ? 'bg-primary text-on-primary shadow-md' : 'bg-transparent text-on-surface')}`}
           >
-            {isPlayingFlow ? <PauseIcon /> : <PlayIcon />}
+            {isPlayingFlow ? <StopIcon /> : <PlayIcon />}
           </button>
         </div>
       </div>

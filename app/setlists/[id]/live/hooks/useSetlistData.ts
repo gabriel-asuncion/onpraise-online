@@ -133,7 +133,24 @@ export function useSetlistData(setlistId: string, supabase: ReturnType<typeof cr
                   section_name: section.section_name,
                   content: section.content || "",
                 }));
-            const loadedStructure = t.custom_structure ?? originalStructure;
+            const customStructure = Array.isArray(t.custom_structure)
+              ? t.custom_structure
+              : [];
+            const loadedStructure = customStructure.length > 0
+              ? customStructure.map((section) => {
+                  const originalSection = originalStructure.find(
+                    (item) => item.id === section.id
+                  ) || originalStructure.find(
+                    (item) => item.section_name === section.section_name
+                  );
+                  return {
+                    ...section,
+                    content: section.content?.trim()
+                      ? section.content
+                      : originalSection?.content || "",
+                  };
+                })
+              : originalStructure;
 
             return {
               id: t.id,

@@ -10,7 +10,9 @@ import { getSongChordChart } from "../../../../utils/supabase/actions";
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
 import { getYoutubeTimeForTimeline } from "../../../setlists/[id]/live/utils/timeline";
 import { parseAllowedGeniusSongUrl } from "../../../api/lyrics/url-validation";
-import TimelineArrangement, { type TimelineSection, type TimelineLyricPreview, type TimelineSnap } from "./TimelineArrangement";
+import TimelineArrangement, { type TimelineSection, type TimelineLyricPreview, type TimelineSnap, type MidiControlFeedback } from "./TimelineArrangement";
+import MidiMappingModal from "./MidiMappingModal";
+import { useMidiLearn, type MidiActionId } from "./useMidiLearn";
 
 // =======================================================
 // --- TRANSPOSTITION & DIATONIC CONSTANT BLUEPRINTS -----
@@ -376,6 +378,31 @@ export default function SongEditPage() {
     message: string | null;
   }>({ status: "idle", title: null, songId: null, visibility: null, message: null });
   const [formYoutubeSyncOffset, setFormYoutubeSyncOffset] = useState<number>(0);
+  const [isMidiMappingModalOpen, setIsMidiMappingModalOpen] = useState(false);
+  const [midiClickVolume, setMidiClickVolume] = useState(100);
+  const [midiBackingVolume, setMidiBackingVolume] = useState(100);
+  const midiBackingVolumeRef = useRef(midiBackingVolume);
+  const [midiPixelsPerBeat, setMidiPixelsPerBeat] = useState<number | null>(null);
+  const midiPixelsPerBeatRef = useRef(18);
+  const handleEffectiveMidiZoomChange = useCallback((pixelsPerBeat: number) => {
+    midiPixelsPerBeatRef.current = pixelsPerBeat;
+  }, []);
+  const [midiLoopSectionId, setMidiLoopSectionId] = useState<string | null>(null);
+  const [midiSelectedLine, setMidiSelectedLine] = useState<{ sectionId: string; lineIndex: number; time: number } | null>(null);
+  const [midiControlFeedback, setMidiControlFeedback] = useState<MidiControlFeedback | null>(null);
+  const [midiScrubFollowRequest, setMidiScrubFollowRequest] = useState(0);
+  const midiFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showMidiControlFeedback = useCallback((label: string, value: string) => {
+    setMidiControlFeedback({ label, value });
+    if (midiFeedbackTimerRef.current) clearTimeout(midiFeedbackTimerRef.current);
+    midiFeedbackTimerRef.current = setTimeout(() => {
+      setMidiControlFeedback(null);
+      midiFeedbackTimerRef.current = null;
+    }, 1400);
+  }, []);
+  useEffect(() => () => {
+    if (midiFeedbackTimerRef.current) clearTimeout(midiFeedbackTimerRef.current);
+  }, []);
   const [formIsYoutubeSyncValidated, setFormIsYoutubeSyncValidated] = useState<boolean>(false);
   const [formArtist, setFormArtist] = useState("");
   const [formKey, setFormKey] = useState("");
@@ -1026,6 +1053,9 @@ export default function SongEditPage() {
   useEffect(() => {
     isMetronomeMutedRef.current = isMetronomeMuted;
   }, [isMetronomeMuted]);
+  useEffect(() => {
+    midiBackingVolumeRef.current = midiBackingVolume;
+  }, [midiBackingVolume]);
 
   const [isSongMetadataModalOpen, setIsSongMetadataModalOpen] = useState(false);
   const [isSongMetadataLoading, setIsSongMetadataLoading] = useState(false);
@@ -1110,51 +1140,6 @@ function formatTimeWithMs(seconds: number) {
   return `${m}:${s.toString().padStart(2, '0')}.${ms}`;
 }
 
-  useEffect(() => {
-    const updateScrubber = () => {
-      if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isTimelineScrubbingRef.current) {
-        const playerState = typeof ytPlayerRef.current.getPlayerState === 'function' ? ytPlayerRef.current.getPlayerState() : -1;
-        // Only advance scrubber and metronome clicks when actively playing (state 1)
-        const isActuallyPlaying = playerState === 1;
-        
-        if (isActuallyPlaying) {
-          const currentTime = ytPlayerRef.current.getCurrentTime();
-          setYtCurrentTime(currentTime);
-
-          const tempo = parseInt(formTempo) || 0;
-          if (tempo > 0 && formYoutubeSyncOffset !== null) {
-            const elapsedMs = (currentTime * 1000) - formYoutubeSyncOffset;
-            if (elapsedMs >= 0) {
-              const msPerBeat = 60000 / tempo;
-              const currentBeat = Math.floor(elapsedMs / msPerBeat);
-              
-              if (currentBeat !== lastTickedBeatRef.current) {
-                if (currentBeat > lastTickedBeatRef.current) {
-                  const isDownbeat = currentBeat % 4 === 0; 
-                  if (!isMetronomeMutedRef.current) {
-                    playZeroLatencyAudio(isDownbeat ? 'metronome_blip_1' : 'metronome_blip_2', 1.0);
-                  }
-                }
-                lastTickedBeatRef.current = currentBeat;
-              }
-            } else {
-              lastTickedBeatRef.current = -1; 
-            }
-          }
-        } else {
-          lastTickedBeatRef.current = -1;
-        }
-      }
-      ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
-    };
-
-    ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
-    
-    return () => {
-      if (ytTimeTrackerRef.current) cancelAnimationFrame(ytTimeTrackerRef.current);
-    };
-  }, [formTempo, formYoutubeSyncOffset, initAudioContext, playZeroLatencyAudio]);
-  
   const ytPlayerRef = useRef<any>(null);
   const isYtPlayerReadyRef = useRef<boolean>(false);
 
@@ -2113,7 +2098,10 @@ function formatTimeWithMs(seconds: number) {
         events: {
           'onReady': (event: any) => {
             isYtPlayerReadyRef.current = true; 
-            try { setYtDuration(event.target.getDuration() || 0); } catch(e){}
+            try {
+              setYtDuration(event.target.getDuration() || 0);
+              event.target.setVolume(midiBackingVolumeRef.current);
+            } catch(e){}
           },
           'onStateChange': (event: any) => {
             // Only set playing to true when video is actually decoding frames (state 1)
@@ -3263,7 +3251,7 @@ function formatTimeWithMs(seconds: number) {
     section.id,
     (Number(sectionTimings[section.type]?.head_m) || 0) * 4,
   ]));
-  const timelineChapters = (() => {
+  const timelineChapters = useMemo(() => {
     const bpm = parseInt(formTempo, 10) || 75;
     return formSections.reduce((result, section) => {
       const start = Math.max(0, formYoutubeSyncOffset / 1000 + result.cursorBeats * 60 / bpm);
@@ -3275,7 +3263,62 @@ function formatTimeWithMs(seconds: number) {
           : [...result.chapters, { ...section, start, end: start + duration * 60 / bpm }],
       };
     }, { cursorBeats: 0, chapters: [] as Array<(typeof formSections)[number] & { start: number; end: number }> }).chapters;
-  })();
+  }, [
+    formSections,
+    formTempo,
+    formYoutubeSyncOffset,
+    timelineDurationOverrides,
+    timelineGapOverrides,
+    sectionTimings,
+    timelineMeterNumerator,
+    timelineMeterDenominator,
+  ]);
+  useEffect(() => {
+    const updateScrubber = () => {
+      if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function" && !isTimelineScrubbingRef.current) {
+        const playerState = typeof ytPlayerRef.current.getPlayerState === "function"
+          ? ytPlayerRef.current.getPlayerState()
+          : -1;
+        if (playerState === 1) {
+          const currentTime = ytPlayerRef.current.getCurrentTime();
+          setYtCurrentTime(currentTime);
+          const loopChapter = timelineChapters.find((chapter) => chapter.id === midiLoopSectionId);
+          if (loopChapter && currentTime >= loopChapter.end) {
+            ytPlayerRef.current.seekTo(loopChapter.start, true);
+            setYtCurrentTime(loopChapter.start);
+            lastTickedBeatRef.current = -1;
+            ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
+            return;
+          }
+
+          const tempo = parseInt(formTempo, 10) || 0;
+          if (tempo > 0) {
+            const elapsedMs = currentTime * 1000 - formYoutubeSyncOffset;
+            if (elapsedMs >= 0) {
+              const currentBeat = Math.floor(elapsedMs / (60000 / tempo));
+              if (currentBeat !== lastTickedBeatRef.current) {
+                if (currentBeat > lastTickedBeatRef.current && !isMetronomeMutedRef.current) {
+                  const isDownbeat = currentBeat % 4 === 0;
+                  playZeroLatencyAudio(isDownbeat ? "metronome_blip_1" : "metronome_blip_2", midiClickVolume / 100);
+                }
+                lastTickedBeatRef.current = currentBeat;
+              }
+            } else {
+              lastTickedBeatRef.current = -1;
+            }
+          }
+        } else {
+          lastTickedBeatRef.current = -1;
+        }
+      }
+      ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
+    };
+
+    ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
+    return () => {
+      if (ytTimeTrackerRef.current) cancelAnimationFrame(ytTimeTrackerRef.current);
+    };
+  }, [formTempo, formYoutubeSyncOffset, midiClickVolume, midiLoopSectionId, playZeroLatencyAudio, timelineChapters]);
   const currentTimelineChapter = timelineChapters.find(
     (chapter) => ytCurrentTime >= chapter.start && ytCurrentTime < chapter.end,
   );
@@ -3323,9 +3366,9 @@ function formatTimeWithMs(seconds: number) {
     }
     return null;
   })();
-  const timelineLineStartTimes = (() => {
+  const timelineLineTargets = (() => {
     const bpm = parseInt(formTempo, 10) || 75;
-    const lineStarts: number[] = [];
+    const targets: Array<{ sectionId: string; lineIndex: number; lineOrdinal: number; label: string; time: number }> = [];
     let cursorBeat = 0;
     for (const section of formSections) {
       cursorBeat += timelineGapOverrides[section.id] ?? 0;
@@ -3339,7 +3382,13 @@ function formatTimeWithMs(seconds: number) {
         let lineCursorBeat = cursorBeat + headPaddingBeats;
         for (let pass = 0; pass < passes; pass += 1) {
           for (let index = 0; index < lines.length; index += 1) {
-            lineStarts.push(getYoutubeTimeForTimeline(lineCursorBeat, 0, bpm, formYoutubeSyncOffset));
+            targets.push({
+              sectionId: section.id,
+              lineIndex: lines[index].lineIndex,
+              lineOrdinal: index,
+              label: `Line ${index + 1}`,
+              time: getYoutubeTimeForTimeline(lineCursorBeat, 0, bpm, formYoutubeSyncOffset),
+            });
             const lineDuration = lineDurations[index] ?? 0;
             lineCursorBeat += lineDuration;
           }
@@ -3347,7 +3396,7 @@ function formatTimeWithMs(seconds: number) {
       }
       cursorBeat += duration;
     }
-    return lineStarts;
+    return targets;
   })();
   const seekToTimelineChapter = useCallback((time: number) => {
     const seekTime = Math.max(0, Math.min(ytDuration || time, time));
@@ -3369,17 +3418,41 @@ function formatTimeWithMs(seconds: number) {
     setIsTimelineChaptersOpen(false);
   }, [ytDuration, initAudioContext, ytPlaying]);
 
+  const navigateToMidiLine = useCallback((direction: "previous" | "next", currentTime: number) => {
+    let selectedIndex = -1;
+    let selectedDistance = Number.POSITIVE_INFINITY;
+    if (midiSelectedLine) {
+      timelineLineTargets.forEach((target, index) => {
+        if (target.sectionId !== midiSelectedLine.sectionId || target.lineIndex !== midiSelectedLine.lineIndex) return;
+        const distance = Math.abs(target.time - midiSelectedLine.time);
+        if (distance < selectedDistance) {
+          selectedIndex = index;
+          selectedDistance = distance;
+        }
+      });
+    }
+    const target = selectedIndex >= 0
+      ? timelineLineTargets[selectedIndex + (direction === "previous" ? -1 : 1)]
+      : direction === "previous"
+        ? [...timelineLineTargets].reverse().find((item) => item.time < currentTime - 0.05)
+        : timelineLineTargets.find((item) => item.time > currentTime + 0.05);
+    if (!target) return;
+    setMidiSelectedLine({ sectionId: target.sectionId, lineIndex: target.lineIndex, time: target.time });
+    seekToTimelineChapter(target.time);
+    showMidiControlFeedback(
+      target.label,
+      formSections.find((section) => section.id === target.sectionId)?.label ?? "Selected",
+    );
+  }, [formSections, midiSelectedLine, seekToTimelineChapter, showMidiControlFeedback, timelineLineTargets]);
+
   useEffect(() => {
     seekTimelineLineRef.current = (direction) => {
       const currentTime = ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function"
         ? ytPlayerRef.current.getCurrentTime()
         : ytCurrentTime;
-      const target = direction === "previous"
-        ? [...timelineLineStartTimes].reverse().find((time) => time < currentTime - 0.05)
-        : timelineLineStartTimes.find((time) => time > currentTime + 0.05);
-      if (target !== undefined) seekToTimelineChapter(target);
+      navigateToMidiLine(direction, currentTime);
     };
-  }, [seekToTimelineChapter, timelineLineStartTimes, ytCurrentTime]);
+  }, [midiSelectedLine, navigateToMidiLine, ytCurrentTime]);
 
   useEffect(() => {
     const handleEditorShortcuts = (event: KeyboardEvent) => {
@@ -3451,39 +3524,6 @@ function formatTimeWithMs(seconds: number) {
   const filteredThemeCatalogSuggestions = CHRISTIAN_THEMES_PRESETS.filter(th => th.toLowerCase().includes(themeInputSearchValue.toLowerCase()) && !formThemes.includes(th));
   const isCommentInputBlank = customCommentInputValue.trim() === "";
 
-  if (loading) {
-    return (
-      <div className="h-[100dvh] w-full overflow-hidden bg-surface flex flex-col relative animate-in slide-in-from-right-full fade-in duration-300 ease-out">
-        {/* SKELETON HEADER */}
-        <header className="sticky top-0 z-[100] w-full flex-shrink-0 bg-surface/90 border-b border-outline-variant/30 shadow-sm">
-          <div className="flex items-center justify-between px-4 md:px-8 py-3.5 w-full">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-surface-container-high animate-pulse" />
-              <div className="w-48 h-5 bg-surface-container-high rounded animate-pulse" />
-            </div>
-            <div className="hidden md:flex items-center gap-2">
-              <div className="w-24 h-7 rounded-lg bg-surface-container-high animate-pulse" />
-              <div className="w-32 h-7 rounded-lg bg-surface-container-high animate-pulse" />
-            </div>
-          </div>
-          <div className="px-4 md:px-8 flex items-center border-t border-outline-variant/30 bg-surface-container-lowest/30">
-            <div className="py-4 flex gap-4 w-full">
-              <div className="w-16 h-3 bg-surface-container-high rounded animate-pulse" />
-              <div className="w-16 h-3 bg-surface-container-high rounded animate-pulse" />
-              <div className="w-20 h-3 bg-surface-container-high rounded animate-pulse" />
-            </div>
-          </div>
-        </header>
-        
-        {/* SKELETON CANVAS */}
-        <div className="flex-1 p-4 md:p-8 space-y-4">
-          <div className="w-full h-[250px] bg-surface-container-low border border-outline-variant/30 rounded-2xl animate-pulse shadow-sm" />
-          <div className="w-full h-[400px] bg-surface-container-low border border-outline-variant/30 rounded-2xl animate-pulse shadow-sm" />
-        </div>
-      </div>
-    );
-  }
-
   const isAnySectionMismatchedAcrossModal = formSections.some((checkSec) => {
     if (checkSec.type.toLowerCase().startsWith("spacer")) return false; 
     
@@ -3525,6 +3565,347 @@ function formatTimeWithMs(seconds: number) {
     activeRole === "moderator" ||
     (activeRole === "musician" && Boolean(simulatedUserId && songCreatorId === simulatedUserId))
   );
+
+  const midiLearn = useMidiLearn((actionId: MidiActionId, payload) => {
+    const bpm = Math.max(1, parseInt(formTempo, 10) || 75);
+    const currentTime = ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function"
+      ? ytPlayerRef.current.getCurrentTime()
+      : ytCurrentTime;
+    const activeChapterIndex = timelineChapters.findIndex(
+      (chapter) => currentTime >= chapter.start && currentTime < chapter.end,
+    );
+    const activeChapter = activeChapterIndex >= 0 ? timelineChapters[activeChapterIndex] : null;
+    const quarterBeatsPerMeasure = timelineMeterNumerator * (4 / timelineMeterDenominator);
+    const seekToMidiTime = (time: number) => {
+      const maxTime = ytDuration > 0 ? ytDuration : Number.POSITIVE_INFINITY;
+      const nextTime = Math.max(0, Math.min(maxTime, time));
+      setYtCurrentTime(nextTime);
+      if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
+        ytPlayerRef.current.seekTo(nextTime, true);
+      }
+      const focusedChapter = timelineChapters.find(
+        (chapter) => nextTime >= chapter.start && nextTime < chapter.end,
+      );
+      if (focusedChapter) setPendingTimelineFocusSectionId(focusedChapter.id);
+    };
+    const actionDelta = payload?.delta ?? 1;
+
+    switch (actionId) {
+      case "PLAY_PAUSE":
+        if (sectionModalConfig.isOpen) handleSectionModalSubmit();
+        else if (!pendingTimelineSectionType) handleTogglePlayback();
+        break;
+      case "MODAL_CONFIRM":
+        if (sectionModalConfig.isOpen) handleSectionModalSubmit();
+        break;
+      case "OPEN_ADD_SECTION": {
+        const anotherModalIsOpen = isMidiMappingModalOpen || sectionModalConfig.isOpen ||
+          pendingTimelineSectionType !== null || sectionAdjustmentsConfig.isOpen ||
+          chordPickerConfig.isOpen || chordMode === "Keyboard" && chordTargetCoordinate !== null ||
+          isImportModalOpen || isSongMetadataModalOpen || isTimelineChaptersOpen ||
+          isTapBpmModalOpen || isKeyPopupOpen || isImportDiscoveryModalOpen;
+        if (anotherModalIsOpen) break;
+        setEditorActiveTab("timeline");
+        if (activeChapter) {
+          setPendingTimelineAnchorSectionId(activeChapter.id);
+          setPendingTimelineSourceSectionId(activeChapter.id);
+          setPendingTimelineSectionType(activeChapter.type);
+        } else {
+          setPendingTimelineInsertionIndex(null);
+          setPendingTimelineAnchorSectionId(null);
+          setPendingTimelineSourceSectionId(null);
+          setSectionModalSearch("");
+          setSectionModalSelected(dynamicCatalogOptions[0]?.computedId ?? null);
+          setSectionModalConfig({ isOpen: true, mode: "add" });
+        }
+        break;
+      }
+      case "MODAL_INSERT_BEFORE":
+      case "MODAL_INSERT_AFTER": {
+        if (!pendingTimelineSectionType) break;
+        const anchorIndex = formSections.findIndex((section) => section.id === pendingTimelineAnchorSectionId);
+        const fallbackIndex = activeChapter
+          ? formSections.findIndex((section) => section.id === activeChapter.id)
+          : -1;
+        const currentIndex = anchorIndex >= 0 ? anchorIndex : fallbackIndex;
+        const insertionIndex = currentIndex < 0
+          ? actionId === "MODAL_INSERT_BEFORE" ? 0 : formSections.length
+          : currentIndex + (actionId === "MODAL_INSERT_AFTER" ? 1 : 0);
+        if (pendingTimelineSourceSectionId) {
+          handleDuplicateTimelineSection(pendingTimelineSourceSectionId, insertionIndex);
+        } else {
+          handleAddTimelineSection(pendingTimelineSectionType, insertionIndex);
+        }
+        setPendingTimelineSectionType(null);
+        setPendingTimelineAnchorSectionId(null);
+        setPendingTimelineSourceSectionId(null);
+        setPendingTimelineInsertionIndex(null);
+        break;
+      }
+      case "MODAL_CANCEL":
+        setPendingTimelineSectionType(null);
+        setPendingTimelineAnchorSectionId(null);
+        setPendingTimelineSourceSectionId(null);
+        setPendingTimelineInsertionIndex(null);
+        setSectionModalConfig({ isOpen: false, mode: "add" });
+        break;
+      case "MODAL_ADD_NEW_OR_CYCLE":
+        if (pendingTimelineSectionType) {
+          setPendingTimelineSectionType(null);
+          setPendingTimelineSourceSectionId(null);
+          setSectionModalSearch("");
+          setSectionModalSelected(dynamicCatalogOptions[0]?.computedId ?? null);
+          setSectionModalConfig({ isOpen: true, mode: "add" });
+        } else if (sectionModalConfig.isOpen && dynamicCatalogOptions.length > 0) {
+          const currentIndex = dynamicCatalogOptions.findIndex((option) => option.computedId === sectionModalSelected);
+          const nextIndex = (currentIndex + 1) % dynamicCatalogOptions.length;
+          setSectionModalSelected(dynamicCatalogOptions[nextIndex].computedId);
+        }
+        break;
+      case "STOP_RETURN":
+        if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === "function") {
+          ytPlayerRef.current.pauseVideo();
+        }
+        setYtPlaying(false);
+        seekToMidiTime(activeChapter?.start ?? Math.max(0, formYoutubeSyncOffset / 1000));
+        break;
+      case "LOOP_ACTIVE_SECTION":
+        if (activeChapter) {
+          setMidiLoopSectionId((current) => current === activeChapter.id ? null : activeChapter.id);
+        }
+        break;
+      case "JOG_SCRUB": {
+        const timeDelta = payload?.delta !== undefined
+          ? payload.delta * 0.25 * 60 / bpm
+          : ((payload?.rawValue ?? 0) / 127) * Math.max(0, (timelineChapters.at(-1)?.end ?? 0) - (timelineChapters[0]?.start ?? 0));
+        const nextTime = payload?.delta !== undefined ? currentTime + timeDelta : (timelineChapters[0]?.start ?? 0) + timeDelta;
+        seekToMidiTime(nextTime);
+        setMidiScrubFollowRequest((request) => request + 1);
+        showMidiControlFeedback(
+          "Jog Scrub",
+          payload?.delta !== undefined
+            ? `${actionDelta > 0 ? "+" : ""}${(actionDelta * 0.25).toFixed(2)} beats · ${nextTime.toFixed(2)}s`
+            : `${nextTime.toFixed(2)}s`,
+        );
+        break;
+      }
+      case "NUDGE_MEASURE_PREV":
+      case "NUDGE_MEASURE_NEXT":
+        seekToMidiTime(currentTime + (actionId === "NUDGE_MEASURE_NEXT" ? 1 : -1) * quarterBeatsPerMeasure * 60 / bpm);
+        break;
+      case "SELECT_SECTION_AT_PLAYHEAD":
+        if (activeChapter) setPendingTimelineFocusSectionId(activeChapter.id);
+        break;
+      case "PREV_SECTION":
+      case "NEXT_SECTION": {
+        const nextIndex = activeChapterIndex < 0
+          ? (actionId === "PREV_SECTION" ? 0 : -1)
+          : activeChapterIndex + (actionId === "PREV_SECTION" ? -1 : 1);
+        const target = timelineChapters[Math.max(0, Math.min(timelineChapters.length - 1, nextIndex))];
+        if (target) seekToMidiTime(target.start);
+        break;
+      }
+      case "PREV_LINE":
+      case "NEXT_LINE": {
+        const direction = actionId === "PREV_LINE" ? "previous" : "next";
+        navigateToMidiLine(direction, currentTime);
+        break;
+      }
+      case "ADJUST_SECTION_MEASURES":
+      case "ADJUST_SECTION_BEATS":
+      case "ADJUST_SECTION_REPEATS": {
+        if (!activeChapter) break;
+        const field = actionId === "ADJUST_SECTION_MEASURES"
+          ? "measures"
+          : actionId === "ADJUST_SECTION_BEATS" ? "beats" : "repeats";
+        const metrics = getCentralizedMetricsTuple(activeChapter.type);
+        const currentValue = Number(metrics[field]) || 0;
+        const absoluteValue = Math.round(((payload?.rawValue ?? 0) / 127) * (
+          field === "measures" ? 63 : field === "beats" ? Math.max(0, quarterBeatsPerMeasure - 1) : 8
+        ));
+        const nextValue = payload?.delta !== undefined
+          ? Math.max(field === "repeats" ? 0 : 1, currentValue + actionDelta)
+          : field === "measures" ? Math.max(1, absoluteValue + 1) : absoluteValue;
+        recordTimelineUndo();
+        handleUpdateCentralizedMetrics(activeChapter.type, field, nextValue);
+        showMidiControlFeedback(
+          field === "measures" ? "Section Measures" : field === "beats" ? "Section Beats" : "Section Repeats",
+          String(nextValue),
+        );
+        break;
+      }
+      case "ADJUST_LINE_MEASURES": {
+        const selectedLine = midiSelectedLine ?? (timelineLyricPreview
+          ? {
+              sectionId: timelineLyricPreview.sectionId,
+              lineIndex: timelineLyricPreview.lineIndex,
+              time: currentTime,
+            }
+          : null);
+        if (!selectedLine) break;
+        const section = formSections.find((item) => item.id === selectedLine.sectionId);
+        if (!section) break;
+        const lines = getTimelineLyrics(section);
+        const lineOrdinal = lines.findIndex((line) => line.lineIndex === selectedLine.lineIndex);
+        if (lineOrdinal < 0) break;
+        const metrics = getCentralizedMetricsTuple(section.type);
+        const currentOverride = lineOverrides?.[section.type]?.[selectedLine.lineIndex];
+        const lineCount = Math.max(1, lines.length);
+        const autoSpreadMeasures = Math.floor(metrics.measures / lineCount);
+        const remainderMeasures = metrics.measures % lineCount;
+        const autoSpreadBeats = Math.floor(metrics.beats / lineCount);
+        const remainderBeats = metrics.beats % lineCount;
+        const currentMeasures = currentOverride?.measures ?? autoSpreadMeasures + (lineOrdinal < remainderMeasures ? 1 : 0);
+        const currentBeats = currentOverride?.beats ?? autoSpreadBeats + (lineOrdinal < remainderBeats ? 1 : 0);
+        const nextMeasures = payload?.delta !== undefined
+          ? Math.max(0, currentMeasures + actionDelta)
+          : Math.round(((payload?.rawValue ?? 0) / 127) * 16);
+        recordTimelineUndo();
+        handleContentLineTimingChange(section.id, section.type, selectedLine.lineIndex, "measures", nextMeasures);
+        showMidiControlFeedback(
+          `Line ${lineOrdinal + 1} Measures`,
+          `${nextMeasures} measure${nextMeasures === 1 ? "" : "s"}${currentBeats ? ` + ${currentBeats} beat${currentBeats === 1 ? "" : "s"}` : ""}`,
+        );
+        break;
+      }
+      case "TAP_TO_SPLIT_LINE": {
+        if (!timelineLyricPreview) break;
+        const section = formSections.find((item) => item.id === timelineLyricPreview.sectionId);
+        const chapter = timelineChapters.find((item) => item.id === timelineLyricPreview.sectionId);
+        if (!section || !chapter) break;
+        const lines = getTimelineLyrics(section);
+        const durations = [...(timelineLineDurationsBySectionId[section.id] ?? [])];
+        if (durations.length < 2) break;
+        const beatAtPlayhead = ((currentTime - chapter.start) * bpm) / 60;
+        let boundary = 0;
+        let boundaryIndex = 0;
+        let closestDistance = Number.POSITIVE_INFINITY;
+        for (let index = 1; index < durations.length; index += 1) {
+          boundary += durations[index - 1];
+          const distance = Math.abs(boundary - beatAtPlayhead);
+          if (distance < closestDistance) {
+            closestDistance = distance;
+            boundaryIndex = index;
+          }
+        }
+        if (boundaryIndex <= 0) break;
+        const pairStart = durations.slice(0, boundaryIndex - 1).reduce((sum, duration) => sum + duration, 0);
+        const pairTotal = durations[boundaryIndex - 1] + durations[boundaryIndex];
+        const newLeftDuration = Math.max(1, Math.min(pairTotal - 1, Math.round(beatAtPlayhead - pairStart)));
+        durations[boundaryIndex - 1] = newLeftDuration;
+        durations[boundaryIndex] = pairTotal - newLeftDuration;
+        if (lines.length === durations.length) {
+          handleTimelineUpdateLineDurations(section.id, section.type, durations);
+        }
+        break;
+      }
+      case "ADJUST_YOUTUBE_OFFSET": {
+        const nextOffset = payload?.delta !== undefined
+          ? formYoutubeSyncOffset + actionDelta * 25
+          : Math.round(((payload?.rawValue ?? 0) / 127) * 4000) - 2000;
+        handleTimelineDownbeatOffsetChange(nextOffset);
+        showMidiControlFeedback("YouTube Offset", `${nextOffset} ms`);
+        break;
+      }
+      case "ADJUST_TEMPO_BPM": {
+        const nextTempo = payload?.delta !== undefined
+          ? bpm + actionDelta
+          : Math.round(30 + ((payload?.rawValue ?? 0) / 127) * 270);
+        const clampedTempo = Math.max(30, Math.min(300, nextTempo));
+        setFormTempo(String(clampedTempo));
+        setHasUnsavedChanges(true);
+        showMidiControlFeedback("Tempo", `${clampedTempo} BPM`);
+        break;
+      }
+      case "BACKING_TRACK_VOLUME": {
+        const volume = Math.round(((payload?.rawValue ?? 0) / 127) * 100);
+        midiBackingVolumeRef.current = volume;
+        setMidiBackingVolume(volume);
+        showMidiControlFeedback("Backing Track", `${volume}%`);
+        if (ytPlayerRef.current && typeof ytPlayerRef.current.setVolume === "function") {
+          ytPlayerRef.current.setVolume(volume);
+        }
+        break;
+      }
+      case "CLICK_VOLUME": {
+        const volume = Math.round(((payload?.rawValue ?? 0) / 127) * 100);
+        setMidiClickVolume(volume);
+        showMidiControlFeedback("Click Volume", `${volume}%`);
+        break;
+      }
+      case "CLICK_MUTE_TOGGLE":
+        setIsMetronomeMuted(!isMetronomeMuted);
+        break;
+      case "TIMELINE_ZOOM": {
+        const pixelsPerBeat = payload?.delta !== undefined
+          ? midiPixelsPerBeatRef.current + actionDelta * 1.5
+          : 0.1 + ((payload?.rawValue ?? 0) / 127) * 199.9;
+        const clampedPixelsPerBeat = Math.max(0.1, Math.min(200, pixelsPerBeat));
+        midiPixelsPerBeatRef.current = clampedPixelsPerBeat;
+        setMidiPixelsPerBeat(clampedPixelsPerBeat);
+        showMidiControlFeedback("Timeline Zoom", `${clampedPixelsPerBeat.toFixed(1)} px/beat`);
+        break;
+      }
+      case "SAVE_STRUCTURE":
+        void handleCommitSongChangesToDB();
+        break;
+      case "UNDO_CHANGES":
+        handleTimelineUndo();
+        break;
+      case "DELETE_ACTIVE_SECTION":
+        if (activeChapter) handleTimelineRemove(activeChapter.id);
+        break;
+    }
+  }, supabase, isMidiMappingModalOpen);
+
+  useEffect(() => {
+    const placementOpen = pendingTimelineSectionType !== null;
+    const catalogOpen = sectionModalConfig.isOpen;
+    midiLearn.sendMidiFeedback("MODAL_INSERT_BEFORE", placementOpen);
+    midiLearn.sendMidiFeedback("MODAL_INSERT_AFTER", placementOpen);
+    midiLearn.sendMidiFeedback("MODAL_CANCEL", placementOpen || catalogOpen);
+    midiLearn.sendMidiFeedback("MODAL_ADD_NEW_OR_CYCLE", placementOpen || catalogOpen);
+    midiLearn.sendMidiFeedback("MODAL_CONFIRM", catalogOpen);
+    midiLearn.sendMidiFeedback("PLAY_PAUSE", catalogOpen);
+    midiLearn.sendMidiFeedback("CLICK_MUTE_TOGGLE", isMetronomeMuted);
+    midiLearn.sendMidiFeedback("LOOP_ACTIVE_SECTION", midiLoopSectionId !== null);
+  }, [
+    isMetronomeMuted,
+    midiLearn.sendMidiFeedback,
+    midiLoopSectionId,
+    pendingTimelineSectionType,
+    sectionModalConfig.isOpen,
+  ]);
+
+  if (loading) {
+    return (
+      <div className="h-[100dvh] w-full overflow-hidden bg-surface flex flex-col relative animate-in slide-in-from-right-full fade-in duration-300 ease-out">
+        <header className="sticky top-0 z-[100] w-full flex-shrink-0 bg-surface/90 border-b border-outline-variant/30 shadow-sm">
+          <div className="flex items-center justify-between px-4 md:px-8 py-3.5 w-full">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-surface-container-high animate-pulse" />
+              <div className="w-48 h-5 bg-surface-container-high rounded animate-pulse" />
+            </div>
+            <div className="hidden md:flex items-center gap-2">
+              <div className="w-24 h-7 rounded-lg bg-surface-container-high animate-pulse" />
+              <div className="w-32 h-7 rounded-lg bg-surface-container-high animate-pulse" />
+            </div>
+          </div>
+          <div className="px-4 md:px-8 flex items-center border-t border-outline-variant/30 bg-surface-container-lowest/30">
+            <div className="py-4 flex gap-4 w-full">
+              <div className="w-16 h-3 bg-surface-container-high rounded animate-pulse" />
+              <div className="w-16 h-3 bg-surface-container-high rounded animate-pulse" />
+              <div className="w-20 h-3 bg-surface-container-high rounded animate-pulse" />
+            </div>
+          </div>
+        </header>
+        <div className="flex-1 p-4 md:p-8 space-y-4">
+          <div className="w-full h-[250px] bg-surface-container-low border border-outline-variant/30 rounded-2xl animate-pulse shadow-sm" />
+          <div className="w-full h-[400px] bg-surface-container-low border border-outline-variant/30 rounded-2xl animate-pulse shadow-sm" />
+        </div>
+      </div>
+    );
+  }
 
   const handleDeleteSong = async () => {
     if (!canDeleteSong || isDeletingSong) return;
@@ -4232,6 +4613,7 @@ function formatTimeWithMs(seconds: number) {
         )}
 
         {editorActiveTab === "timeline" && (
+          <>
           <TimelineArrangement
             key={editingSongId}
             sections={formSections}
@@ -4249,11 +4631,16 @@ function formatTimeWithMs(seconds: number) {
             tempo={parseInt(formTempo, 10) || 75}
             downbeatOffsetMs={formYoutubeSyncOffset}
             playheadTime={ytCurrentTime}
-            isPlaying={ytPlaying}
             lyricPreview={timelineLyricPreview}
             focusedSectionId={pendingTimelineFocusSectionId}
             onFocusedSectionHandled={clearPendingTimelineFocus}
             isMetronomeMuted={isMetronomeMuted}
+            midiPixelsPerBeat={midiPixelsPerBeat}
+            midiControlFeedback={midiControlFeedback}
+            midiScrubFollowRequest={midiScrubFollowRequest}
+            onEffectiveZoomChange={handleEffectiveMidiZoomChange}
+            onClearMidiPixelsPerBeat={() => setMidiPixelsPerBeat(null)}
+            onOpenMidiMappings={() => setIsMidiMappingModalOpen(true)}
             onSeekToZero={() => {
               setYtCurrentTime(0);
               if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === "function") {
@@ -4295,6 +4682,36 @@ function formatTimeWithMs(seconds: number) {
             canUndo={timelineUndoCount > 0}
             onUndo={handleTimelineUndo}
           />
+          <MidiMappingModal
+            isOpen={isMidiMappingModalOpen}
+            onClose={() => setIsMidiMappingModalOpen(false)}
+            isSupported={midiLearn.isSupported}
+            isConnected={midiLearn.isConnected}
+            activeDeviceName={midiLearn.activeDeviceName}
+            devices={midiLearn.devices}
+            profileDocument={midiLearn.profileDocument}
+            activeProfileId={midiLearn.activeProfileId}
+            isProfileLoading={midiLearn.isProfileLoading}
+            isProfileSaving={midiLearn.isProfileSaving}
+            learningActionId={midiLearn.learningActionId}
+            bindings={midiLearn.bindings}
+            recentMessages={midiLearn.recentMessages}
+            accessError={midiLearn.accessError}
+            startListening={midiLearn.startListening}
+            stopListening={midiLearn.stopListening}
+            clearBinding={midiLearn.clearBinding}
+            resetAllBindings={midiLearn.resetAllBindings}
+            setBindingMode={midiLearn.setBindingMode}
+            setBindingChannel={midiLearn.setBindingChannel}
+            setRelativeEncoding={midiLearn.setRelativeEncoding}
+            scanMidiDevices={midiLearn.scanMidiDevices}
+            pairDevice={midiLearn.pairDevice}
+            selectProfile={midiLearn.selectProfile}
+            createProfile={midiLearn.createProfile}
+            renameProfile={midiLearn.renameProfile}
+            deleteProfile={midiLearn.deleteProfile}
+          />
+          </>
         )}
 
         {editorActiveTab === "track" && (
@@ -4956,21 +5373,19 @@ function formatTimeWithMs(seconds: number) {
               >
                 {anchor ? `After ${anchor.label}` : currentTimelineChapter ? "After current section" : "Add at the end"}
               </button>
-              {source && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPendingTimelineSourceSectionId(null);
-                    setPendingTimelineSectionType(null);
-                    setSectionModalSearch("");
-                    setSectionModalSelected(null);
-                    setSectionModalConfig({ isOpen: true, mode: "add" });
-                  }}
-                  className="col-span-2 w-full rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-xs font-bold text-on-surface hover:bg-surface-container-high"
-                >
-                  Add a new section instead
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingTimelineSourceSectionId(null);
+                  setPendingTimelineSectionType(null);
+                  setSectionModalSearch("");
+                  setSectionModalSelected(dynamicCatalogOptions[0]?.computedId ?? null);
+                  setSectionModalConfig({ isOpen: true, mode: "add" });
+                }}
+                className="col-span-2 w-full rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-xs font-bold text-on-surface hover:bg-surface-container-high"
+              >
+                Add a new section instead
+              </button>
               <button type="button" onClick={() => { setPendingTimelineSectionType(null); setPendingTimelineAnchorSectionId(null); setPendingTimelineSourceSectionId(null); setPendingTimelineInsertionIndex(null); }} className="col-span-2 w-full rounded-xl px-4 py-2 text-xs font-bold text-on-surface-variant hover:bg-surface-container-high">
                 Cancel
               </button>

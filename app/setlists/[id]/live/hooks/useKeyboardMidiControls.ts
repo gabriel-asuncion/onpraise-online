@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "../../../../../utils/supabase/client";
+import {
+  createMidiControllerProfile,
+  EMPTY_MIDI_PROFILES,
+  parseMidiProfiles,
+  type MidiProfilesDocument,
+} from "./midiProfiles";
 
 export type ControlActionId =
   | "playStop"
@@ -194,6 +200,9 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
   const [midiError, setMidiError] = useState<string | null>(null);
   const [learningAction, setLearningAction] = useState<ControlActionId | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [profileDocument, setProfileDocument] = useState<MidiProfilesDocument>(EMPTY_MIDI_PROFILES);
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  const [isSetupOpen, setIsSetupOpen] = useState(false);
 
   const actionsRef = useRef(actions);
   const preferencesRef = useRef(preferences);
@@ -201,12 +210,18 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
   const learningActionRef = useRef<ControlActionId | null>(null);
   const pressedMidiInputsRef = useRef(new Set<string>());
   const loadedUserIdRef = useRef<string | null>(null);
+  const profileDocumentRef = useRef(profileDocument);
+  const activeProfileIdRef = useRef(activeProfileId);
+  const setupOpenRef = useRef(isSetupOpen);
 
   useEffect(() => {
     actionsRef.current = actions;
     preferencesRef.current = preferences;
     learningActionRef.current = learningAction;
-  }, [actions, learningAction, preferences]);
+    profileDocumentRef.current = profileDocument;
+    activeProfileIdRef.current = activeProfileId;
+    setupOpenRef.current = isSetupOpen;
+  }, [actions, activeProfileId, isSetupOpen, learningAction, preferences, profileDocument]);
 
   useEffect(() => {
     let active = true;
@@ -222,7 +237,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
       const authenticatedUserId = authData.user.id;
       const { data, error } = await supabase
         .from("user_control_preferences")
-        .select("settings")
+        .select("settings, midi_profiles")
         .eq("user_id", authenticatedUserId)
         .maybeSingle();
       if (!active) return;
@@ -231,9 +246,26 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
         setIsLoading(false);
         return;
       }
-      const settings = parseStoredPreferences(data?.settings);
+      let document = parseMidiProfiles(data?.midi_profiles);
+      if (document.profiles.length === 0) {
+        const profile = createMidiControllerProfile("Default");
+        const legacyPreferences = parseStoredPreferences(data?.settings);
+        profile.liveSettings = legacyPreferences as unknown as Record<string, unknown>;
+        profile.pairedDeviceId = legacyPreferences.pairedDeviceId;
+        profile.pairedDeviceName = legacyPreferences.pairedDeviceName;
+        document = { version: 1, activeProfileId: profile.id, profiles: [profile] };
+      }
+      const activeProfile = document.profiles.find((profile) => profile.id === document.activeProfileId) ?? document.profiles[0];
+      document = { ...document, activeProfileId: activeProfile.id };
+      const settings = parseStoredPreferences(
+        Object.keys(activeProfile.liveSettings).length > 0 ? activeProfile.liveSettings : data?.settings,
+      );
       setPreferences(settings);
       preferencesRef.current = settings;
+      setProfileDocument(document);
+      profileDocumentRef.current = document;
+      setActiveProfileId(activeProfile.id);
+      activeProfileIdRef.current = activeProfile.id;
       loadedUserIdRef.current = authenticatedUserId;
       setUserId(authenticatedUserId);
       setIsLoading(false);
@@ -251,6 +283,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
         .upsert({
           user_id: userId,
           settings: preferences,
+          midi_profiles: profileDocument,
           updated_at: new Date().toISOString(),
         }, { onConflict: "user_id" })
         .then(({ error }) => {
@@ -263,7 +296,26 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
         })
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [isLoading, preferences, supabase, userId]);
+  }, [isLoading, preferences, profileDocument, supabase, userId]);
+
+  useEffect(() => {
+    if (isLoading || !userId || loadedUserIdRef.current !== userId || !activeProfileId) return;
+    setProfileDocument((current) => {
+      const updated = {
+        ...current,
+        profiles: current.profiles.map((profile) => profile.id === activeProfileId
+          ? {
+              ...profile,
+              pairedDeviceId: preferences.pairedDeviceId,
+              pairedDeviceName: preferences.pairedDeviceName,
+              liveSettings: preferences as unknown as Record<string, unknown>,
+            }
+          : profile),
+      };
+      profileDocumentRef.current = updated;
+      return updated;
+    });
+  }, [activeProfileId, isLoading, preferences, userId]);
 
   const refreshDevices = useCallback((access: MidiAccessLike) => {
     setDevices(Array.from(access.inputs.values()).map((input) => ({
@@ -352,6 +404,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
         if (!mapping) return;
 
         const actionId = mapping[0] as ControlActionId;
+        if (setupOpenRef.current) return;
         if (messageType === "note") {
           const isPressed = command === 0x90 && velocity > 0;
           const pressKey = `${input.id}:${channel}:${messageType}:${number}`;
@@ -437,8 +490,74 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
     setLearningAction(null);
   }, []);
 
+  const selectMidiProfile = useCallback((profileId: string) => {
+    const profile = profileDocumentRef.current.profiles.find((candidate) => candidate.id === profileId);
+    if (!profile) return;
+    const nextDocument = { ...profileDocumentRef.current, activeProfileId: profileId };
+    profileDocumentRef.current = nextDocument;
+    setProfileDocument(nextDocument);
+    setActiveProfileId(profileId);
+    activeProfileIdRef.current = profileId;
+    const nextPreferences = parseStoredPreferences(profile.liveSettings);
+    setPreferences(nextPreferences);
+    preferencesRef.current = nextPreferences;
+    setLearningAction(null);
+  }, []);
+
+  const createMidiProfile = useCallback((name: string) => {
+    const profile = createMidiControllerProfile(name);
+    profile.liveSettings = EMPTY_CONTROL_PREFERENCES as unknown as Record<string, unknown>;
+    const nextDocument = {
+      ...profileDocumentRef.current,
+      activeProfileId: profile.id,
+      profiles: [...profileDocumentRef.current.profiles, profile],
+    };
+    profileDocumentRef.current = nextDocument;
+    setProfileDocument(nextDocument);
+    setActiveProfileId(profile.id);
+    activeProfileIdRef.current = profile.id;
+    setPreferences(EMPTY_CONTROL_PREFERENCES);
+    preferencesRef.current = EMPTY_CONTROL_PREFERENCES;
+    setLearningAction(null);
+  }, []);
+
+  const renameMidiProfile = useCallback((profileId: string, name: string) => {
+    const nextDocument = {
+      ...profileDocumentRef.current,
+      profiles: profileDocumentRef.current.profiles.map((profile) =>
+        profile.id === profileId ? { ...profile, name: name.trim() } : profile),
+    };
+    profileDocumentRef.current = nextDocument;
+    setProfileDocument(nextDocument);
+  }, []);
+
+  const deleteMidiProfile = useCallback((profileId: string) => {
+    const profiles = profileDocumentRef.current.profiles.filter((profile) => profile.id !== profileId);
+    if (profiles.length === 0) return;
+    const nextActiveId = activeProfileIdRef.current === profileId ? profiles[0].id : activeProfileIdRef.current;
+    const nextDocument = { ...profileDocumentRef.current, profiles, activeProfileId: nextActiveId };
+    profileDocumentRef.current = nextDocument;
+    setProfileDocument(nextDocument);
+    if (activeProfileIdRef.current === profileId) {
+      activeProfileIdRef.current = nextActiveId;
+      setActiveProfileId(nextActiveId);
+      const nextPreferences = parseStoredPreferences(profiles[0].liveSettings);
+      preferencesRef.current = nextPreferences;
+      setPreferences(nextPreferences);
+    }
+    setLearningAction(null);
+  }, []);
+
   return {
     preferences,
+    profileDocument,
+    activeProfileId,
+    selectMidiProfile,
+    createMidiProfile,
+    renameMidiProfile,
+    deleteMidiProfile,
+    isSetupOpen,
+    setSetupOpen: (open: boolean) => setIsSetupOpen(open),
     isLoading,
     isSaving,
     preferenceError,

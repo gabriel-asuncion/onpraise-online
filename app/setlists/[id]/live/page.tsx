@@ -14,11 +14,11 @@ import {
   compileTimelineBeatMap,
   getNextTimelineBeat,
   getTimelineDurationBeats,
+  getTimelineMeasureBeat,
   getTimelineLineStartBeat,
   getTimelineMeter,
   getYoutubeTimeForTimeline
 } from "./utils/timeline";
-import { startPlaybackWithSupplementaryAudio } from "./utils/playback-start";
 
 import { useWakeLock } from "./hooks/useWakeLock";
 import { useWebAudioEngine } from "./hooks/useWebAudioEngine";
@@ -428,6 +428,7 @@ export default function SetlistPerformanceRoomPage() {
   const zenOverlayRef = useRef<HTMLDivElement | null>(null);
 
   const [isPlayingFlow, setIsPlayingFlow] = useState(false);
+  const [playbackSessionId, setPlaybackSessionId] = useState(0);
   const [currentSectionIndex, setCurrentSectionIndex] = useState<number>(0);
   const [currentBeat, setCurrentBeat] = useState<number>(1);
   const [tracksPlayheadBeat, setTracksPlayheadBeat] = useState(0);
@@ -452,9 +453,12 @@ export default function SetlistPerformanceRoomPage() {
     trackIndex: number;
     sectionIndex: number;
     exactBeat: number | null;
-    startTimestamp: number;
+    videoId: string | null;
+    commandInFlight: boolean;
+    commandIssued: boolean;
+    commandRevision: number;
   } | null>(null);
-  const youtubePlaybackStartedHandlerRef = useRef<(currentTimeSeconds: number) => void>(() => {});
+  const youtubePlaybackStartedHandlerRef = useRef<(currentTimeSeconds: number, videoId?: string) => void>(() => {});
   const youtubePlaybackErrorHandlerRef = useRef<() => void>(() => {});
   const beginYoutubeBackedStartRef = useRef<() => void>(() => {});
   const pendingQuantizedJumpRef = useRef<{ trackIndex: number; sectionIndex: number; jumpTime: number } | null>(null);
@@ -462,6 +466,8 @@ export default function SetlistPerformanceRoomPage() {
   const activeLineIndexRef = useRef<number>(0);
   const isPlayingRef = useRef(false);
   const playbackSyncRevisionRef = useRef(0);
+  const playbackCommandRevisionRef = useRef(0);
+  const autoAdvanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playbackAuthorityRef = useRef<PlaybackAuthority | null>(null);
   const acceptedPlaybackRevisionRef = useRef<{
     authorityConnectionId: string;
@@ -483,6 +489,11 @@ export default function SetlistPerformanceRoomPage() {
   const playbackStateRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // const sectionRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
   const audioContextStartTimeRef = useRef<number | null>(null);
+  const audioContextResumePromiseRef = useRef<Promise<void> | null>(null);
+  const pendingAudioClockCorrectionRef = useRef<{
+    correctionMs: number;
+    applyAtAudioTime: number | null;
+  } | null>(null);
   const astTreeRef = useRef<CompiledSectionToken[]>([]);
   const mdSectionStartTimeRef = useRef<number | null>(null);
   const youtubeStartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -616,14 +627,32 @@ export default function SetlistPerformanceRoomPage() {
       return;
     }
 
+    const persistedUpdate: TelemetryUpdate = {
+      ...update,
+      ...(update.recording_start_time != null
+        ? { recording_start_time: Math.round(update.recording_start_time) }
+        : {}),
+      ...(typeof update.recording_accumulated_ms === "number"
+        ? { recording_accumulated_ms: Math.round(update.recording_accumulated_ms) }
+        : {}),
+      ...(Array.isArray(update.rehearsal_history)
+        ? {
+            rehearsal_history: update.rehearsal_history.map((item) => ({
+              ...item,
+              timestamp: Math.round(item.timestamp),
+            })),
+          }
+        : {}),
+    };
+
     if (targetSetlistId === setlistId && hasCurrentPlaybackAuthority()) {
-      sendSupabaseBroadcast({ action: "TELEMETRY_SYNC", ...update });
+      sendSupabaseBroadcast({ action: "TELEMETRY_SYNC", ...persistedUpdate });
     }
 
     const write = telemetryWriteQueueRef.current.catch(() => undefined).then(async () => {
       const { data, error } = await supabase
         .from("setlists")
-        .update(update)
+        .update(persistedUpdate)
         .eq("id", targetSetlistId)
         .select("id")
         .maybeSingle();
@@ -1080,7 +1109,14 @@ export default function SetlistPerformanceRoomPage() {
     const correctionMs = Math.max(-maxCorrectionMs, Math.min(maxCorrectionMs, requestedCorrectionMs));
     mdSectionStartTimeRef.current = localStartTime + correctionMs;
     if (audioContextStartTimeRef.current !== null) {
-      audioContextStartTimeRef.current += correctionMs / 1000;
+      const pendingCorrection = pendingAudioClockCorrectionRef.current;
+      pendingAudioClockCorrectionRef.current = {
+        correctionMs: Math.max(
+          -maxCorrectionMs,
+          Math.min(maxCorrectionMs, (pendingCorrection?.correctionMs || 0) + correctionMs)
+        ),
+        applyAtAudioTime: pendingCorrection?.applyAtAudioTime ?? null
+      };
     }
   };
 
@@ -1333,7 +1369,12 @@ export default function SetlistPerformanceRoomPage() {
     if (!hasCurrentPlaybackAuthority()) { setPlaybackClockNotice("Waiting for Music Director authority to synchronize."); return; }
     if (!isSyncedRef.current) { setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist."); return; }
 
-    initAudioContext();
+    const commandRevision = ++playbackCommandRevisionRef.current;
+    if (autoAdvanceTimeoutRef.current) {
+      clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
+    }
+    const audioReady = resumeAudioContextForPlayback();
 
     // Apply the exact scrubbed beat memory
     let startTimestamp = getGlobalTime();
@@ -1351,38 +1392,98 @@ export default function SetlistPerformanceRoomPage() {
         trackIndex: currentTrackIndexRef.current,
         sectionIndex: currentSectionIndexRef.current,
         exactBeat: exactScrubBeat,
-        startTimestamp
+        videoId: youtubeVideoId,
+        commandInFlight: false,
+        commandIssued: false,
+        commandRevision
       };
       pendingYoutubeSyncRef.current = null;
 
-      startPlaybackWithSupplementaryAudio(
-        () => completeLiveStart(
-          currentTrackIndexRef.current,
-          currentSectionIndexRef.current,
-          startTimestamp,
-          true,
-          exactScrubBeat,
-          true
-        ),
-        beginYoutubeBackedStart
-      );
+      void audioReady.then(() => beginYoutubeBackedStart()).catch((error) => {
+        if (playbackCommandRevisionRef.current !== commandRevision) return;
+        console.error("Could not resume audio before starting playback.", error);
+        setPlaybackClockNotice("Audio could not be started. Please interact with the page and try again.");
+        pendingYoutubeStartRef.current = null;
+        if (!isPlayingRef.current) isYtBackingTrackStartRef.current = false;
+        ytPlayerRef.current?.pauseVideo?.();
+      });
+      beginYoutubeBackedStart();
       return;
     }
 
-    startPlaybackWithSupplementaryAudio(
-      () => completeLiveStart(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, false, exactScrubBeat)
-    );
+    void audioReady.then(() => {
+      if (playbackCommandRevisionRef.current !== commandRevision) return;
+      if (exactScrubBeat !== null && activeSongRef.current) {
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
+        const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
+        startTimestamp = getGlobalTime() - ((exactScrubBeat - sectionStartBeat) * beatDurationMs);
+      } else {
+        startTimestamp = getGlobalTime();
+      }
+      completeLiveStart(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, false, exactScrubBeat);
+    }).catch((error) => {
+      console.error("Could not resume audio before starting playback.", error);
+      setPlaybackClockNotice("Audio could not be started. Please interact with the page and try again.");
+    });
   }
 
-  function beginYoutubeBackedStart() {
+  function resumeAudioContextForPlayback() {
+    initAudioContext();
+    const audioContext = getAudioContext();
+    if (!audioContext) {
+      return Promise.reject(new Error("Web Audio is unavailable."));
+    }
+
+    const resumePromise = audioContext.state === "running"
+      ? Promise.resolve()
+      : audioContext.resume();
+    const readyPromise = resumePromise.then(() => {
+      if (audioContext.state !== "running") {
+        throw new Error(`AudioContext did not enter the running state (state: ${audioContext.state}).`);
+      }
+    });
+    audioContextResumePromiseRef.current = readyPromise;
+    return readyPromise;
+  }
+
+  async function beginYoutubeBackedStart() {
     if (!pendingYoutubeStartRef.current || !isYtPlayerReadyRef.current) return;
-    const player = ytPlayerRef.current;
-    if (!player || typeof player.seekTo !== "function" || typeof player.playVideo !== "function") return;
     const pendingStart = pendingYoutubeStartRef.current;
+    if (pendingStart.commandInFlight || pendingStart.commandIssued) return;
+    pendingStart.commandInFlight = true;
+    try {
+      await (audioContextResumePromiseRef.current ?? resumeAudioContextForPlayback());
+    } catch (error) {
+      if (playbackCommandRevisionRef.current !== pendingStart.commandRevision) return;
+      pendingStart.commandInFlight = false;
+      console.error("Could not resume audio before YouTube playback.", error);
+      setPlaybackClockNotice("Audio could not be started. Please interact with the page and try again.");
+      if (pendingYoutubeStartRef.current === pendingStart) pendingYoutubeStartRef.current = null;
+      if (!isPlayingRef.current) isYtBackingTrackStartRef.current = false;
+      ytPlayerRef.current?.pauseVideo?.();
+      return;
+    }
 
     if (
-      !isPlayingRef.current ||
-      pendingStart.trackIndex !== playingTrackIndexRef.current ||
+      pendingYoutubeStartRef.current !== pendingStart ||
+      playbackCommandRevisionRef.current !== pendingStart.commandRevision
+    ) return;
+    const audioContext = getAudioContext();
+    if (!audioContext || audioContext.state !== "running") {
+      pendingStart.commandInFlight = false;
+      setPlaybackClockNotice("Audio is not ready. Please interact with the page and try again.");
+      pendingYoutubeStartRef.current = null;
+      if (!isPlayingRef.current) isYtBackingTrackStartRef.current = false;
+      return;
+    }
+
+    const player = ytPlayerRef.current;
+    if (!player || typeof player.seekTo !== "function" || typeof player.playVideo !== "function") {
+      pendingStart.commandInFlight = false;
+      return;
+    }
+
+    if (
       pendingStart.trackIndex !== currentTrackIndexRef.current ||
       pendingStart.sectionIndex !== currentSectionIndexRef.current
     ) {
@@ -1395,30 +1496,87 @@ export default function SetlistPerformanceRoomPage() {
       const offsetMs = song?.youtube_sync_offset_ms || 0;
       const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
       const startBeat = pendingStart.exactBeat ?? sectionStartBeat;
-      const elapsedTimelineMs = Math.max(0, getGlobalTime() - pendingStart.startTimestamp);
       const expectedYoutubeTime = getYoutubeTimeForTimeline(
         startBeat,
-        elapsedTimelineMs,
+        0,
         song?.tempo || 75,
         offsetMs
       );
 
       player.seekTo(expectedYoutubeTime, true);
+      pendingStart.commandIssued = true;
       player.playVideo();
       if (player.getPlayerState?.() === 1) {
-        handleYoutubePlaybackStarted(player.getCurrentTime?.() ?? expectedYoutubeTime);
+        handleYoutubePlaybackStarted(
+          player.getCurrentTime?.() ?? expectedYoutubeTime,
+          player.getVideoData?.().video_id
+        );
       }
     } catch (error) {
+      pendingStart.commandInFlight = false;
       console.warn("Could not start the optional YouTube player.", error);
       handleYoutubePlaybackError();
+    } finally {
+      pendingStart.commandInFlight = false;
     }
   }
 
-  function handleYoutubePlaybackStarted(_currentTimeSeconds: number) {
+  function handleYoutubePlaybackStarted(currentTimeSeconds: number, videoId?: string) {
     const pendingStart = pendingYoutubeStartRef.current;
-    if (!pendingStart) return;
+    if (!pendingStart) {
+      if (!isPlayingRef.current || !isYtBackingTrackStartRef.current) {
+        ytPlayerRef.current?.pauseVideo?.();
+      }
+      return;
+    }
+    if (!Number.isFinite(currentTimeSeconds)) return;
+    if (videoId && pendingStart.videoId && videoId !== pendingStart.videoId) return;
 
-    pendingYoutubeStartRef.current = null;
+    try {
+      const audioContext = getAudioContext();
+      if (!audioContext || audioContext.state !== "running") {
+        throw new Error("AudioContext is not running when YouTube playback begins.");
+      }
+      if (pendingYoutubeStartRef.current !== pendingStart) return;
+
+      const song = activeSongRef.current;
+      if (!song) throw new Error("The active song is unavailable.");
+      const actualYoutubeTime = currentTimeSeconds;
+      const audioTime = audioContext.currentTime;
+      const globalTime = getGlobalTime();
+      const beatDurationMs = 60000 / (song.tempo || 75);
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
+      const absoluteBeat = ((actualYoutubeTime * 1000) - (song.youtube_sync_offset_ms || 0)) / beatDurationMs;
+      const sectionElapsedMs = (absoluteBeat - sectionStartBeat) * beatDurationMs;
+      const startTimestamp = globalTime - sectionElapsedMs;
+      const audioAnchor = { audioTime, absoluteBeat };
+      const meter = getTimelineMeter(song.section_timings);
+      const beatPosition = getTimelineMeasureBeat(absoluteBeat, meter);
+      const clickKey = `metronome_${metronomeSoundTypeRef.current}_${beatPosition.beatIndex === 1 ? 1 : 2}`;
+
+      pendingYoutubeStartRef.current = null;
+      completeLiveStart(
+        pendingStart.trackIndex,
+        pendingStart.sectionIndex,
+        startTimestamp,
+        true,
+        pendingStart.exactBeat,
+        false,
+        audioAnchor
+      );
+      if (isPlayingRef.current && isYtBackingTrackStartRef.current && localClickVolumeRef.current > 0) {
+        playZeroLatencyAudio(
+          clickKey,
+          localClickVolumeRef.current,
+          audioAnchor.audioTime - (audioLatencyOffsetMs / 1000)
+        );
+      }
+    } catch (error) {
+      console.error("Could not anchor the metronome to YouTube playback.", error);
+      handleResetFlowTrigger(true);
+      setPlaybackClockNotice("Audio could not be synchronized. Please stop and try again.");
+      handleYoutubePlaybackError();
+    }
   }
 
   function completeLiveStart(
@@ -1427,7 +1585,8 @@ export default function SetlistPerformanceRoomPage() {
     startTimestamp: number,
     isYtSource: boolean,
     exactStartBeat?: number | null,
-    preservePendingYoutubeStart = false
+    preservePendingYoutubeStart = false,
+    audioAnchor?: { audioTime: number; absoluteBeat: number }
   ) {
     if (
       !hasCurrentPlaybackAuthority() ||
@@ -1452,7 +1611,15 @@ export default function SetlistPerformanceRoomPage() {
 
     void startPlaybackTelemetry();
 
-    executeJumpNow(trackIndex, sectionIndex, startTimestamp, true, isYtSource ? "start" : undefined, exactStartBeat === null ? undefined : exactStartBeat);
+    executeJumpNow(
+      trackIndex,
+      sectionIndex,
+      startTimestamp,
+      true,
+      isYtSource && !audioAnchor ? "start" : undefined,
+      exactStartBeat === null ? undefined : exactStartBeat,
+      audioAnchor
+    );
 
     sendSupabaseBroadcast({
       action: "START",
@@ -1465,6 +1632,7 @@ export default function SetlistPerformanceRoomPage() {
 
   function handleYoutubePlaybackError() {
     pendingYoutubeStartRef.current = null;
+    if (!isPlayingRef.current) isYtBackingTrackStartRef.current = false;
   }
 
   const {
@@ -1473,13 +1641,10 @@ export default function SetlistPerformanceRoomPage() {
     ytPlayerRef, isYtPlayerReadyRef
   } = useYouTubeSync({
     activeSong,
-    activeSongRef,
-    beatMapRef,
-    currentSectionIndexRef,
-    getGlobalTime,
     youtubeVolumeRef,
     isYoutubeSyncEnabled,
-    onPlaybackStarted: (currentTimeSeconds) => youtubePlaybackStartedHandlerRef.current(currentTimeSeconds),
+    onPlaybackStarted: (currentTimeSeconds, videoId) =>
+      youtubePlaybackStartedHandlerRef.current(currentTimeSeconds, videoId),
     onPlaybackError: () => youtubePlaybackErrorHandlerRef.current()
   });
   useEffect(() => {
@@ -1523,7 +1688,7 @@ export default function SetlistPerformanceRoomPage() {
 
     try {
       setTimeout(() => {
-        player.seekTo(expectedYoutubeTimeSecs, true);
+        player.seekTo?.(expectedYoutubeTimeSecs, true);
         pendingYoutubeSyncRef.current = null;
 
         const ensurePlaying = () => {
@@ -1567,7 +1732,7 @@ export default function SetlistPerformanceRoomPage() {
   }, [isYtPlayerReady, syncYoutubeToTimeline]);
 
   useHardwareClock({
-    isPlayingFlow, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
+    isPlayingFlow, playbackSessionId, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
     audioLatencyOffsetMs, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
@@ -1575,6 +1740,7 @@ export default function SetlistPerformanceRoomPage() {
     isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime,
     playGuideCue, getAudioContext, audioContextStartTimeRef,
+    pendingAudioClockCorrectionRef,
 
     triggerMetronomeSound: (beatPulse, time) => {
       if (localClickVolumeRef.current <= 0) return;
@@ -1772,9 +1938,12 @@ export default function SetlistPerformanceRoomPage() {
     jumpTime: number,
     isInitialStart: boolean = false,
     youtubeSyncMode?: "start" | "explicit-jump" | "snapshot",
-    exactStartBeat?: number | null
+    exactStartBeat?: number | null,
+    audioAnchor?: { audioTime: number; absoluteBeat: number }
   ) {
+    if (isInitialStart) setPlaybackSessionId((sessionId) => sessionId + 1);
     if (cancelFutureAudio) cancelFutureAudio();
+    pendingAudioClockCorrectionRef.current = null;
 
     if (targetTrackIdx !== undefined && targetTrackIdx !== playingTrackIndexRef.current) {
       mountTargetSetlistTrackIndex(targetTrackIdx);
@@ -1790,15 +1959,16 @@ export default function SetlistPerformanceRoomPage() {
       initAudioContext();
       const audioCtx = getAudioContext();
       if (audioCtx) {
-        const timeUntilJumpMs = jumpTime - getGlobalTime();
-        const absoluteHardwareTimeAtJump = audioCtx.currentTime + (timeUntilJumpMs / 1000);
-
-        // jumpTime is the section-start timestamp; the exact scrub beat only seeds the next click.
-        const targetAbsoluteBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
         const beatSpeedSecs = 60 / (activeSongRef.current?.tempo || 75);
-        const theoreticalSongStartOffset = targetAbsoluteBeat * beatSpeedSecs;
-
-        audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - theoreticalSongStartOffset;
+        if (audioAnchor) {
+          audioContextStartTimeRef.current =
+            audioAnchor.audioTime + (audioLatencyOffsetMs / 1000) - (audioAnchor.absoluteBeat * beatSpeedSecs);
+        } else {
+          const timeUntilJumpMs = jumpTime - getGlobalTime();
+          const absoluteHardwareTimeAtJump = audioCtx.currentTime + (timeUntilJumpMs / 1000);
+          const targetAbsoluteBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
+          audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - (targetAbsoluteBeat * beatSpeedSecs);
+        }
       }
       if (youtubeSyncMode) {
         syncYoutubeToTimeline(targetSectionIdx, jumpTime, youtubeSyncMode);
@@ -1829,7 +1999,9 @@ export default function SetlistPerformanceRoomPage() {
       ? exactStartBeat
       : sectionStartBeat;
 
-    lastAudioBeatRef.current = Math.max(sectionStartBeat, absoluteStart);
+    lastAudioBeatRef.current = audioAnchor
+      ? getNextTimelineBeat(audioAnchor.absoluteBeat, getTimelineMeter(activeSongRef.current?.section_timings))
+      : Math.max(sectionStartBeat, absoluteStart);
     lastBeatRef.current = 0; lastVisualBeatRef.current = 0;
     setTracksPlayheadBeat(isPlayingRef.current
       ? sectionStartBeat + (getGlobalTime() - jumpTime) / beatDurationMs
@@ -1849,7 +2021,13 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   function executeLocalResetSequence(preservePosition = false) {
+    playbackCommandRevisionRef.current++;
+    if (autoAdvanceTimeoutRef.current) {
+      clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
+    }
     if (cancelFutureAudio) cancelFutureAudio();
+    pendingAudioClockCorrectionRef.current = null;
     if (youtubeStartTimeoutRef.current) {
       clearTimeout(youtubeStartTimeoutRef.current);
       youtubeStartTimeoutRef.current = null;
@@ -1950,8 +2128,14 @@ export default function SetlistPerformanceRoomPage() {
     setIsPlayingFlow(false);
     mountTargetSetlistTrackIndex(nextTrackIndex);
 
-    setTimeout(() => {
-      if (!localPresenceUserRef.current?.isMD) return;
+    const commandRevision = ++playbackCommandRevisionRef.current;
+    autoAdvanceTimeoutRef.current = setTimeout(() => {
+      autoAdvanceTimeoutRef.current = null;
+      if (
+        playbackCommandRevisionRef.current !== commandRevision ||
+        !localPresenceUserRef.current?.isMD ||
+        currentTrackIndexRef.current !== nextTrackIndex
+      ) return;
       const jumpTime = getGlobalTime();
       mdSectionStartTimeRef.current = jumpTime;
       isPlayingRef.current = true;
@@ -1963,13 +2147,17 @@ export default function SetlistPerformanceRoomPage() {
 
   function handleToggleFlowPlaybackState() {
     if (!hasCurrentPlaybackAuthority()) { setIsMdLockModalOpen(true); return; }
-    if (pendingYoutubeStartRef.current) {
-      pendingYoutubeStartRef.current = null;
-      ytPlayerRef.current?.pauseVideo?.();
+    if (autoAdvanceTimeoutRef.current) {
+      handleResetFlowTrigger();
+      return;
     }
-    if (isPlayingFlow) {
+    if (pendingYoutubeStartRef.current) {
+      handleResetFlowTrigger();
+      return;
+    }
+    if (isPlayingRef.current) {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
-      handleResetFlowTrigger(true);
+      handleResetFlowTrigger();
     } else {
       if (sections.length === 0 || !activeSong) return;
       executeStartSequence(localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
@@ -1983,6 +2171,11 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   function handleSectionInteractiveSelection(index: number, overrideTrackIndex?: number, exactBeat?: number) {
+    if (autoAdvanceTimeoutRef.current) {
+      clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
+      playbackCommandRevisionRef.current++;
+    }
     if (!hasCurrentPlaybackAuthority()) return;
     if (!isPlayingFlow && !isSyncedRef.current) {
       setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist.");
@@ -2579,6 +2772,8 @@ export default function SetlistPerformanceRoomPage() {
         isPlayingFlow={isPlayingFlow} router={router} handleOpenTransposerModal={() => setIsTransposerOpen(true)} setIsStructureModalOpen={setIsStructureModalOpen}
         midiSetup={{
           preferences: keyboardMidiControls.preferences,
+          profileDocument: keyboardMidiControls.profileDocument,
+          activeProfileId: keyboardMidiControls.activeProfileId,
           devices: keyboardMidiControls.devices,
           isLoading: keyboardMidiControls.isLoading,
           isSaving: keyboardMidiControls.isSaving,
@@ -2592,6 +2787,11 @@ export default function SetlistPerformanceRoomPage() {
           onClearMapping: keyboardMidiControls.clearMidiMapping,
           onClearAll: keyboardMidiControls.clearAllMidiMappings,
           onCancelLearn: keyboardMidiControls.cancelMidiLearn,
+          onSelectProfile: keyboardMidiControls.selectMidiProfile,
+          onCreateProfile: keyboardMidiControls.createMidiProfile,
+          onRenameProfile: keyboardMidiControls.renameMidiProfile,
+          onDeleteProfile: keyboardMidiControls.deleteMidiProfile,
+          setSetupOpen: keyboardMidiControls.setSetupOpen,
         }}
       />
 

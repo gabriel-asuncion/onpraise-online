@@ -54,7 +54,7 @@ interface SettingsModalProps {
   setMixerMutes: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
   mixerSolos: { click: boolean; guide: boolean; yt: boolean };
   setMixerSolos: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
-  midiSetup: Omit<MidiSetupModalProps, "onClose">;
+  midiSetup: Omit<MidiSetupModalProps, "onClose"> & { setSetupOpen: (open: boolean) => void };
   isClickGuideHardPannedRight: boolean;
   setIsClickGuideHardPannedRight: (val: boolean) => void;
   canEditSong: boolean;
@@ -394,7 +394,10 @@ export function SettingsModal(props: SettingsModalProps) {
 
               <button
                 type="button"
-                onClick={() => setIsMidiSetupOpen(true)}
+                onClick={() => {
+                  props.midiSetup.setSetupOpen(true);
+                  setIsMidiSetupOpen(true);
+                }}
                 className="w-full flex items-center justify-between border-t border-outline-variant/10 px-1 pt-3 text-left"
               >
                 <span className="flex items-center gap-3">
@@ -475,7 +478,10 @@ export function SettingsModal(props: SettingsModalProps) {
       {isMidiSetupOpen && (
         <MidiSetupModal
           {...props.midiSetup}
-          onClose={() => setIsMidiSetupOpen(false)}
+          onClose={() => {
+            props.midiSetup.setSetupOpen(false);
+            setIsMidiSetupOpen(false);
+          }}
         />
       )}
     </div>

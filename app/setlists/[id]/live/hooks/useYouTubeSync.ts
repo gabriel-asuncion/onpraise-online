@@ -1,28 +1,36 @@
-import { useState, useEffect, useRef, MutableRefObject } from "react";
-import { SongRecord, CompiledBeatMap } from "../types/setlist";
+import { useState, useEffect, useRef, type MutableRefObject } from "react";
+import type { SongRecord } from "../types/setlist";
 
 interface UseYouTubeSyncProps {
   activeSong: SongRecord | null;
-  activeSongRef: MutableRefObject<SongRecord | null>;
-  beatMapRef: MutableRefObject<CompiledBeatMap>;
-  currentSectionIndexRef: MutableRefObject<number>;
-  getGlobalTime: () => number;
   youtubeVolumeRef: MutableRefObject<number>;
   isYoutubeSyncEnabled: boolean; 
-  onPlaybackStarted?: (currentTimeSeconds: number) => void;
+  onPlaybackStarted?: (currentTimeSeconds: number, videoId?: string) => void;
   onPlaybackError?: () => void;
 }
 
+type YouTubePlayer = {
+  cueVideoById?: (videoId: string) => void;
+  getCurrentTime?: () => number;
+  getPlayerState?: () => number;
+  getVideoData?: () => { video_id?: string };
+  pauseVideo?: () => void;
+  playVideo?: () => void;
+  seekTo?: (seconds: number, allowSeekAhead: boolean) => void;
+  setVolume?: (volume: number) => void;
+};
+
 export function useYouTubeSync({
-  activeSong, activeSongRef, beatMapRef, currentSectionIndexRef, getGlobalTime,
-  youtubeVolumeRef, isYoutubeSyncEnabled, onPlaybackStarted, onPlaybackError
+  activeSong, youtubeVolumeRef, isYoutubeSyncEnabled, onPlaybackStarted, onPlaybackError
 }: UseYouTubeSyncProps) {
   
-  const [youtubeVideoId, setYoutubeVideoId] = useState<string | null>(null);
   const [isYtBuffering, setIsYtBuffering] = useState<boolean>(false);
   const [isYtPlayerReady, setIsYtPlayerReady] = useState(false);
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+  const match = activeSong?.youtube_url?.match(regExp);
+  const youtubeVideoId = match?.[2]?.length === 11 ? match[2] : null;
 
-  const ytPlayerRef = useRef<any>(null);
+  const ytPlayerRef = useRef<YouTubePlayer | null>(null);
   const loadedVideoIdRef = useRef<string | null>(null);
   const isYtPlayerReadyRef = useRef<boolean>(false);
   const ytSyncPendingRef = useRef<boolean>(false); 
@@ -32,7 +40,6 @@ export function useYouTubeSync({
   const onPlaybackStartedRef = useRef(onPlaybackStarted);
   const onPlaybackErrorRef = useRef(onPlaybackError);
   const requestedVideoIdRef = useRef<string | null>(youtubeVideoId);
-
   useEffect(() => {
     onPlaybackStartedRef.current = onPlaybackStarted;
     onPlaybackErrorRef.current = onPlaybackError;
@@ -43,21 +50,13 @@ export function useYouTubeSync({
   }, [youtubeVideoId]);
 
   useEffect(() => {
-    if (!activeSong?.youtube_url) { setYoutubeVideoId(null); return; }
-    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-    const match = activeSong.youtube_url.match(regExp);
-    if (match && match[2].length === 11) setYoutubeVideoId(match[2]);
-    else setYoutubeVideoId(null);
-  }, [activeSong?.youtube_url]);
-
-  useEffect(() => {
     if (!youtubeVideoId || !isYoutubeSyncEnabled) return;
     let isActive = true;
     let readinessTimer: ReturnType<typeof setTimeout> | null = null;
 
     const initPlayer = () => {
       if (!isActive) return;
-      const youtubeApi = (window as Window & { YT?: { Player?: new (element: string, options: unknown) => { [key: string]: unknown } } }).YT;
+      const youtubeApi = (window as Window & { YT?: { Player?: new (element: string, options: unknown) => YouTubePlayer } }).YT;
       if (!youtubeApi?.Player) {
         readinessTimer = setTimeout(initPlayer, 200);
         return;
@@ -76,8 +75,8 @@ export function useYouTubeSync({
           height: "10px", width: "10px", videoId: youtubeVideoId,
           playerVars: { playsinline: 1, controls: 0, disablekb: 1 },
           events: {
-            onReady: (event: { target: { setVolume: (volume: number) => void; cueVideoById?: (videoId: string) => void } }) => {
-              if (!isActive) return;
+            onReady: (event: { target: YouTubePlayer & { setVolume: (volume: number) => void } }) => {
+              if (ytPlayerRef.current !== event.target) return;
               isYtPlayerReadyRef.current = true;
               setIsYtPlayerReady(true);
               event.target.setVolume(youtubeVolumeRef.current * 100);
@@ -87,8 +86,14 @@ export function useYouTubeSync({
                 event.target.cueVideoById?.(currentVideoId);
               }
             },
-            onStateChange: (event: { data: number; target: { getCurrentTime?: () => number } }) => {
-              if (!isActive) return;
+            onStateChange: (event: {
+              data: number;
+              target: {
+                getCurrentTime?: () => number;
+                getVideoData?: () => { video_id?: string };
+              };
+            }) => {
+              if (ytPlayerRef.current !== event.target) return;
               if (event.data === 3) {
                 isYtBufferingRef.current = true;
                 setIsYtBuffering(true);
@@ -96,12 +101,15 @@ export function useYouTubeSync({
                 isYtBufferingRef.current = false;
                 setIsYtBuffering(false);
                 if (event.data === 1) {
-                  onPlaybackStartedRef.current?.(event.target.getCurrentTime?.() ?? 0);
+                  onPlaybackStartedRef.current?.(
+                    event.target.getCurrentTime?.() ?? 0,
+                    event.target.getVideoData?.().video_id
+                  );
                 }
               }
             },
-            onError: (event: { data: number }) => {
-              if (!isActive) return;
+            onError: (event: { data: number; target: object }) => {
+              if (ytPlayerRef.current !== event.target) return;
               isYtBufferingRef.current = false;
               setIsYtBuffering(false);
               onPlaybackErrorRef.current?.();

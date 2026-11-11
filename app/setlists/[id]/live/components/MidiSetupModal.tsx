@@ -7,9 +7,13 @@ import {
   MidiDeviceOption,
   UserControlPreferences,
 } from "../hooks/useKeyboardMidiControls";
+import MidiProfileSwitcher from "../../../../components/MidiProfileSwitcher";
+import type { MidiProfilesDocument } from "../hooks/midiProfiles";
 
 export interface MidiSetupModalProps {
   preferences: UserControlPreferences;
+  profileDocument: MidiProfilesDocument;
+  activeProfileId: string | null;
   devices: MidiDeviceOption[];
   isLoading: boolean;
   isSaving: boolean;
@@ -25,10 +29,16 @@ export interface MidiSetupModalProps {
   onClearMapping: (actionId: ControlActionId) => void;
   onClearAll: () => void;
   onCancelLearn: () => void;
+  onSelectProfile: (profileId: string) => void;
+  onCreateProfile: (name: string) => void;
+  onRenameProfile: (profileId: string, name: string) => void;
+  onDeleteProfile: (profileId: string) => void;
 }
 
 export function MidiSetupModal({
   preferences,
+  profileDocument,
+  activeProfileId,
   devices,
   isLoading,
   isSaving,
@@ -44,6 +54,10 @@ export function MidiSetupModal({
   onClearMapping,
   onClearAll,
   onCancelLearn,
+  onSelectProfile,
+  onCreateProfile,
+  onRenameProfile,
+  onDeleteProfile,
 }: MidiSetupModalProps) {
   const categories = ["Playback", "Audio", "Display"] as const;
   const pairedDeviceConnected = devices.some((device) => device.id === preferences.pairedDeviceId);
@@ -70,6 +84,16 @@ export function MidiSetupModal({
         </header>
 
         <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-5">
+          <MidiProfileSwitcher
+            profiles={profileDocument.profiles}
+            activeProfileId={activeProfileId}
+            onSelect={onSelectProfile}
+            onCreate={onCreateProfile}
+            onRename={onRenameProfile}
+            onDelete={onDeleteProfile}
+            disabled={isLoading}
+          />
+
           <section className="space-y-3 rounded-xl border border-outline-variant/20 bg-surface-container p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>

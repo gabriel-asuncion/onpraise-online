@@ -22,6 +22,11 @@ export interface TimelineLyricPreview {
   lineCount: number;
 }
 
+export interface MidiControlFeedback {
+  label: string;
+  value: string;
+}
+
 interface TimelineArrangementProps {
   sections: TimelineSection[];
   lineDurationsBySectionId: Record<string, number[]>;
@@ -38,10 +43,15 @@ interface TimelineArrangementProps {
   tempo: number;
   downbeatOffsetMs: number;
   playheadTime: number;
-  isPlaying: boolean;
   lyricPreview: TimelineLyricPreview | null;
   focusedSectionId: string | null;
   isMetronomeMuted: boolean;
+  midiPixelsPerBeat: number | null;
+  midiControlFeedback: MidiControlFeedback | null;
+  midiScrubFollowRequest: number;
+  onEffectiveZoomChange: (pixelsPerBeat: number) => void;
+  onClearMidiPixelsPerBeat: () => void;
+  onOpenMidiMappings: () => void;
   onAddSection: (type: string, insertionIndex: number) => void;
   onOpenAddSectionModal: (insertionIndex?: number, sourceSectionId?: string, destinationSectionId?: string) => void;
   onFocusedSectionHandled: () => void;
@@ -84,6 +94,7 @@ const SNAP_BEATS: Record<TimelineSnap, number> = {
   sixteenth: 0.25,
   thirtysecond: 0.125,
 };
+const MIN_PIXELS_PER_BEAT = 0.1;
 
 const CLIP_COLORS = [
   "border-sky-300 bg-sky-600 text-white",
@@ -120,10 +131,15 @@ export default function TimelineArrangement({
   tempo,
   downbeatOffsetMs,
   playheadTime,
-  isPlaying,
   lyricPreview,
   focusedSectionId,
   isMetronomeMuted,
+  midiPixelsPerBeat,
+  midiControlFeedback,
+  midiScrubFollowRequest,
+  onEffectiveZoomChange,
+  onClearMidiPixelsPerBeat,
+  onOpenMidiMappings,
   onAddSection,
   onOpenAddSectionModal,
   onFocusedSectionHandled,
@@ -162,6 +178,9 @@ export default function TimelineArrangement({
   const sequenceDragRef = useRef<{ pointerId: number; sectionId: string; sourceIndex: number } | null>(null);
   const sequenceDragJustFinishedRef = useRef(false);
   const pendingZoomAnchorRef = useRef<number | null>(null);
+  const handledMidiScrubFollowRef = useRef(midiScrubFollowRequest);
+  const followScrollTargetRef = useRef<number | null>(null);
+  const followScrollFrameRef = useRef<number | null>(null);
   const draggedJustFinishedRef = useRef(false);
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
   const [selectedLaneType, setSelectedLaneType] = useState<string | null>(null);
@@ -171,6 +190,7 @@ export default function TimelineArrangement({
   const [insertionIndex, setInsertionIndex] = useState<number | null>(null);
   const [laneNamesCollapsed, setLaneNamesCollapsed] = useState(false);
   const [laneStateLoaded, setLaneStateLoaded] = useState(false);
+  const laneColumnWidth = laneNamesCollapsed ? 24 : 144;
   const [isSingleLaneView, setIsSingleLaneView] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [followPlayhead, setFollowPlayhead] = useState(false);
@@ -209,7 +229,10 @@ export default function TimelineArrangement({
 
   const snapStep = SNAP_BEATS[snap];
   const quarterBeatsPerBar = 4;
-  const pixelsPerBeat = 18 * zoom;
+  const pixelsPerBeat = midiPixelsPerBeat ?? 18 * zoom;
+  useEffect(() => {
+    onEffectiveZoomChange(pixelsPerBeat);
+  }, [onEffectiveZoomChange, pixelsPerBeat]);
   const durations = useMemo(
     () => sections.map((section) => Math.max(0.001, resizePreview?.id === section.id
       ? resizePreview.duration
@@ -229,13 +252,14 @@ export default function TimelineArrangement({
   const displayLaneTypes = isSingleLaneView ? ["All Sections"] : laneTypes;
   const playheadBeat = ((playheadTime - downbeatOffsetMs / 1000) * Math.max(1, tempo)) / 60;
   const setZoomKeepingPlayheadVisible = useCallback((nextZoom: number) => {
+    onClearMidiPixelsPerBeat();
     const viewport = viewportRef.current;
     if (viewport) {
       const currentOffset = playheadBeat * pixelsPerBeat - viewport.scrollLeft;
       pendingZoomAnchorRef.current = Math.max(8, Math.min(viewport.clientWidth - 8, currentOffset));
     }
-    setZoom(Number(Math.max(0.1, Math.min(3, nextZoom)).toFixed(2)));
-  }, [pixelsPerBeat, playheadBeat]);
+    setZoom(Number(Math.max(MIN_PIXELS_PER_BEAT / 18, Math.min(200 / 18, nextZoom)).toFixed(3)));
+  }, [onClearMidiPixelsPerBeat, pixelsPerBeat, playheadBeat]);
   const getPlayingSectionIndex = useCallback(() => sections.findIndex((section, index) =>
     playheadBeat >= starts[index] && playheadBeat < starts[index] + durations[index],
   ), [durations, playheadBeat, sections, starts]);
@@ -400,13 +424,48 @@ export default function TimelineArrangement({
   }, [pixelsPerBeat, playheadBeat]);
 
   useEffect(() => {
+    if (handledMidiScrubFollowRef.current === midiScrubFollowRequest) return;
+    handledMidiScrubFollowRef.current = midiScrubFollowRequest;
+    setFollowPlayhead(true);
+  }, [midiScrubFollowRequest]);
+
+  useEffect(() => {
     const viewport = viewportRef.current;
-    if (!followPlayhead || !isPlaying || !viewport || playheadBeat < 0) return;
-    viewport.scrollTo({
-      left: Math.max(0, playheadBeat * pixelsPerBeat - 16),
-      behavior: "auto",
-    });
-  }, [followPlayhead, isPlaying, pixelsPerBeat, playheadBeat]);
+    if (!followPlayhead || !viewport || playheadBeat < 0) {
+      if (followScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(followScrollFrameRef.current);
+        followScrollFrameRef.current = null;
+      }
+      followScrollTargetRef.current = null;
+      return;
+    }
+    const visibleCanvasWidth = Math.max(0, viewport.clientWidth - laneColumnWidth);
+    const targetScroll = playheadBeat * pixelsPerBeat - visibleCanvasWidth / 2;
+    const maxScroll = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    followScrollTargetRef.current = Math.max(0, Math.min(maxScroll, targetScroll));
+    if (followScrollFrameRef.current !== null) return;
+
+    const animateScroll = () => {
+      followScrollFrameRef.current = null;
+      const currentViewport = viewportRef.current;
+      const target = followScrollTargetRef.current;
+      if (!currentViewport || target === null) return;
+      const distance = target - currentViewport.scrollLeft;
+      if (Math.abs(distance) < 0.6) {
+        currentViewport.scrollLeft = target;
+        return;
+      }
+      currentViewport.scrollLeft += distance * 0.18;
+      followScrollFrameRef.current = window.requestAnimationFrame(animateScroll);
+    };
+    followScrollFrameRef.current = window.requestAnimationFrame(animateScroll);
+  }, [followPlayhead, laneColumnWidth, pixelsPerBeat, playheadBeat, viewportWidth]);
+
+  useEffect(() => () => {
+    if (followScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(followScrollFrameRef.current);
+    }
+  }, []);
 
   const getBeatAtX = (clientX: number) => {
     const canvasRect = canvasRef.current?.getBoundingClientRect();
@@ -767,7 +826,24 @@ export default function TimelineArrangement({
       : sections
         .slice(0, insertionIndex)
         .reduce((total, section) => total + (layout.gaps[section.id] ?? 0) + Math.max(0.001, durationOverrides[section.id] ?? defaultDurationForType(section.type)), 0);
-  const laneColumnWidth = laneNamesCollapsed ? 24 : 144;
+  const showClipLabels = pixelsPerBeat >= 8;
+  const showPartitionDividers = pixelsPerBeat >= 3;
+  const rulerBarStride = Math.max(1, Math.ceil(24 / (4 * pixelsPerBeat)));
+  const fitTimelineToViewport = () => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const availableWidth = Math.max(1, viewport.clientWidth - laneColumnWidth - 8);
+    const fitPixelsPerBeat = Math.max(
+      MIN_PIXELS_PER_BEAT,
+      Math.min(200, availableWidth / Math.max(1, layout.totalBeats)),
+    );
+    pendingZoomAnchorRef.current = null;
+    setFollowPlayhead(false);
+    onClearMidiPixelsPerBeat();
+    setZoom(Number((fitPixelsPerBeat / 18).toFixed(3)));
+    viewport.scrollLeft = 0;
+    if (rulerViewportRef.current) rulerViewportRef.current.scrollLeft = 0;
+  };
   const abbreviateLane = (type: string) => type
     .split(/[\s-]+/)
     .map((word) => word.match(/[A-Za-z0-9]/)?.[0] ?? "")
@@ -816,12 +892,15 @@ export default function TimelineArrangement({
         <span className="material-symbols-outlined !text-[18px]">view_stream</span>
       </button>
       <div data-timeline-overlay className="flex items-center gap-1 rounded-lg border border-outline-variant/30 bg-surface-container-high p-0.5">
-        <button type="button" onClick={() => setZoomKeepingPlayheadVisible(zoom - 0.1)} disabled={zoom <= 0.1} aria-label="Zoom out" title="Zoom out" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
+        <button type="button" onClick={() => setZoomKeepingPlayheadVisible((pixelsPerBeat / 18) * 0.9)} disabled={pixelsPerBeat <= MIN_PIXELS_PER_BEAT} aria-label="Zoom out" title="Zoom out" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
           <span className="material-symbols-outlined !text-[18px]">remove</span>
         </button>
-        <span className="w-10 text-center font-mono text-[9px] font-bold text-on-surface-variant">{Math.round(zoom * 100)}%</span>
-        <button type="button" onClick={() => setZoomKeepingPlayheadVisible(zoom + 0.1)} disabled={zoom >= 3} aria-label="Zoom in" title="Zoom in" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
+        <span className="min-w-16 text-center font-mono text-[9px] font-bold text-on-surface-variant">{pixelsPerBeat < 10 ? pixelsPerBeat.toFixed(1) : Math.round(pixelsPerBeat)}px/beat</span>
+        <button type="button" onClick={() => setZoomKeepingPlayheadVisible((pixelsPerBeat / 18) * 1.1)} disabled={pixelsPerBeat >= 200} aria-label="Zoom in" title="Zoom in" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright disabled:opacity-40">
           <span className="material-symbols-outlined !text-[18px]">add</span>
+        </button>
+        <button type="button" onClick={fitTimelineToViewport} aria-label="Fit entire timeline" title="Fit entire timeline" className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface hover:bg-surface-bright">
+          <span className="material-symbols-outlined !text-[17px]">fit_screen</span>
         </button>
       </div>
       </div>
@@ -1046,12 +1125,12 @@ export default function TimelineArrangement({
               className="relative h-full"
               style={{ width: `${canvasWidth}px` }}
             >
-              {Array.from({ length: Math.ceil(canvasBeats / quarterBeatsPerBar) + 1 }, (_, index) => (
-                <div key={index} className="absolute inset-y-0" style={{ left: `${index * quarterBeatsPerBar * pixelsPerBeat}px`, width: `${quarterBeatsPerBar * pixelsPerBeat}px` }}>
+              {Array.from({ length: Math.ceil(canvasBeats / (quarterBeatsPerBar * rulerBarStride)) + 1 }, (_, index) => (
+                <div key={index} className="absolute inset-y-0" style={{ left: `${index * quarterBeatsPerBar * rulerBarStride * pixelsPerBeat}px`, width: `${quarterBeatsPerBar * rulerBarStride * pixelsPerBeat}px` }}>
                   <span className="absolute inset-y-0 left-0 border-l border-outline-variant/60 pl-1.5 pt-1 text-[9px] font-mono font-bold text-on-surface-variant">
-                    {index + 1}
+                    {index * rulerBarStride + 1}
                   </span>
-                  {Array.from({ length: 4 }, (_, beatIndex) => (
+                  {pixelsPerBeat >= 24 && Array.from({ length: 4 }, (_, beatIndex) => (
                     <span
                       key={beatIndex}
                       aria-hidden="true"
@@ -1133,7 +1212,7 @@ export default function TimelineArrangement({
                 style={{
                   touchAction: "pan-x pan-y",
                   backgroundColor: laneIndex % 2 === 1 ? "#252529" : "#111113",
-                  backgroundImage: [
+                  backgroundImage: pixelsPerBeat < 2 ? "none" : [
                     `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(220,220,230,0.32) ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(220,220,230,0.32) ${meterBeatWidth}px)`,
                     `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, quarterBeatsPerBar * pixelsPerBeat - barGridWidth)}px, rgba(255,255,255,0.68) ${Math.max(0, quarterBeatsPerBar * pixelsPerBeat - barGridWidth)}px, rgba(255,255,255,0.68) ${quarterBeatsPerBar * pixelsPerBeat}px)`,
                   ].join(", "),
@@ -1195,7 +1274,9 @@ export default function TimelineArrangement({
                             <span className="material-symbols-outlined !text-[13px]">drag_indicator</span>
                           </button>
                         )}
-                        <span className="min-w-0 truncate text-[10px] font-black">{clipLabel}</span>
+                        {showClipLabels && (
+                          <span className="min-w-0 truncate text-[10px] font-black">{clipLabel}</span>
+                        )}
                         {(() => {
                           // Helper to waterfall resize preview to line dividers
                           const getWaterfalledLineDurations = (baseLineDurs: number[], targetDuration: number) => {
@@ -1246,7 +1327,7 @@ export default function TimelineArrangement({
                                 />
                               )}
                               {/* Background visible divider lines */}
-                              <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-md">
+                              {showPartitionDividers && <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-md">
                                 {(() => {
                                   let cursor = headPadding;
                                   return activeLineDurations.slice(0, -1).map((ld, lIdx) => {
@@ -1260,7 +1341,7 @@ export default function TimelineArrangement({
                                     );
                                   });
                                 })()}
-                              </div>
+                              </div>}
                               {repeatCount > 0 && activeTotal < durations[index] && (
                                 <div
                                   aria-label={`${repeatCount} repeated passes are not independently editable`}
@@ -1271,12 +1352,12 @@ export default function TimelineArrangement({
                                     backgroundImage: "repeating-linear-gradient(135deg, transparent 0, transparent 5px, rgba(255,255,255,0.12) 5px, rgba(255,255,255,0.12) 7px)",
                                   }}
                                 >
-                                  {repeatCount > 0 && durations[index] - activeTotal > 8 ? `REPEATS ×${repeatCount}` : null}
+                                  {repeatCount > 0 && durations[index] - activeTotal > 8 && showClipLabels ? `REPEATS ×${repeatCount}` : null}
                                 </div>
                               )}
 
                               {/* Interactive Draggable Handles when clip is selected */}
-                              {isSelected && !section.type.startsWith("Spacer") && (() => {
+                              {showPartitionDividers && isSelected && !section.type.startsWith("Spacer") && (() => {
                                 let cursor = headPadding;
                                 return activeLineDurations.slice(0, -1).map((ld, lIdx) => {
                                   cursor += ld;
@@ -1391,7 +1472,27 @@ export default function TimelineArrangement({
 
       {portalTarget && createPortal(
         <>
+          {midiControlFeedback && (
+            <div
+              data-timeline-overlay
+              role="status"
+              aria-live="polite"
+              className="fixed bottom-20 left-1/2 z-[250002] flex -translate-x-1/2 items-center gap-3 rounded-xl border border-primary/40 bg-surface-container-highest/95 px-4 py-2.5 text-xs text-on-surface shadow-2xl backdrop-blur"
+            >
+              <span className="font-semibold text-on-surface-variant">{midiControlFeedback.label}</span>
+              <span className="font-mono text-sm font-black text-primary">{midiControlFeedback.value}</span>
+            </div>
+          )}
           <div data-timeline-overlay className="fixed right-3 top-1/2 z-[250001] flex -translate-y-1/2 flex-col gap-2">
+            <button
+              type="button"
+              onClick={onOpenMidiMappings}
+              aria-label="MIDI mappings"
+              title="MIDI mappings"
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-outline-variant/40 bg-surface-container-highest/95 text-on-surface shadow-lg backdrop-blur hover:bg-surface-bright"
+            >
+              <span className="material-symbols-outlined !text-[21px]">piano</span>
+            </button>
             <button
               type="button"
               onClick={() => setIsSequenceOpen(true)}

@@ -283,7 +283,10 @@ export default function EventCockpitPage() {
 
       await fetchEventSetlists(eventId);
       await syncRosterUI(combinedProfiles);
-      setAllDatabaseSongs(await getAllSongs());
+      const songs = await getAllSongs();
+      setAllDatabaseSongs(songs.filter((song) =>
+        song.visibility_scope !== "global" || song.approval_status === "approved",
+      ));
     } catch (e) { console.error(e); }
     setLoading(false);
   }
@@ -501,7 +504,8 @@ export default function EventCockpitPage() {
       setSetlistSongs(previousSongs);
       setStagedSetlistSongs(previousSongs);
       stagedSetlistSongsRef.current = previousSongs;
-      alert("The song could not be added to this setlist. Please try again.");
+      const message = error instanceof Error ? error.message : "An unexpected error occurred.";
+      alert(`The song could not be added to this setlist: ${message}`);
       return;
     }
 
