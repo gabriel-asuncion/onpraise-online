@@ -158,7 +158,7 @@ export function MidiSetupModal({
                   const isLearning = learningAction === action.id;
                   const isUnavailable = unavailableActions.includes(action.id);
                   const mappingDescription = mapping
-                    ? `${mapping.deviceName} · ${mapping.messageType === "cc" ? "CC" : "Note"} ${mapping.number} · Ch ${mapping.channel + 1}`
+                    ? `${mapping.deviceName} · ${mapping.messageType === "pitchbend" ? "Pitch bend" : `${mapping.messageType === "cc" ? "CC" : "Note"} ${mapping.number}`} · Ch ${mapping.channel + 1}`
                     : null;
                   return (
                     <div key={action.id} className="flex items-center justify-between gap-3 border-b border-outline-variant/10 px-3 py-2.5 last:border-b-0">

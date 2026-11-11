@@ -28,13 +28,15 @@ interface MidiMappingModalProps {
   bindings: Partial<Record<MidiActionId, MidiBinding>>;
   recentMessages: MidiMonitorMessage[];
   accessError: string | null;
-  startListening: (actionId: MidiActionId, mode: MidiBindingMode) => void;
+  startListening: (actionId: MidiActionId, mode: MidiBindingMode, index?: number) => void;
   stopListening: () => void;
-  clearBinding: (actionId: MidiActionId) => void;
+  clearBinding: (actionId: MidiActionId, index?: number) => void;
   resetAllBindings: () => void;
-  setBindingMode: (actionId: MidiActionId, mode: MidiBindingMode) => void;
-  setBindingChannel: (actionId: MidiActionId, channel: number) => void;
-  setRelativeEncoding: (actionId: MidiActionId, encoding: MidiRelativeEncoding) => void;
+  applyMcuPreset: () => void;
+  setBeatNoteCount: (count: number) => string | null;
+  setBindingMode: (actionId: MidiActionId, mode: MidiBindingMode, index?: number) => void;
+  setBindingChannel: (actionId: MidiActionId, channel: number, index?: number) => void;
+  setRelativeEncoding: (actionId: MidiActionId, encoding: MidiRelativeEncoding, index?: number) => void;
   scanMidiDevices: () => void;
   pairDevice: (deviceId: string) => void;
   selectProfile: (profileId: string) => void;
@@ -51,8 +53,55 @@ const MODE_LABELS: Record<MidiBindingMode, string> = {
 
 function formatBinding(binding: MidiBinding) {
   const channel = binding.channel === -1 ? "Omni" : `Ch ${binding.channel + 1}`;
-  const input = binding.type === "cc" ? `CC #${binding.noteOrCcNumber}` : `Note #${binding.noteOrCcNumber}`;
+  const input = binding.type === "cc" ? `CC #${binding.noteOrCcNumber}` : binding.type === "pitchbend" ? "Pitch Bend" : `Note #${binding.noteOrCcNumber}`;
   return `${input} (${channel}) [${MODE_LABELS[binding.mode]}]`;
+}
+
+function BeatLightsSetup({ profile, binding, learning, disabled, startListening, stopListening, setBeatNoteCount }: {
+  profile: MidiControllerProfile;
+  binding: MidiBinding | undefined;
+  learning: boolean;
+  disabled: boolean;
+  startListening: (actionId: MidiActionId, mode: MidiBindingMode) => void;
+  stopListening: () => void;
+  setBeatNoteCount: (count: number) => string | null;
+}) {
+  const [draftCount, setDraftCount] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const count = draftCount ?? String(profile.editBeatNoteCount ?? (profile.editProtocol === "mcu" ? 8 : 4));
+  const defaultMcu = profile.editProtocol === "mcu" && !binding;
+  const parsedCount = count.trim() ? Number(count) : NaN;
+  const startNote = binding?.type === "note" ? binding.noteOrCcNumber : defaultMcu ? 0 : null;
+  const invalidCount = !Number.isInteger(parsedCount) || parsedCount < 4 || parsedCount > 128 ||
+    parsedCount % 4 !== 0 || (startNote !== null && startNote + parsedCount > 128);
+  const saveCount = () => {
+    const result = setBeatNoteCount(parsedCount);
+    setError(result ?? "");
+    if (!result) setDraftCount(null);
+  };
+  return (
+    <section className="space-y-2">
+      <h3 className="px-1 text-xs font-black uppercase tracking-widest text-on-surface-variant">Metronome Lights</h3>
+      <p className="px-1 text-[11px] text-on-surface-variant">
+        Consecutive notes are divided equally across four beats. Shortcut lights that are already on remain lit.
+      </p>
+      {profile.editBeatNoteCount === undefined && profile.editProtocol !== "mcu" && (
+        <p className="px-1 text-[11px] text-on-surface-variant">Previous beat mappings remain active until you learn a first note or save a note count.</p>
+      )}
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-outline-variant/20 bg-surface-container p-3">
+        <label className="flex flex-col gap-1 text-xs">
+          Number of notes
+          <input type="number" min={4} max={128} step={4} value={count} onChange={(event) => { setDraftCount(event.target.value); setError(""); }} onBlur={saveCount} className="w-24 rounded-md border border-outline-variant/30 bg-surface-container-low px-2 py-1.5" />
+        </label>
+        <div className="flex flex-col gap-1 text-xs">
+          <span>First beat note</span>
+          <span className="text-on-surface-variant">{binding?.type === "note" ? formatBinding(binding) : defaultMcu ? "Note #0 (Ch 1) [MCU default]" : "Not learned"}</span>
+        </div>
+        <button type="button" disabled={disabled || (invalidCount && !learning)} onClick={() => learning ? stopListening() : startListening("BEAT_LIGHT_1", "trigger")} className="rounded-md bg-surface-container-high px-3 py-2 text-xs font-bold disabled:opacity-40">{learning ? "Cancel learn" : "Learn first note"}</button>
+      </div>
+      {error && <p role="alert" className="px-1 text-xs text-error">{error}</p>}
+    </section>
+  );
 }
 
 export default function MidiMappingModal(props: MidiMappingModalProps) {
@@ -60,7 +109,7 @@ export default function MidiMappingModal(props: MidiMappingModalProps) {
     isOpen, onClose, isSupported, isConnected, activeDeviceName, devices,
     profileDocument, activeProfileId, isProfileLoading, isProfileSaving, learningActionId,
     bindings, recentMessages, accessError, startListening, stopListening, clearBinding,
-    resetAllBindings, setBindingMode, setBindingChannel, setRelativeEncoding,
+    resetAllBindings, applyMcuPreset, setBeatNoteCount, setBindingMode, setBindingChannel, setRelativeEncoding,
     scanMidiDevices, pairDevice, selectProfile, createProfile, renameProfile, deleteProfile,
   } = props;
   const [unmappedModes, setUnmappedModes] = useState<Partial<Record<MidiActionId, MidiBindingMode>>>({});
@@ -82,14 +131,15 @@ export default function MidiMappingModal(props: MidiMappingModalProps) {
   if (!isOpen || !portalTarget) return null;
 
   const groupedActions = MIDI_ACTIONS.reduce<Record<string, typeof MIDI_ACTIONS>>((groups, action) => {
+    if (action.group === "Metronome Lights") return groups;
     (groups[action.group] ??= []).push(action);
     return groups;
   }, {});
   const activeProfile = profileDocument.profiles.find((profile: MidiControllerProfile) => profile.id === activeProfileId) ?? null;
   const pairedDeviceConnected = devices.some((device) => device.id === activeProfile?.pairedDeviceId && device.state === "connected");
-  const beginLearn = (actionId: MidiActionId, mode: MidiBindingMode) => {
+  const beginLearn = (actionId: MidiActionId, mode: MidiBindingMode, index = 0) => {
     setUnmappedModes((previous) => ({ ...previous, [actionId]: mode }));
-    startListening(actionId, mode);
+    startListening(actionId, mode, index);
   };
   const onModeChange = (actionId: MidiActionId, mode: MidiBindingMode) => {
     setUnmappedModes((previous) => ({ ...previous, [actionId]: mode }));
@@ -133,6 +183,12 @@ export default function MidiMappingModal(props: MidiMappingModalProps) {
             compact
           />
           <section className="space-y-2">
+            <button type="button" disabled={!activeProfileId || isProfileLoading} onClick={() => {
+              if (window.confirm("Replace all mappings in this profile with the MCU preset? This cannot be undone.")) {
+                stopListening();
+                applyMcuPreset();
+              }
+            }} className="rounded-md bg-surface-container-high px-3 py-2 text-xs font-bold disabled:opacity-40">Apply MCU preset</button>
             <div className="flex flex-wrap items-center gap-2">
               <span className={`max-w-48 truncate rounded-full px-2.5 py-1 text-[10px] font-bold ${activeProfile?.pairedDeviceId && pairedDeviceConnected ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-surface-container-high text-on-surface-variant"}`}>
                 {activeProfile?.pairedDeviceId
@@ -182,6 +238,16 @@ export default function MidiMappingModal(props: MidiMappingModalProps) {
                 </div>
               ))}
             </div>
+          )}
+          {activeProfile?.editProtocol === "mcu" ? (
+            <section className="space-y-2">
+              <h3 className="px-1 text-xs font-black uppercase tracking-widest text-on-surface-variant">Metronome Lights</h3>
+              <p className="px-1 text-[11px] text-on-surface-variant">MCU mode uses record buttons 1–8 in four pairs on MIDI channel 1. Active shortcut lights remain lit.</p>
+            </section>
+          ) : activeProfile && (
+            <BeatLightsSetup key={activeProfile.id} profile={activeProfile} binding={bindings.BEAT_LIGHT_1}
+              learning={learningActionId === "BEAT_LIGHT_1"} disabled={!isSupported || !pairedDeviceConnected}
+              startListening={startListening} stopListening={stopListening} setBeatNoteCount={setBeatNoteCount} />
           )}
           {Object.entries(groupedActions).map(([group, actions]) => (
             <section key={group} className="space-y-2">
@@ -238,7 +304,7 @@ export default function MidiMappingModal(props: MidiMappingModalProps) {
                               onChange={(event) => onModeChange(action.id, event.target.value as MidiBindingMode)}
                               className="max-w-40 rounded-md border border-outline-variant/30 bg-surface-container-low px-2 py-1.5 text-[10px]"
                             >
-                              {action.modes.map((option) => <option key={option} value={option}>{MODE_LABELS[option]}</option>)}
+                              {(binding?.type === "pitchbend" ? ["absolute" as const] : action.modes).map((option) => <option key={option} value={option}>{MODE_LABELS[option]}</option>)}
                             </select>
                           </label>
                           {binding && (
@@ -265,8 +331,36 @@ export default function MidiMappingModal(props: MidiMappingModalProps) {
                                 <option value="m_vave_cw">M-Vave CW (Left/Right)</option>
                                 <option value="two_complement">Two&apos;s complement</option>
                                 <option value="sign_magnitude">Sign magnitude</option>
+                                <option value="mcu_vpot">MCU V-Pot</option>
                               </select>
                             </label>
+                          )}
+                          {binding && (
+                            <>
+                              {(binding.alternatives ?? []).map((alternative, index) => (
+                                <div key={index} className="flex w-full flex-wrap items-center gap-2 border-t border-outline-variant/10 pt-2">
+                                  <span className="flex-1">Alternative {index + 1}: {formatBinding(alternative)}</span>
+                                  <select aria-label={`${action.label} alternative ${index + 1} mode`} value={alternative.mode} onChange={(event) => setBindingMode(action.id, event.target.value as MidiBindingMode, index + 1)} className="rounded-md bg-surface-container-low px-2 py-1">
+                                    {(alternative.type === "pitchbend" ? ["absolute" as const] : action.modes).map((option) => <option key={option} value={option}>{MODE_LABELS[option]}</option>)}
+                                  </select>
+                                  <select aria-label={`${action.label} alternative ${index + 1} channel`} value={alternative.channel} onChange={(event) => setBindingChannel(action.id, Number(event.target.value), index + 1)} className="rounded-md bg-surface-container-low px-2 py-1">
+                                    <option value={-1}>Omni</option>
+                                    {Array.from({ length: 16 }, (_, channel) => <option key={channel} value={channel}>Ch {channel + 1}</option>)}
+                                  </select>
+                                  {alternative.mode === "relative_cw" && (
+                                    <select aria-label={`${action.label} alternative ${index + 1} relative encoding`} value={alternative.relativeEncoding ?? "m_vave_cw"} onChange={(event) => setRelativeEncoding(action.id, event.target.value as MidiRelativeEncoding, index + 1)} className="rounded-md bg-surface-container-low px-2 py-1">
+                                      <option value="m_vave_cw">M-Vave CW</option>
+                                      <option value="two_complement">Two&apos;s complement</option>
+                                      <option value="sign_magnitude">Sign magnitude</option>
+                                      <option value="mcu_vpot">MCU V-Pot</option>
+                                    </select>
+                                  )}
+                                  <button type="button" disabled={!isSupported || !pairedDeviceConnected} onClick={() => beginLearn(action.id, alternative.mode, index + 1)} className="rounded-md bg-surface-container-high px-2 py-1 disabled:opacity-40">Relearn</button>
+                                  <button type="button" onClick={() => clearBinding(action.id, index + 1)} className="rounded-md bg-surface-container-high px-2 py-1">Remove</button>
+                                </div>
+                              ))}
+                              <button type="button" disabled={!isSupported || !pairedDeviceConnected} onClick={() => beginLearn(action.id, mode, (binding.alternatives?.length ?? 0) + 1)} className="rounded-md bg-surface-container-high px-2 py-1.5 font-bold disabled:opacity-40">Add another MIDI control</button>
+                            </>
                           )}
                         </div>
                       )}

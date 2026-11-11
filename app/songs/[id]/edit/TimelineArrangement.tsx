@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { getMidiLaneIndex } from "./midiTimeline";
 
 export interface TimelineSection {
   id: string;
@@ -49,6 +50,9 @@ interface TimelineArrangementProps {
   midiPixelsPerBeat: number | null;
   midiControlFeedback: MidiControlFeedback | null;
   midiScrubFollowRequest: number;
+  midiLaneRequest: { rawValue: number; delta?: number } | null;
+  midiToggleSectionRequest: { sectionId: string } | null;
+  addSectionButtonRef: React.RefObject<HTMLButtonElement | null>;
   onEffectiveZoomChange: (pixelsPerBeat: number) => void;
   onClearMidiPixelsPerBeat: () => void;
   onOpenMidiMappings: () => void;
@@ -137,6 +141,9 @@ export default function TimelineArrangement({
   midiPixelsPerBeat,
   midiControlFeedback,
   midiScrubFollowRequest,
+  midiLaneRequest,
+  midiToggleSectionRequest,
+  addSectionButtonRef,
   onEffectiveZoomChange,
   onClearMidiPixelsPerBeat,
   onOpenMidiMappings,
@@ -179,6 +186,8 @@ export default function TimelineArrangement({
   const sequenceDragJustFinishedRef = useRef(false);
   const pendingZoomAnchorRef = useRef<number | null>(null);
   const handledMidiScrubFollowRef = useRef(midiScrubFollowRequest);
+  const handledMidiToggleRef = useRef(midiToggleSectionRequest);
+  const handledMidiLaneRef = useRef(midiLaneRequest);
   const followScrollTargetRef = useRef<number | null>(null);
   const followScrollFrameRef = useRef<number | null>(null);
   const draggedJustFinishedRef = useRef(false);
@@ -247,10 +256,41 @@ export default function TimelineArrangement({
     [durations, gapOverrides, sections],
   );
   const totalBeats = sections.reduce((total, section, index) => total + (gapOverrides[section.id] ?? 0) + durations[index], 0);
-  const laneTypes = Array.from(new Set(sections.map((section) => section.type)));
-  if (movePreview && movePreview.gapBeforeBeats > 0 && !laneTypes.includes("Spacer")) laneTypes.push("Spacer");
+  const laneTypes = useMemo(() => {
+    const lanes = Array.from(new Set(sections.map((section) => section.type)));
+    if (movePreview && movePreview.gapBeforeBeats > 0 && !lanes.includes("Spacer")) lanes.push("Spacer");
+    return lanes;
+  }, [sections, movePreview]);
   const displayLaneTypes = isSingleLaneView ? ["All Sections"] : laneTypes;
   const playheadBeat = ((playheadTime - downbeatOffsetMs / 1000) * Math.max(1, tempo)) / 60;
+  useEffect(() => {
+    if (!midiLaneRequest || handledMidiLaneRef.current === midiLaneRequest) return;
+    const frame = window.requestAnimationFrame(() => {
+      handledMidiLaneRef.current = midiLaneRequest;
+      if (!laneTypes.length) return;
+      setIsSingleLaneView(false);
+      setSelectedSectionId(null);
+      const currentIndex = laneTypes.indexOf(selectedLaneType ?? "");
+      const index = getMidiLaneIndex(laneTypes.length, currentIndex, midiLaneRequest.rawValue, midiLaneRequest.delta);
+      setSelectedLaneType(laneTypes[index]);
+      const viewport = viewportRef.current;
+      if (viewport) viewport.scrollTo({ top: Math.max(0, index * 40 - (viewport.clientHeight - 40) / 2), behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedLaneType, midiLaneRequest, laneTypes]);
+
+  useEffect(() => {
+    if (!midiToggleSectionRequest || handledMidiToggleRef.current === midiToggleSectionRequest) return;
+    const frame = window.requestAnimationFrame(() => {
+      handledMidiToggleRef.current = midiToggleSectionRequest;
+      const section = sections.find((item) => item.id === midiToggleSectionRequest.sectionId);
+      if (!section) return;
+      const deselect = selectedSectionId === section.id;
+      setSelectedSectionId(deselect ? null : section.id);
+      setSelectedLaneType(deselect ? null : section.type);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [midiToggleSectionRequest, sections, selectedSectionId]);
   const setZoomKeepingPlayheadVisible = useCallback((nextZoom: number) => {
     onClearMidiPixelsPerBeat();
     const viewport = viewportRef.current;
@@ -424,14 +464,11 @@ export default function TimelineArrangement({
   }, [pixelsPerBeat, playheadBeat]);
 
   useEffect(() => {
-    if (handledMidiScrubFollowRef.current === midiScrubFollowRequest) return;
-    handledMidiScrubFollowRef.current = midiScrubFollowRequest;
-    setFollowPlayhead(true);
-  }, [midiScrubFollowRequest]);
-
-  useEffect(() => {
     const viewport = viewportRef.current;
-    if (!followPlayhead || !viewport || playheadBeat < 0) {
+    const scrubRequested = handledMidiScrubFollowRef.current !== midiScrubFollowRequest;
+    handledMidiScrubFollowRef.current = midiScrubFollowRequest;
+    if ((!followPlayhead && !scrubRequested) || !viewport || playheadBeat < 0) {
+      if (!followPlayhead && !scrubRequested) return;
       if (followScrollFrameRef.current !== null) {
         window.cancelAnimationFrame(followScrollFrameRef.current);
         followScrollFrameRef.current = null;
@@ -459,7 +496,7 @@ export default function TimelineArrangement({
       followScrollFrameRef.current = window.requestAnimationFrame(animateScroll);
     };
     followScrollFrameRef.current = window.requestAnimationFrame(animateScroll);
-  }, [followPlayhead, laneColumnWidth, pixelsPerBeat, playheadBeat, viewportWidth]);
+  }, [followPlayhead, laneColumnWidth, midiScrubFollowRequest, pixelsPerBeat, playheadBeat, viewportWidth]);
 
   useEffect(() => () => {
     if (followScrollFrameRef.current !== null) {
@@ -1438,6 +1475,7 @@ export default function TimelineArrangement({
             >
               <button
                 type="button"
+                ref={addSectionButtonRef}
                 onClick={openAddSectionPicker}
                 aria-label="Add section relative to the selected section or lane"
                 title="Add section relative to selection"

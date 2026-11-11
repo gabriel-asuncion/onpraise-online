@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "../../../../../utils/supabase/client";
+import { decodeMcuVpot, parsePitchBend, createMcuBeatControls } from "../../../../songs/[id]/edit/mcuProtocol";
+import { buildFeedbackScene, getConfiguredBeatControls, getMidiOutputs, syncFeedbackOutputs, type FeedbackScene } from "../../../../songs/[id]/edit/midiFeedback";
 import {
   createMidiControllerProfile,
   EMPTY_MIDI_PROFILES,
@@ -29,11 +31,12 @@ export type ControlActionId =
   | "youtubeSolo"
   | "mdTakeover"
   | "clickVolume"
+  | "clickSpeed" | "clickPattern" | "jogScrub"
   | "guideVolume"
   | "youtubeVolume";
 
 export type ControlCategory = "Playback" | "Audio" | "Display";
-export type MidiMessageType = "note" | "cc";
+export type MidiMessageType = "note" | "cc" | "pitchbend";
 
 export interface MidiControlMapping {
   deviceId: string;
@@ -74,6 +77,9 @@ export const CONTROL_ACTIONS: ControlActionDefinition[] = [
   { id: "nextLine", label: "Next Line", category: "Playback", shortcut: "] / }" },
   { id: "mdTakeover", label: "MD Takeover", category: "Playback", shortcut: "D" },
   { id: "clickMute", label: "Click Mute", category: "Audio", shortcut: "1" },
+  { id: "clickSpeed", label: "Click Speed", category: "Audio", shortcut: "MIDI learn" },
+  { id: "clickPattern", label: "Click Pattern", category: "Audio", shortcut: "MIDI learn" },
+  { id: "jogScrub", label: "Jog Scrub", category: "Playback", shortcut: "MCU encoder" },
   { id: "clickSolo", label: "Click Solo", category: "Audio", shortcut: "Shift + 1" },
   { id: "guideMute", label: "Guide Mute", category: "Audio", shortcut: "2" },
   { id: "guideSolo", label: "Guide Solo", category: "Audio", shortcut: "Shift + 2" },
@@ -109,6 +115,7 @@ interface MidiAccessLike {
     values: () => IterableIterator<MidiInputLike>;
     forEach: (callback: (input: MidiInputLike) => void) => void;
   };
+  outputs: MIDIOutputMap;
   onstatechange: (() => void) | null;
 }
 
@@ -132,7 +139,7 @@ function parseStoredPreferences(value: unknown): UserControlPreferences {
     if (
       typeof mapping.deviceId !== "string" ||
       typeof mapping.deviceName !== "string" ||
-      (mapping.messageType !== "note" && mapping.messageType !== "cc") ||
+      (mapping.messageType !== "note" && mapping.messageType !== "cc" && mapping.messageType !== "pitchbend") ||
       typeof mapping.channel !== "number" ||
       !Number.isInteger(mapping.channel) ||
       mapping.channel < 0 ||
@@ -190,7 +197,7 @@ function keyboardActionForEvent(event: KeyboardEvent): ControlActionId | null {
   return keys[event.code] ?? null;
 }
 
-export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient>, actions: ControlActions) {
+export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient>, actions: ControlActions, beat: number | null = null) {
   const [preferences, setPreferences] = useState(EMPTY_CONTROL_PREFERENCES);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -213,6 +220,8 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
   const profileDocumentRef = useRef(profileDocument);
   const activeProfileIdRef = useRef(activeProfileId);
   const setupOpenRef = useRef(isSetupOpen);
+  const feedbackRef = useRef<Map<MIDIOutput, FeedbackScene>>(new Map());
+  const [outputRevision, setOutputRevision] = useState(0);
 
   useEffect(() => {
     actionsRef.current = actions;
@@ -260,6 +269,8 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
       const settings = parseStoredPreferences(
         Object.keys(activeProfile.liveSettings).length > 0 ? activeProfile.liveSettings : data?.settings,
       );
+      settings.pairedDeviceId = activeProfile.pairedDeviceId;
+      settings.pairedDeviceName = activeProfile.pairedDeviceName;
       setPreferences(settings);
       preferencesRef.current = settings;
       setProfileDocument(document);
@@ -323,6 +334,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
       name: input.name?.trim() || "MIDI device",
       state: input.state,
     })));
+    setOutputRevision((revision) => revision + 1);
   }, []);
 
   const scanMidiDevices = useCallback(async () => {
@@ -349,6 +361,12 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
   }, [refreshDevices]);
 
   useEffect(() => {
+    let active = true;
+    queueMicrotask(() => { if (active) void scanMidiDevices(); });
+    return () => { active = false; };
+  }, [scanMidiDevices]);
+
+  useEffect(() => {
     const access = accessRef.current;
     if (!access) return;
     const previousHandlers = new Map<MidiInputLike, MidiInputLike["onmidimessage"]>();
@@ -360,7 +378,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
         if (status === undefined || number === undefined) return;
         const command = status & 0xf0;
         const channel = status & 0x0f;
-        const messageType = command === 0xb0
+        const messageType = command === 0xe0 ? "pitchbend" : command === 0xb0
           ? "cc"
           : command === 0x90 || command === 0x80
             ? "note"
@@ -372,8 +390,16 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
           if (input.id !== preferencesRef.current.pairedDeviceId) return;
           if (messageType === "note" && (command === 0x80 || velocity === 0)) return;
           const definition = CONTROL_ACTIONS.find((action) => action.id === actionToLearn);
-          if (definition?.isFader && messageType !== "cc") {
-            setMidiError("Fader actions require a MIDI Control Change (CC) message.");
+          if (definition?.isFader && messageType !== "cc" && messageType !== "pitchbend") {
+            setMidiError("Fader actions require a MIDI CC or pitch-bend message.");
+            return;
+          }
+          if (actionToLearn === "jogScrub" && messageType !== "cc") {
+            setMidiError("Jog scrub requires an MCU encoder (CC).");
+            return;
+          }
+          if (messageType === "pitchbend" && !definition?.isFader) {
+            setMidiError("This action requires a button or encoder.");
             return;
           }
           setPreferences((current) => ({
@@ -385,7 +411,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
                 deviceName: input.name?.trim() || "MIDI device",
                 messageType,
                 channel,
-                number,
+                number: messageType === "pitchbend" ? channel : number,
               },
             },
           }));
@@ -399,7 +425,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
           candidate?.deviceId === input.id &&
           candidate.messageType === messageType &&
           candidate.channel === channel &&
-          candidate.number === number
+          candidate.number === (messageType === "pitchbend" ? channel : number)
         );
         if (!mapping) return;
 
@@ -416,7 +442,11 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
           pressedMidiInputsRef.current.add(pressKey);
           actionsRef.current[actionId]?.();
         } else if (actionId === "clickVolume" || actionId === "guideVolume" || actionId === "youtubeVolume") {
-          actionsRef.current[actionId]?.(velocity / 127);
+          const value = messageType === "pitchbend" ? parsePitchBend(event.data)?.value : velocity;
+          if (value !== undefined) actionsRef.current[actionId]?.(value / 127);
+        } else if (actionId === "jogScrub" && messageType === "cc") {
+          const delta = decodeMcuVpot(velocity);
+          if (delta) actionsRef.current[actionId]?.(delta);
         } else {
           const pressKey = `${input.id}:${channel}:${messageType}:${number}`;
           const isPressed = velocity >= 64;
@@ -437,6 +467,29 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
       });
     };
   }, [devices, preferences, learningAction]);
+
+  useEffect(() => {
+    const access = accessRef.current;
+    const profile = profileDocument.profiles.find((item) => item.id === activeProfileId);
+    const outputs = access ? getMidiOutputs(access, preferences.pairedDeviceName) : [];
+    const shortcuts = Object.entries(preferences.mappings).flatMap(([actionId, mapping]) => {
+      if (!mapping || mapping.messageType === "pitchbend" || actionId === "jogScrub" ||
+        CONTROL_ACTIONS.find((action) => action.id === actionId)?.isFader) return [];
+      return [{ control: { type: mapping.messageType, channel: mapping.channel, noteOrCcNumber: mapping.number }, active: !isSetupOpen }];
+    });
+    const beatControls = profile?.editProtocol === "mcu" ? createMcuBeatControls() :
+      profile ? getConfiguredBeatControls(profile.editBindings, profile.editBeatNoteCount) : [];
+    const errors = syncFeedbackOutputs(outputs, buildFeedbackScene(shortcuts, beatControls, beat), feedbackRef.current);
+    if (errors.length) {
+      console.error("Could not send live MIDI light feedback.", errors);
+      setMidiError("Could not send MIDI light feedback to one or more outputs.");
+    }
+  }, [preferences, profileDocument, activeProfileId, isSetupOpen, beat, outputRevision]);
+
+  useEffect(() => () => {
+    const errors = syncFeedbackOutputs([], new Map(), feedbackRef.current);
+    if (errors.length) console.error("Could not clear live MIDI lights.", errors);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -498,7 +551,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
     setProfileDocument(nextDocument);
     setActiveProfileId(profileId);
     activeProfileIdRef.current = profileId;
-    const nextPreferences = parseStoredPreferences(profile.liveSettings);
+    const nextPreferences = { ...parseStoredPreferences(profile.liveSettings), pairedDeviceId: profile.pairedDeviceId, pairedDeviceName: profile.pairedDeviceName };
     setPreferences(nextPreferences);
     preferencesRef.current = nextPreferences;
     setLearningAction(null);
@@ -541,7 +594,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
     if (activeProfileIdRef.current === profileId) {
       activeProfileIdRef.current = nextActiveId;
       setActiveProfileId(nextActiveId);
-      const nextPreferences = parseStoredPreferences(profiles[0].liveSettings);
+      const nextPreferences = { ...parseStoredPreferences(profiles[0].liveSettings), pairedDeviceId: profiles[0].pairedDeviceId, pairedDeviceName: profiles[0].pairedDeviceName };
       preferencesRef.current = nextPreferences;
       setPreferences(nextPreferences);
     }

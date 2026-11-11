@@ -28,6 +28,7 @@ import { useLivePresence } from "./hooks/useLivePresence";
 import { useYouTubeSync } from "./hooks/useYouTubeSync";
 import { useHardwareClock } from "./hooks/useHardwareClock";
 import { useKeyboardMidiControls } from "./hooks/useKeyboardMidiControls";
+import { getMetronomePulse, getMetronomeStep, isClickVolumeMuted, METRONOME_PATTERNS, METRONOME_SPEEDS, type MetronomePattern, type MetronomeSpeed } from "../../../../lib/metronome";
 
 import { LiveHeader } from "./components/LiveHeader";
 import { SimplifiedStackView } from "./components/SimplifiedStackView";
@@ -432,6 +433,15 @@ export default function SetlistPerformanceRoomPage() {
   const [currentSectionIndex, setCurrentSectionIndex] = useState<number>(0);
   const [currentBeat, setCurrentBeat] = useState<number>(1);
   const [tracksPlayheadBeat, setTracksPlayheadBeat] = useState(0);
+  const midiScrubRef = useRef<{ beat: number; time: number } | null>(null);
+  const [midiBeatLight, setMidiBeatLight] = useState<number | null>(null);
+  const [clickSpeedSelection, setClickSpeedSelection] = useState<MetronomeSpeed | null>(null);
+  const clickSpeed = clickSpeedSelection ?? (isDoubleMetronomeEnabled ? "double" : "default");
+  const [clickPattern, setClickPattern] = useState<MetronomePattern>("default");
+  const clickSpeedRef = useRef<MetronomeSpeed>("default");
+  const clickPatternRef = useRef<MetronomePattern>("default");
+  useEffect(() => { clickSpeedRef.current = clickSpeed; }, [clickSpeed]);
+  useEffect(() => { clickPatternRef.current = clickPattern; }, [clickPattern]);
   const [activeLineIndex, setActiveLineIndex] = useState<number>(0);
   const [showSyncBack, setShowSyncBack] = useState<boolean>(false);
 
@@ -1551,8 +1561,9 @@ export default function SetlistPerformanceRoomPage() {
       const startTimestamp = globalTime - sectionElapsedMs;
       const audioAnchor = { audioTime, absoluteBeat };
       const meter = getTimelineMeter(song.section_timings);
-      const beatPosition = getTimelineMeasureBeat(absoluteBeat, meter);
-      const clickKey = `metronome_${metronomeSoundTypeRef.current}_${beatPosition.beatIndex === 1 ? 1 : 2}`;
+      const clickIndex = Math.floor(absoluteBeat / (meter.unitQuarterBeats * getMetronomeStep(clickSpeedRef.current)));
+      const pulse = getMetronomePulse(clickIndex, clickSpeedRef.current, clickPatternRef.current, meter.numerator);
+      const clickKey = `metronome_${metronomeSoundTypeRef.current}_${pulse}`;
 
       pendingYoutubeStartRef.current = null;
       completeLiveStart(
@@ -1564,7 +1575,7 @@ export default function SetlistPerformanceRoomPage() {
         false,
         audioAnchor
       );
-      if (isPlayingRef.current && isYtBackingTrackStartRef.current && localClickVolumeRef.current > 0) {
+      if (pulse !== null && isPlayingRef.current && isYtBackingTrackStartRef.current && localClickVolumeRef.current > 0) {
         playZeroLatencyAudio(
           clickKey,
           localClickVolumeRef.current,
@@ -1737,7 +1748,8 @@ export default function SetlistPerformanceRoomPage() {
     audioLatencyOffsetMs, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
     queuedSectionIndexRef, queuedTrackIndexRef,
-    isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
+    isDoubleMetronomeEnabledRef, metronomeSpeedRef: clickSpeedRef, metronomePatternRef: clickPatternRef,
+    onMidiBeat: setMidiBeatLight, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime,
     playGuideCue, getAudioContext, audioContextStartTimeRef,
     pendingAudioClockCorrectionRef,
@@ -2564,6 +2576,29 @@ export default function SetlistPerformanceRoomPage() {
     setIsSimplifiedMode(next === "stack");
   }
 
+  function scrubLive(delta: number) {
+    if (!hasCurrentPlaybackAuthority()) { setIsMdLockModalOpen(true); return; }
+    const map = beatMapRef.current;
+    if (!map.sectionStartBeats.length || map.totalBeats <= 0) return;
+    const pending = midiScrubRef.current;
+    const base = pending && performance.now() - pending.time < 350 ? pending.beat :
+      isPlayingRef.current ? tracksPlayheadBeat : explicitScrubBeat ?? map.sectionStartBeats[currentSectionIndexRef.current] ?? 0;
+    const target = Math.max(0, Math.min(map.totalBeats - 0.001, base + delta * 0.25));
+    midiScrubRef.current = { beat: target, time: performance.now() };
+    let sectionIndex = 0;
+    for (let index = 0; index < map.sectionStartBeats.length; index++) {
+      if (map.sectionStartBeats[index] > target) break;
+      sectionIndex = index;
+    }
+    const trackIndex = isPlayingRef.current ? playingTrackIndexRef.current : currentTrackIndexRef.current;
+    const song = isPlayingRef.current ? playingSongRef.current : activeSongRef.current;
+    if (!song) return;
+    const jumpTime = getGlobalTime() - (target - map.sectionStartBeats[sectionIndex]) * (60000 / (song.tempo || 75));
+    setExplicitScrubBeat(target);
+    executeJumpNow(trackIndex, sectionIndex, jumpTime, false, "explicit-jump", target);
+    if (isPlayingRef.current) sendSupabaseBroadcast({ action: "JUMP", trackIndex, sectionIndex, mdSectionStartTime: jumpTime, exactBeat: target });
+  }
+
   const keyboardMidiControls = useKeyboardMidiControls(supabase, {
     playStop: handleToggleFlowPlaybackState,
     previousSong: () => navigateLiveTrack(-1),
@@ -2585,10 +2620,13 @@ export default function SetlistPerformanceRoomPage() {
     youtubeMute: () => setMixerMutes((current) => ({ ...current, yt: !current.yt })),
     youtubeSolo: () => setMixerSolos((current) => ({ ...current, yt: !current.yt })),
     mdTakeover: handleTogglePlaybackAuthority,
-    clickVolume: (value) => { if (typeof value === "number") setLocalClickVolume(value); },
+    clickVolume: (value) => { if (typeof value === "number") { setLocalClickVolume(value); setMixerMutes((current) => ({ ...current, click: isClickVolumeMuted(value * 100) })); } },
+    clickSpeed: () => setClickSpeedSelection(METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(clickSpeed) + 1) % METRONOME_SPEEDS.length]),
+    clickPattern: () => setClickPattern((current) => METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(current) + 1) % METRONOME_PATTERNS.length]),
+    jogScrub: (delta) => { if (typeof delta === "number") scrubLive(delta); },
     guideVolume: (value) => { if (typeof value === "number") setGuideVolume(value); },
     youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
-  });
+  }, isPlayingFlow ? midiBeatLight : null);
 
   if (loading) return <PageSkeleton message="LOADING SETLIST..." variant="live" />;
 
@@ -2630,6 +2668,10 @@ export default function SetlistPerformanceRoomPage() {
           getGlobalTime={getGlobalTime}
         />
       )}
+      {!isZenMode && <div className="flex gap-2 px-3 py-1">
+        <button type="button" className="rounded-md bg-surface-container-high px-3 py-1 text-xs font-bold" onClick={() => setClickSpeedSelection(METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(clickSpeed) + 1) % METRONOME_SPEEDS.length])}>Click speed: {clickSpeed}</button>
+        <button type="button" className="rounded-md bg-surface-container-high px-3 py-1 text-xs font-bold" onClick={() => setClickPattern((current) => METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(current) + 1) % METRONOME_PATTERNS.length])}>Click pattern: {clickPattern}</button>
+      </div>}
 
       {playbackClockNotice && (
         <div role="status" className="fixed top-20 left-1/2 z-[500000] -translate-x-1/2 rounded-xl bg-amber-100 px-4 py-2 text-center text-sm font-bold text-amber-900 shadow-lg">

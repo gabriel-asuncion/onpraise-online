@@ -5,6 +5,8 @@ export interface MidiControllerProfile {
   pairedDeviceName: string | null;
   liveSettings: Record<string, unknown>;
   editBindings: Record<string, unknown>;
+  editProtocol?: "mcu";
+  editBeatNoteCount?: number;
 }
 
 export interface MidiProfilesDocument {
@@ -38,6 +40,10 @@ export function parseMidiProfiles(value: unknown): MidiProfilesDocument {
           editBindings: profile.editBindings && typeof profile.editBindings === "object" && !Array.isArray(profile.editBindings)
             ? profile.editBindings as Record<string, unknown>
             : {},
+          ...(profile.editProtocol === "mcu" ? { editProtocol: "mcu" as const } : {}),
+          ...(typeof profile.editBeatNoteCount === "number" && Number.isInteger(profile.editBeatNoteCount) &&
+            profile.editBeatNoteCount >= 4 && profile.editBeatNoteCount <= 128 && profile.editBeatNoteCount % 4 === 0
+            ? { editBeatNoteCount: profile.editBeatNoteCount } : {}),
         }];
       })
     : [];

@@ -13,6 +13,8 @@ import { parseAllowedGeniusSongUrl } from "../../../api/lyrics/url-validation";
 import TimelineArrangement, { type TimelineSection, type TimelineLyricPreview, type TimelineSnap, type MidiControlFeedback } from "./TimelineArrangement";
 import MidiMappingModal from "./MidiMappingModal";
 import { useMidiLearn, type MidiActionId } from "./useMidiLearn";
+import { adjustMidiLineBeats, getMidiScrubTime, getMidiSectionTimingValue } from "./midiTimeline";
+import { getMetronomePulse, getMetronomeStep, isClickVolumeMuted, METRONOME_PATTERNS, METRONOME_SPEEDS, type MetronomePattern, type MetronomeSpeed } from "../../../../lib/metronome";
 
 // =======================================================
 // --- TRANSPOSTITION & DIATONIC CONSTANT BLUEPRINTS -----
@@ -380,6 +382,8 @@ export default function SongEditPage() {
   const [formYoutubeSyncOffset, setFormYoutubeSyncOffset] = useState<number>(0);
   const [isMidiMappingModalOpen, setIsMidiMappingModalOpen] = useState(false);
   const [midiClickVolume, setMidiClickVolume] = useState(100);
+  const [metronomeSpeed, setMetronomeSpeed] = useState<MetronomeSpeed>("default");
+  const [metronomePattern, setMetronomePattern] = useState<MetronomePattern>("default");
   const [midiBackingVolume, setMidiBackingVolume] = useState(100);
   const midiBackingVolumeRef = useRef(midiBackingVolume);
   const [midiPixelsPerBeat, setMidiPixelsPerBeat] = useState<number | null>(null);
@@ -391,6 +395,11 @@ export default function SongEditPage() {
   const [midiSelectedLine, setMidiSelectedLine] = useState<{ sectionId: string; lineIndex: number; time: number } | null>(null);
   const [midiControlFeedback, setMidiControlFeedback] = useState<MidiControlFeedback | null>(null);
   const [midiScrubFollowRequest, setMidiScrubFollowRequest] = useState(0);
+  const [midiBeatLight, setMidiBeatLight] = useState<number | null>(null);
+  const [midiLaneRequest, setMidiLaneRequest] = useState<{ rawValue: number; delta?: number } | null>(null);
+  const [midiToggleSectionRequest, setMidiToggleSectionRequest] = useState<{ sectionId: string } | null>(null);
+  const midiScrubSeekRef = useRef<{ time: number; timestamp: number } | null>(null);
+  const timelineAddSectionButtonRef = useRef<HTMLButtonElement>(null);
   const midiFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showMidiControlFeedback = useCallback((label: string, value: string) => {
     setMidiControlFeedback({ label, value });
@@ -1282,6 +1291,13 @@ function formatTimeWithMs(seconds: number) {
   const [pendingTimelineSectionType, setPendingTimelineSectionType] = useState<string | null>(null);
   const [sectionModalSearch, setSectionModalSearch] = useState("");
   const [sectionModalSelected, setSectionModalSelected] = useState<string | null>(null);
+  const sectionCatalogListRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!sectionModalConfig.isOpen || !sectionModalSelected) return;
+    const selected = sectionCatalogListRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]');
+    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [sectionModalConfig.isOpen, sectionModalSelected]);
 
   const [chordTargetCoordinate, setChordTargetCoordinate] = useState<{ sectionType: string; lineIdx: number; wordIdx: number } | null>(null);
   const [notesTargetCoordinate, setNotesTargetCoordinate] = useState<{ sectionType: string; lineIdx: number } | null>(null); 
@@ -3237,7 +3253,8 @@ function formatTimeWithMs(seconds: number) {
       return Math.max(0, lineMeasures * 4 + lineBeats);
     });
     
-    return [section.id, durations.some((duration) => duration > 0) ? durations : durations.map(() => 1)];
+    return [section.id, durations.some((duration) => duration > 0) || sectionOverrides
+      ? durations : durations.map(() => 1)];
   }));
   const timelineRepeatCountBySectionId = Object.fromEntries(formSections.map((section) => [
     section.id,
@@ -3281,6 +3298,11 @@ function formatTimeWithMs(seconds: number) {
           : -1;
         if (playerState === 1) {
           const currentTime = ytPlayerRef.current.getCurrentTime();
+          const pendingSeek = midiScrubSeekRef.current;
+          if (pendingSeek && performance.now() - pendingSeek.timestamp < 350 && Math.abs(currentTime - pendingSeek.time) > 0.1) {
+            ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
+            return;
+          }
           setYtCurrentTime(currentTime);
           const loopChapter = timelineChapters.find((chapter) => chapter.id === midiLoopSectionId);
           if (loopChapter && currentTime >= loopChapter.end) {
@@ -3295,21 +3317,28 @@ function formatTimeWithMs(seconds: number) {
           if (tempo > 0) {
             const elapsedMs = currentTime * 1000 - formYoutubeSyncOffset;
             if (elapsedMs >= 0) {
-              const currentBeat = Math.floor(elapsedMs / (60000 / tempo));
+              const currentBeat = Math.floor(elapsedMs / ((60000 / tempo) * (4 / timelineMeterDenominator) * getMetronomeStep(metronomeSpeed)));
               if (currentBeat !== lastTickedBeatRef.current) {
+                setMidiBeatLight(currentBeat % 4);
                 if (currentBeat > lastTickedBeatRef.current && !isMetronomeMutedRef.current) {
-                  const isDownbeat = currentBeat % 4 === 0;
-                  playZeroLatencyAudio(isDownbeat ? "metronome_blip_1" : "metronome_blip_2", midiClickVolume / 100);
+                  const pulse = getMetronomePulse(currentBeat, metronomeSpeed, metronomePattern, timelineMeterNumerator);
+                  if (pulse !== null) playZeroLatencyAudio(`metronome_blip_${pulse}`, midiClickVolume / 100);
                 }
                 lastTickedBeatRef.current = currentBeat;
               }
             } else {
+              setMidiBeatLight(null);
               lastTickedBeatRef.current = -1;
             }
+          } else {
+            setMidiBeatLight(null);
           }
         } else {
+          setMidiBeatLight(null);
           lastTickedBeatRef.current = -1;
         }
+      } else {
+        setMidiBeatLight(null);
       }
       ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
     };
@@ -3318,7 +3347,7 @@ function formatTimeWithMs(seconds: number) {
     return () => {
       if (ytTimeTrackerRef.current) cancelAnimationFrame(ytTimeTrackerRef.current);
     };
-  }, [formTempo, formYoutubeSyncOffset, midiClickVolume, midiLoopSectionId, playZeroLatencyAudio, timelineChapters]);
+  }, [formTempo, formYoutubeSyncOffset, metronomePattern, metronomeSpeed, midiClickVolume, midiLoopSectionId, playZeroLatencyAudio, timelineChapters, timelineMeterDenominator, timelineMeterNumerator]);
   const currentTimelineChapter = timelineChapters.find(
     (chapter) => ytCurrentTime >= chapter.start && ytCurrentTime < chapter.end,
   );
@@ -3567,10 +3596,14 @@ function formatTimeWithMs(seconds: number) {
   );
 
   const midiLearn = useMidiLearn((actionId: MidiActionId, payload) => {
+    if (duplicateDurationPrompt) return;
     const bpm = Math.max(1, parseInt(formTempo, 10) || 75);
-    const currentTime = ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function"
-      ? ytPlayerRef.current.getCurrentTime()
-      : ytCurrentTime;
+    const recentScrub = midiScrubSeekRef.current;
+    const currentTime = recentScrub && performance.now() - recentScrub.timestamp < 350
+      ? recentScrub.time
+      : ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function"
+        ? ytPlayerRef.current.getCurrentTime()
+        : ytCurrentTime;
     const activeChapterIndex = timelineChapters.findIndex(
       (chapter) => currentTime >= chapter.start && currentTime < chapter.end,
     );
@@ -3607,6 +3640,7 @@ function formatTimeWithMs(seconds: number) {
         if (anotherModalIsOpen) break;
         setEditorActiveTab("timeline");
         if (activeChapter) {
+          setPendingTimelineInsertionIndex(null);
           setPendingTimelineAnchorSectionId(activeChapter.id);
           setPendingTimelineSourceSectionId(activeChapter.id);
           setPendingTimelineSectionType(activeChapter.type);
@@ -3620,6 +3654,16 @@ function formatTimeWithMs(seconds: number) {
         }
         break;
       }
+      case "MODAL_OPEN_ADD_SECTION":
+        if (
+          editorActiveTab === "timeline" &&
+          !isMidiMappingModalOpen && !sectionModalConfig.isOpen && !pendingTimelineSectionType &&
+          !sectionAdjustmentsConfig.isOpen && !chordPickerConfig.isOpen &&
+          !(chordMode === "Keyboard" && chordTargetCoordinate !== null) &&
+          !isImportModalOpen && !isSongMetadataModalOpen && !isTimelineChaptersOpen &&
+          !isTapBpmModalOpen && !isKeyPopupOpen && !isImportDiscoveryModalOpen
+        ) timelineAddSectionButtonRef.current?.click();
+        break;
       case "MODAL_INSERT_BEFORE":
       case "MODAL_INSERT_AFTER": {
         if (!pendingTimelineSectionType) break;
@@ -3656,10 +3700,13 @@ function formatTimeWithMs(seconds: number) {
           setSectionModalSearch("");
           setSectionModalSelected(dynamicCatalogOptions[0]?.computedId ?? null);
           setSectionModalConfig({ isOpen: true, mode: "add" });
-        } else if (sectionModalConfig.isOpen && dynamicCatalogOptions.length > 0) {
-          const currentIndex = dynamicCatalogOptions.findIndex((option) => option.computedId === sectionModalSelected);
-          const nextIndex = (currentIndex + 1) % dynamicCatalogOptions.length;
-          setSectionModalSelected(dynamicCatalogOptions[nextIndex].computedId);
+        } else if (sectionModalConfig.isOpen) {
+          const visibleOptions = dynamicCatalogOptions.filter((option) =>
+            option.computedDisplay.toLowerCase().includes(sectionModalSearch.toLowerCase()));
+          if (!visibleOptions.length) break;
+          const currentIndex = visibleOptions.findIndex((option) => option.computedId === sectionModalSelected);
+          const nextIndex = (currentIndex + 1) % visibleOptions.length;
+          setSectionModalSelected(visibleOptions[nextIndex].computedId);
         }
         break;
       case "STOP_RETURN":
@@ -3675,11 +3722,25 @@ function formatTimeWithMs(seconds: number) {
         }
         break;
       case "JOG_SCRUB": {
-        const timeDelta = payload?.delta !== undefined
-          ? payload.delta * 0.25 * 60 / bpm
-          : ((payload?.rawValue ?? 0) / 127) * Math.max(0, (timelineChapters.at(-1)?.end ?? 0) - (timelineChapters[0]?.start ?? 0));
-        const nextTime = payload?.delta !== undefined ? currentTime + timeDelta : (timelineChapters[0]?.start ?? 0) + timeDelta;
-        seekToMidiTime(nextTime);
+        const now = performance.now();
+        const nextTime = getMidiScrubTime(
+          currentTime,
+          midiScrubSeekRef.current,
+          now,
+          bpm,
+          timelineChapters[0]?.start ?? 0,
+          timelineChapters.at(-1)?.end ?? 0,
+          ytDuration > 0 ? ytDuration : Number.POSITIVE_INFINITY,
+          payload?.rawValue ?? 0,
+          payload?.delta,
+        );
+        midiScrubSeekRef.current = { time: nextTime, timestamp: now };
+        setMidiSelectedLine(null);
+        setPendingTimelineFocusSectionId(null);
+        setYtCurrentTime(nextTime);
+        if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
+          ytPlayerRef.current.seekTo(nextTime, true);
+        }
         setMidiScrubFollowRequest((request) => request + 1);
         showMidiControlFeedback(
           "Jog Scrub",
@@ -3694,7 +3755,13 @@ function formatTimeWithMs(seconds: number) {
         seekToMidiTime(currentTime + (actionId === "NUDGE_MEASURE_NEXT" ? 1 : -1) * quarterBeatsPerMeasure * 60 / bpm);
         break;
       case "SELECT_SECTION_AT_PLAYHEAD":
-        if (activeChapter) setPendingTimelineFocusSectionId(activeChapter.id);
+        if (activeChapter) {
+          setPendingTimelineFocusSectionId(null);
+          setMidiToggleSectionRequest({ sectionId: activeChapter.id });
+        }
+        break;
+      case "LANE_SCRUB":
+        setMidiLaneRequest({ rawValue: payload?.rawValue ?? 0, delta: payload?.delta });
         break;
       case "PREV_SECTION":
       case "NEXT_SECTION": {
@@ -3720,14 +3787,13 @@ function formatTimeWithMs(seconds: number) {
           : actionId === "ADJUST_SECTION_BEATS" ? "beats" : "repeats";
         const metrics = getCentralizedMetricsTuple(activeChapter.type);
         const currentValue = Number(metrics[field]) || 0;
-        const absoluteValue = Math.round(((payload?.rawValue ?? 0) / 127) * (
-          field === "measures" ? 63 : field === "beats" ? Math.max(0, quarterBeatsPerMeasure - 1) : 8
-        ));
-        const nextValue = payload?.delta !== undefined
-          ? Math.max(field === "repeats" ? 0 : 1, currentValue + actionDelta)
-          : field === "measures" ? Math.max(1, absoluteValue + 1) : absoluteValue;
-        recordTimelineUndo();
-        handleUpdateCentralizedMetrics(activeChapter.type, field, nextValue);
+        const nextValue = getMidiSectionTimingValue(field, currentValue, payload?.rawValue ?? 0, quarterBeatsPerMeasure, payload?.delta);
+        if (isLaterDuplicateOccurrence(activeChapter.id, activeChapter.type)) {
+          handleContentTimingChange(activeChapter.id, activeChapter.type, field, nextValue);
+        } else {
+          recordTimelineUndo();
+          handleUpdateCentralizedMetrics(activeChapter.type, field, nextValue);
+        }
         showMidiControlFeedback(
           field === "measures" ? "Section Measures" : field === "beats" ? "Section Beats" : "Section Repeats",
           String(nextValue),
@@ -3735,7 +3801,7 @@ function formatTimeWithMs(seconds: number) {
         break;
       }
       case "ADJUST_LINE_MEASURES": {
-        const selectedLine = midiSelectedLine ?? (timelineLyricPreview
+        const selectedLine = (midiSelectedLine?.sectionId === activeChapter?.id ? midiSelectedLine : null) ?? (timelineLyricPreview
           ? {
               sectionId: timelineLyricPreview.sectionId,
               lineIndex: timelineLyricPreview.lineIndex,
@@ -3748,23 +3814,15 @@ function formatTimeWithMs(seconds: number) {
         const lines = getTimelineLyrics(section);
         const lineOrdinal = lines.findIndex((line) => line.lineIndex === selectedLine.lineIndex);
         if (lineOrdinal < 0) break;
-        const metrics = getCentralizedMetricsTuple(section.type);
-        const currentOverride = lineOverrides?.[section.type]?.[selectedLine.lineIndex];
-        const lineCount = Math.max(1, lines.length);
-        const autoSpreadMeasures = Math.floor(metrics.measures / lineCount);
-        const remainderMeasures = metrics.measures % lineCount;
-        const autoSpreadBeats = Math.floor(metrics.beats / lineCount);
-        const remainderBeats = metrics.beats % lineCount;
-        const currentMeasures = currentOverride?.measures ?? autoSpreadMeasures + (lineOrdinal < remainderMeasures ? 1 : 0);
-        const currentBeats = currentOverride?.beats ?? autoSpreadBeats + (lineOrdinal < remainderBeats ? 1 : 0);
-        const nextMeasures = payload?.delta !== undefined
-          ? Math.max(0, currentMeasures + actionDelta)
-          : Math.round(((payload?.rawValue ?? 0) / 127) * 16);
-        recordTimelineUndo();
-        handleContentLineTimingChange(section.id, section.type, selectedLine.lineIndex, "measures", nextMeasures);
+        const durations = [...(timelineLineDurationsBySectionId[section.id] ?? [])];
+        if (durations.length !== lines.length) break;
+        const currentBeats = durations[lineOrdinal];
+        const nextBeats = adjustMidiLineBeats(currentBeats, payload?.rawValue ?? 0, payload?.delta);
+        durations[lineOrdinal] = nextBeats;
+        handleTimelineUpdateLineDurations(section.id, section.type, durations);
         showMidiControlFeedback(
-          `Line ${lineOrdinal + 1} Measures`,
-          `${nextMeasures} measure${nextMeasures === 1 ? "" : "s"}${currentBeats ? ` + ${currentBeats} beat${currentBeats === 1 ? "" : "s"}` : ""}`,
+          `Line ${lineOrdinal + 1} Duration`,
+          `${Math.floor(nextBeats / 4)} measures${nextBeats % 4 ? ` + ${nextBeats % 4} beats` : ""}`,
         );
         break;
       }
@@ -3828,14 +3886,28 @@ function formatTimeWithMs(seconds: number) {
         break;
       }
       case "CLICK_VOLUME": {
-        const volume = Math.round(((payload?.rawValue ?? 0) / 127) * 100);
+        const volume = ((payload?.rawValue ?? 0) / 127) * 100;
         setMidiClickVolume(volume);
-        showMidiControlFeedback("Click Volume", `${volume}%`);
+        setIsMetronomeMuted(isClickVolumeMuted(volume));
+        showMidiControlFeedback("Click Volume", `${volume.toFixed(1)}%`);
         break;
       }
       case "CLICK_MUTE_TOGGLE":
         setIsMetronomeMuted(!isMetronomeMuted);
         break;
+      case "CLICK_SPEED_CYCLE": {
+        const next = METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(metronomeSpeed) + 1) % METRONOME_SPEEDS.length];
+        lastTickedBeatRef.current = -1;
+        setMetronomeSpeed(next);
+        showMidiControlFeedback("Click Speed", next);
+        break;
+      }
+      case "CLICK_PATTERN_CYCLE": {
+        const next = METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(metronomePattern) + 1) % METRONOME_PATTERNS.length];
+        setMetronomePattern(next);
+        showMidiControlFeedback("Click Pattern", next);
+        break;
+      }
       case "TIMELINE_ZOOM": {
         const pixelsPerBeat = payload?.delta !== undefined
           ? midiPixelsPerBeatRef.current + actionDelta * 1.5
@@ -3859,20 +3931,22 @@ function formatTimeWithMs(seconds: number) {
   }, supabase, isMidiMappingModalOpen);
 
   useEffect(() => {
-    const placementOpen = pendingTimelineSectionType !== null;
-    const catalogOpen = sectionModalConfig.isOpen;
-    midiLearn.sendMidiFeedback("MODAL_INSERT_BEFORE", placementOpen);
-    midiLearn.sendMidiFeedback("MODAL_INSERT_AFTER", placementOpen);
-    midiLearn.sendMidiFeedback("MODAL_CANCEL", placementOpen || catalogOpen);
-    midiLearn.sendMidiFeedback("MODAL_ADD_NEW_OR_CYCLE", placementOpen || catalogOpen);
-    midiLearn.sendMidiFeedback("MODAL_CONFIRM", catalogOpen);
-    midiLearn.sendMidiFeedback("PLAY_PAUSE", catalogOpen);
-    midiLearn.sendMidiFeedback("CLICK_MUTE_TOGGLE", isMetronomeMuted);
-    midiLearn.sendMidiFeedback("LOOP_ACTIVE_SECTION", midiLoopSectionId !== null);
+    midiLearn.sendFeedbackScene(
+      pendingTimelineSectionType !== null,
+      sectionModalConfig.isOpen,
+      midiBeatLight,
+      editorActiveTab === "timeline" && !isMidiMappingModalOpen && !duplicateDurationPrompt,
+    );
   }, [
-    isMetronomeMuted,
-    midiLearn.sendMidiFeedback,
-    midiLoopSectionId,
+    midiLearn.sendFeedbackScene,
+    midiLearn.bindings,
+    midiLearn.activeProfileId,
+    midiLearn.profileDocument,
+    midiLearn.outputRevision,
+    editorActiveTab,
+    isMidiMappingModalOpen,
+    duplicateDurationPrompt,
+    midiBeatLight,
     pendingTimelineSectionType,
     sectionModalConfig.isOpen,
   ]);
@@ -4614,6 +4688,10 @@ function formatTimeWithMs(seconds: number) {
 
         {editorActiveTab === "timeline" && (
           <>
+          <div className="flex flex-wrap gap-2 px-3 py-2">
+            <button type="button" className="rounded-md bg-surface-container-high px-3 py-2 text-xs font-bold" onClick={() => { lastTickedBeatRef.current = -1; setMetronomeSpeed(METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(metronomeSpeed) + 1) % METRONOME_SPEEDS.length]); }}>Click speed: {metronomeSpeed}</button>
+            <button type="button" className="rounded-md bg-surface-container-high px-3 py-2 text-xs font-bold" onClick={() => setMetronomePattern(METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(metronomePattern) + 1) % METRONOME_PATTERNS.length])}>Click pattern: {metronomePattern}</button>
+          </div>
           <TimelineArrangement
             key={editingSongId}
             sections={formSections}
@@ -4638,6 +4716,9 @@ function formatTimeWithMs(seconds: number) {
             midiPixelsPerBeat={midiPixelsPerBeat}
             midiControlFeedback={midiControlFeedback}
             midiScrubFollowRequest={midiScrubFollowRequest}
+            midiLaneRequest={midiLaneRequest}
+            midiToggleSectionRequest={midiToggleSectionRequest}
+            addSectionButtonRef={timelineAddSectionButtonRef}
             onEffectiveZoomChange={handleEffectiveMidiZoomChange}
             onClearMidiPixelsPerBeat={() => setMidiPixelsPerBeat(null)}
             onOpenMidiMappings={() => setIsMidiMappingModalOpen(true)}
@@ -4701,6 +4782,8 @@ function formatTimeWithMs(seconds: number) {
             stopListening={midiLearn.stopListening}
             clearBinding={midiLearn.clearBinding}
             resetAllBindings={midiLearn.resetAllBindings}
+            applyMcuPreset={midiLearn.applyMcuPreset}
+            setBeatNoteCount={midiLearn.setBeatNoteCount}
             setBindingMode={midiLearn.setBindingMode}
             setBindingChannel={midiLearn.setBindingChannel}
             setRelativeEncoding={midiLearn.setRelativeEncoding}
@@ -5302,11 +5385,11 @@ function formatTimeWithMs(seconds: number) {
             <div className="p-4 bg-surface-container shrink-0">
               <input type="text" placeholder="Search for a new section" value={sectionModalSearch} onChange={e => setSectionModalSearch(e.target.value)} className="w-full bg-surface-container-highest rounded-xl py-2.5 px-4 text-[13px] font-bold text-on-surface placeholder:text-on-surface-variant outline-none border border-outline-variant/30 focus:border-primary transition-colors" />
             </div>
-            <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2.5 custom-scrollbar bg-surface-container-low pt-2">
+            <div ref={sectionCatalogListRef} className="flex-1 overflow-y-auto px-4 pb-4 space-y-2.5 custom-scrollbar bg-surface-container-low pt-2">
               {dynamicCatalogOptions.filter(tmpl => tmpl.computedDisplay.toLowerCase().includes(sectionModalSearch.toLowerCase())).map(tmpl => {
                 const isSelected = sectionModalSelected === tmpl.computedId;
                 return (
-                  <button key={tmpl.computedId} type="button" onClick={() => setSectionModalSelected(tmpl.computedId)} className={`w-full flex items-center justify-between p-3 rounded-2xl transition-all cursor-pointer ${isSelected ? "bg-surface-container ring-2 ring-primary/50 shadow-sm" : "bg-surface-container border border-outline-variant/30 shadow-sm hover:bg-surface-container-high"}`}>
+                  <button key={tmpl.computedId} type="button" aria-pressed={isSelected} onClick={() => setSectionModalSelected(tmpl.computedId)} className={`w-full flex items-center justify-between p-3 rounded-2xl transition-all cursor-pointer ${isSelected ? "bg-surface-container ring-2 ring-primary/50 shadow-sm" : "bg-surface-container border border-outline-variant/30 shadow-sm hover:bg-surface-container-high"}`}>
                     <div className="flex items-center gap-3.5">
                       <div className={`w-8 h-8 rounded-full border flex items-center justify-center text-[10px] font-black ${tmpl.color}`}>{tmpl.abbr}</div>
                       <span className="text-[14px] font-bold text-on-surface tracking-tight">{tmpl.computedDisplay}</span>
