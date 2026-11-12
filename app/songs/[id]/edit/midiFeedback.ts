@@ -90,6 +90,14 @@ export function createBeatControls(
   }));
 }
 
+export function parseBeatLightSettings(value: unknown): { firstNote: number; channel: number; count: number } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const { firstNote, channel, count } = record;
+  return typeof firstNote === "number" && typeof channel === "number" && typeof count === "number" &&
+    createBeatControls(firstNote, channel, count).length > 0 ? { firstNote, channel, count } : null;
+}
+
 export function getConfiguredBeatControls(
   bindings: Record<string, unknown>, count: number | undefined,
 ): Array<{ control: FeedbackControl; beat: number }> {

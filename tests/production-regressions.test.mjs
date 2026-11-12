@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseAllowedGeniusSongUrl, resolveAllowedGeniusRedirect } from "../app/api/lyrics/url-validation.ts";
-import { compileTimelineBeatMap, getTimelineMeter, getYoutubeTimeForTimeline } from "../app/setlists/[id]/live/utils/timeline.ts";
+import { compileTimelineBeatMap, formatPlaybackTime, getTimelineMeter, getTimelinePosition, getYoutubeStartBeat, getYoutubeTimeForTimeline } from "../app/setlists/[id]/live/utils/timeline.ts";
+import { clearEqualizerOutputs, clearQueuedMidiOutputs } from "../app/setlists/[id]/live/hooks/equalizer.ts";
+import { createLightShowScene, LIGHT_SHOW_PRESETS, moveLightShowPreset, pickNextRandomPresetIndex, shouldShuffleLightShow, SMC_MATRIX_NOTES } from "../app/setlists/[id]/live/hooks/lightShowPresets.ts";
 import { startPlaybackWithSupplementaryAudio } from "../app/setlists/[id]/live/utils/playback-start.ts";
 import { loadSongSectionsBySongId } from "../app/setlists/[id]/live/utils/load-song-sections.ts";
 import { adjustMidiLineBeats, getMidiLaneIndex, getMidiScrubTime, getMidiSectionTimingValue } from "../app/songs/[id]/edit/midiTimeline.ts";
 import { findMidiConflicts, updateMidiBinding } from "../app/songs/[id]/edit/midiBindings.ts";
-import { buildFeedbackScene, createBeatControls, feedbackKey, getConfiguredBeatControls, getMidiOutputs, isShortcutLightActive, syncFeedbackOutputs } from "../app/songs/[id]/edit/midiFeedback.ts";
+import { buildFeedbackScene, createBeatControls, feedbackKey, getConfiguredBeatControls, getMidiOutputs, isShortcutLightActive, parseBeatLightSettings, syncFeedbackOutputs } from "../app/songs/[id]/edit/midiFeedback.ts";
 import { createMcuBeatControls, createMcuPreset, decodeMcuVpot, MCU_REC_PAIRS, parsePitchBend, scalePitchBend } from "../app/songs/[id]/edit/mcuProtocol.ts";
-import { parseMidiProfiles } from "../app/setlists/[id]/live/hooks/midiProfiles.ts";
-import { getMetronomePulse, getMetronomeStep, isClickVolumeMuted } from "../lib/metronome.ts";
+import { getPageProfileId, parseMidiProfiles, removePageProfileSelections, selectPageProfile } from "../app/setlists/[id]/live/hooks/midiProfiles.ts";
+import { adjustLocalClickOffset, formatLocalClickOffset, getOffsetMidiBeat, isMidiActionAllowedInEq, matchesPairedMidiMapping, shouldTriggerMidiButton } from "../app/setlists/[id]/live/hooks/midiInput.ts";
+import { transposeDisplayKey } from "../app/setlists/[id]/live/utils/music-math.ts";
+import { getMetronomePulse, getMetronomeStep, getMissedClickSteps, isClickVolumeMuted } from "../lib/metronome.ts";
 import {
   getAccountLandingPath,
   hasProfileMembership,
@@ -35,6 +39,10 @@ test("metronome speeds and patterns use the selected click grid", () => {
   assert.equal(isClickVolumeMuted(0), true);
   assert.equal(isClickVolumeMuted(0.99), true);
   assert.equal(isClickVolumeMuted(1), false);
+  assert.equal(getMissedClickSteps(0, 3600, 0.5), 7200);
+  assert.equal(getMissedClickSteps(1, 1, 0.5), 0);
+  assert.equal(getMissedClickSteps(1, 1.1, 0.5), 1);
+  assert.equal(getMissedClickSteps(1, 2, 0), 0);
   assert.deepEqual(["default", "double", "half"].map(getMetronomeStep), [1, 0.5, 2]);
   assert.deepEqual([0, 1, 2, 3].map((i) => getMetronomePulse(i, "default", "default", 4)), [1, 2, 2, 2]);
   assert.deepEqual([0, 1, 2, 3].map((i) => getMetronomePulse(i, "default", "no-downbeat", 4)), [2, 2, 2, 2]);
@@ -46,6 +54,10 @@ test("metronome speeds and patterns use the selected click grid", () => {
 });
 
 test("live beat lights use saved editor ranges and legacy mappings", () => {
+  assert.deepEqual(parseBeatLightSettings({ firstNote: 12, channel: 1, count: 8 }), { firstNote: 12, channel: 1, count: 8 });
+  assert.equal(parseBeatLightSettings({ firstNote: 125, channel: 1, count: 8 }), null);
+  assert.equal(parseBeatLightSettings({ firstNote: 0, channel: 16, count: 8 }), null);
+  assert.equal(parseBeatLightSettings({ firstNote: 0, channel: 0, count: 6 }), null);
   const first = { type: "note", channel: 2, noteOrCcNumber: 40, mode: "trigger" };
   const second = { type: "note", channel: 2, noteOrCcNumber: 70, mode: "trigger" };
   const bindings = { BEAT_LIGHT_1: first, BEAT_LIGHT_2: second };
@@ -54,6 +66,145 @@ test("live beat lights use saved editor ranges and legacy mappings", () => {
     [[40, 2, 0], [41, 2, 0], [42, 2, 1], [43, 2, 1], [44, 2, 2], [45, 2, 2], [46, 2, 3], [47, 2, 3]]);
   assert.deepEqual(getConfiguredBeatControls(bindings, undefined).map(({ control, beat }) => [control.noteOrCcNumber, beat]), [[40, 0], [70, 1]]);
   assert.deepEqual(getConfiguredBeatControls({ BEAT_LIGHT_1: { ...first, noteOrCcNumber: 126 } }, 8), []);
+});
+
+test("SMC screenshot note numbers are sent as note-on LED feedback", () => {
+  const messages = [];
+  const output = { name: "SMC-Mixer", state: "connected", send: (message) => messages.push(message) };
+  const shortcuts = [0x2e, 0x2f, 0x60, 0x61, 0x62, 0x63].map((noteOrCcNumber) => ({
+    control: { type: "note", channel: 0, noteOrCcNumber }, active: true,
+  }));
+  syncFeedbackOutputs([output], buildFeedbackScene(shortcuts, [], null), new Map());
+  assert.deepEqual(messages, [0x2e, 0x2f, 0x60, 0x61, 0x62, 0x63].map((number) => [0x90, number, 127]));
+});
+
+test("stopped timeline position handles pre-roll, line overrides, repeats and tail", () => {
+  const sections = [{ id: "a", section_name: "Verse" }, { id: "b", section_name: "Chorus" }];
+  const timings = { Verse: { head_m: 1, repeats: 1, tail_m: 1, line_timings: {
+    0: { beats: 2 }, 1: { beats: 4 },
+  } }, Chorus: { measures: 2 } };
+  const map = compileTimelineBeatMap(sections, timings, [2, 2]);
+  const position = (beat) => getTimelinePosition(beat, map.sectionStartBeats, map.totalBeats, sections, [2, 2], timings);
+  assert.equal(getYoutubeStartBeat(120, 2000), -4);
+  assert.equal(getYoutubeTimeForTimeline(-4, 0, 120, 2000), 0);
+  assert.equal(formatPlaybackTime(0.25), "0:00.2");
+  assert.equal(formatPlaybackTime(61.5), "1:01.5");
+  assert.deepEqual(position(-4), { sectionIndex: 0, lineIndex: 0 });
+  assert.deepEqual(position(6), { sectionIndex: 0, lineIndex: 1 });
+  assert.deepEqual(position(10), { sectionIndex: 0, lineIndex: 0 });
+  assert.deepEqual(position(17), { sectionIndex: 0, lineIndex: 1 });
+  assert.deepEqual(position(20), { sectionIndex: 1, lineIndex: 0 });
+});
+
+test("equalizer matrix uses MCU rows and sends only changed LED states", () => {
+  assert.equal(isMidiActionAllowedInEq(true, "playStop"), false);
+  assert.equal(isMidiActionAllowedInEq(true, "toggleEqMode"), true);
+  assert.equal(isMidiActionAllowedInEq(true, "cycleLightShowPreset"), true);
+  for (const action of ["jogScrub", "clickOffset", "clickVolume", "guideVolume", "youtubeVolume", "transpose", "timelineZoom", "clickSound"]) {
+    assert.equal(isMidiActionAllowedInEq(true, action), true);
+  }
+  assert.equal(isMidiActionAllowedInEq(true, "nextSection"), false);
+  assert.equal(isMidiActionAllowedInEq(false, "playStop"), true);
+  const scene = createLightShowScene({ isLit: (row, col) => row < col }, 0, 0, 0);
+  assert.equal(scene.size, 32);
+  assert.equal(scene.get("note:0:25").active, true);
+  assert.equal(scene.get("note:0:1").active, false);
+  assert.equal(scene.get("note:0:10").active, false);
+  assert.equal(scene.get("note:0:11").active, true);
+  assert.equal(scene.get("note:0:20").active, true);
+  const messages = [];
+  const output = { state: "connected", name: "SMC", send: (message) => messages.push(message) };
+  const cache = new Map();
+  syncFeedbackOutputs([output], scene, cache);
+  assert.equal(messages.length, 32);
+  syncFeedbackOutputs([output], scene, cache);
+  assert.equal(messages.length, 32);
+  syncFeedbackOutputs([output], createLightShowScene({ isLit: () => false }, 0, 0, 0), cache);
+  assert.ok(messages.slice(32).every((message) => message[2] === 0));
+  messages.length = 0;
+  assert.deepEqual(clearEqualizerOutputs([output]), []);
+  assert.deepEqual(messages, Array.from({ length: 32 }, (_, note) => [0x90, note, 0]));
+});
+
+test("light-show teardown clears queued output before matrix lights and surfaces failures", () => {
+  const events = [];
+  const output = { state: "connected", clear: () => events.push("clear"), send: (data) => events.push(data) };
+  assert.deepEqual(clearQueuedMidiOutputs([output]), []);
+  assert.deepEqual(clearEqualizerOutputs([output]), []);
+  assert.equal(events[0], "clear");
+  assert.deepEqual(events.slice(1), Array.from({ length: 32 }, (_, note) => [0x90, note, 0]));
+  const error = new Error("failed");
+  assert.deepEqual(clearQueuedMidiOutputs([{ state: "connected", clear() { throw error; } }]), [error]);
+  assert.deepEqual(clearQueuedMidiOutputs([{ state: "disconnected", clear() { throw error; } }, { state: "connected" }]), []);
+});
+
+test("manual light-show selection wraps and remains until playback restarts", () => {
+  assert.equal(moveLightShowPreset(0, -1, 24), 23);
+  assert.equal(moveLightShowPreset(23, 2, 24), 1);
+  assert.equal(shouldShuffleLightShow(true, true, true, 0, 4, true), false);
+  assert.equal(shouldShuffleLightShow(true, true, true, 0, 4, false), true);
+  assert.equal(shouldShuffleLightShow(true, false, true, 0, 1, true), true);
+  assert.equal(shouldShuffleLightShow(false, false, false, null, 0, true), true);
+});
+
+test("light show presets cover all matrix notes and shuffle never repeats", () => {
+  assert.equal(LIGHT_SHOW_PRESETS.length, 24);
+  assert.equal(new Set(LIGHT_SHOW_PRESETS.map((preset) => preset.id)).size, 24);
+  assert.deepEqual(SMC_MATRIX_NOTES.flat().slice().sort((a, b) => a - b), Array.from({ length: 32 }, (_, i) => i));
+  for (const preset of LIGHT_SHOW_PRESETS) {
+    const scene = createLightShowScene(preset, 12, 0.3, 2);
+    assert.equal(scene.size, 32);
+    assert.ok([...scene.values()].every((item) => typeof item.active === "boolean"));
+  }
+  for (let current = 0; current < 24; current++) {
+    for (let draw = 0; draw < 23; draw++) {
+      const next = pickNextRandomPresetIndex(current, 24, () => (draw + 0.5) / 23);
+      assert.notEqual(next, current);
+      assert.ok(next >= 0 && next < 24);
+    }
+  }
+  assert.equal(pickNextRandomPresetIndex(0, 1), 0);
+  assert.equal(pickNextRandomPresetIndex(-1, 24, () => 0.99), 23);
+  assert.equal(shouldShuffleLightShow(false, false, false, null, 0), true);
+  assert.equal(shouldShuffleLightShow(true, false, true, 0, 0), true);
+  assert.equal(shouldShuffleLightShow(true, true, true, 0, 0), false);
+  assert.equal(shouldShuffleLightShow(true, true, true, 0, 1), false);
+  assert.equal(shouldShuffleLightShow(true, true, true, 0, 3), false);
+  assert.equal(shouldShuffleLightShow(true, true, true, 0, 4), true);
+  assert.equal(shouldShuffleLightShow(true, true, true, -2, 2), true);
+  assert.equal(shouldShuffleLightShow(true, false, false, 0, 1), false);
+  const scene = createLightShowScene(LIGHT_SHOW_PRESETS.find((item) => item.id === "beat_row_ladder"), 0, 0, 2);
+  assert.deepEqual([...scene.values()].filter((item) => item.active).map((item) => item.control.noteOrCcNumber), [...SMC_MATRIX_NOTES[2]]);
+});
+
+test("local MIDI click correction uses ten-millisecond steps and stays within 1000 ms", () => {
+  assert.equal(adjustLocalClickOffset(0, 1), 10);
+  assert.equal(adjustLocalClickOffset(10, -2), -10);
+  assert.equal(adjustLocalClickOffset(940, 15), 1000);
+  assert.equal(adjustLocalClickOffset(-940, -15), -1000);
+  assert.equal(adjustLocalClickOffset(20, NaN), 20);
+  assert.equal(formatLocalClickOffset(10), "+10 ms");
+  assert.equal(formatLocalClickOffset(-250), "-250 ms");
+  assert.equal(formatLocalClickOffset(0), "0 ms");
+  assert.equal(getOffsetMidiBeat(2, 500, 1, 100, 0), 1);
+  assert.equal(getOffsetMidiBeat(2.2, 500, 1, 100, 0), 2);
+  assert.equal(getOffsetMidiBeat(1.8, 500, 1, -100, 0), 2);
+  assert.equal(getOffsetMidiBeat(2, 500, 1, 100, 100), 2);
+});
+
+test("MIDI transpose wraps in both directions and preserves minor keys", () => {
+  assert.equal(transposeDisplayKey("B", 1), "C");
+  assert.equal(transposeDisplayKey("C", -1), "B");
+  assert.equal(transposeDisplayKey("Bbm", 2), "Cm");
+  assert.equal(transposeDisplayKey("C", -25), "B");
+  assert.equal(transposeDisplayKey("unknown", 1), "unknown");
+});
+test("light-show toggle accepts successive presses even without a MIDI release", () => {
+  assert.equal(shouldTriggerMidiButton("toggleEqMode", true, false), true);
+  assert.equal(shouldTriggerMidiButton("toggleEqMode", true, true), true);
+  assert.equal(shouldTriggerMidiButton("toggleEqMode", false, true), false);
+  assert.equal(shouldTriggerMidiButton("playStop", true, true), false);
+  assert.equal(shouldTriggerMidiButton("playStop", true, false), true);
 });
 
 test("MIDI line duration changes by one beat per increment", () => {
@@ -177,7 +328,29 @@ test("MIDI output selection matches Windows ports and falls back to connected ou
   assert.deepEqual(getMidiOutputs({ outputs }, null), outputs.slice(0, 2));
   assert.deepEqual(getMidiOutputs({ outputs: outputs.slice(1) }, "Unknown controller"), [outputs[1]]);
   assert.deepEqual(getMidiOutputs({ outputs: [] }, "MIDIIN2 (SMC-Mixer)"), []);
+  assert.deepEqual(getMidiOutputs({ outputs: [{ name: "SMC-Mixer-bt", state: "connected" }] }, "SMC-Mixer").length, 1);
   assert.deepEqual(getMidiOutputs({ outputs: [outputs[1], { name: null, state: "connected" }] }, "Unknown controller").length, 2);
+});
+
+test("paired live mappings work after switching MIDI bridge ports", () => {
+  const mapping = { deviceId: "wired-port", messageType: "note", channel: 0, number: 94 };
+  assert.equal(matchesPairedMidiMapping("ble-port", "ble-port", mapping, "note", 0, 94), true);
+  assert.equal(matchesPairedMidiMapping("ble-port", "wired-port", mapping, "note", 0, 94), false);
+  assert.equal(matchesPairedMidiMapping("ble-port", "ble-port", mapping, "note", 1, 94), false);
+});
+
+test("MIDI profile selection is independent across edit, live and solo pages", () => {
+  const profiles = ["one", "two", "three"].map((id) => ({ id, name: id }));
+  let document = parseMidiProfiles({ profiles, activeProfileId: "one" });
+  assert.equal(getPageProfileId(document, "edit"), "one");
+  document = selectPageProfile(document, "edit", "two");
+  document = selectPageProfile(document, "live", "three");
+  document = selectPageProfile(document, "solo", "one");
+  const restored = parseMidiProfiles(JSON.parse(JSON.stringify(document)));
+  assert.deepEqual(["edit", "live", "solo"].map((page) => getPageProfileId(restored, page)), ["two", "three", "one"]);
+  const removed = removePageProfileSelections({ ...restored, profiles: restored.profiles.filter((profile) => profile.id !== "two") }, "two");
+  assert.deepEqual(["edit", "live", "solo"].map((page) => getPageProfileId(removed, page)), ["one", "three", "one"]);
+  assert.equal(getPageProfileId(parseMidiProfiles({ profiles, activeProfileId: "one", activeProfileIds: { live: "missing" } }), "live"), "one");
 });
 
 test("MIDI feedback synchronizes, retries and clears each output independently", () => {

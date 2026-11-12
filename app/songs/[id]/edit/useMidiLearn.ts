@@ -9,6 +9,11 @@ import {
   createMidiControllerProfile,
   EMPTY_MIDI_PROFILES,
   parseMidiProfiles,
+  getPageProfileId,
+  selectPageProfile,
+  removePageProfileSelections,
+  readLocalPageProfile,
+  saveLocalPageProfile,
   type MidiProfilesDocument,
 } from "../../../setlists/[id]/live/hooks/midiProfiles";
 
@@ -220,6 +225,7 @@ export function useMidiLearn(
   const pendingRef = useRef(new Map<MidiActionId, MidiActionPayload>());
   const pendingMonitorRef = useRef<MidiMonitorMessage[]>([]);
   const outputsRef = useRef<MidiOutputLike[]>([]);
+  const [outputNames, setOutputNames] = useState<string[]>([]);
   const [outputRevision, setOutputRevision] = useState(0);
   const feedbackStateRef = useRef<Map<MidiOutputLike, FeedbackScene>>(new Map());
   const rescanRef = useRef<() => void>(() => {});
@@ -260,8 +266,10 @@ export function useMidiLearn(
         profile.editBindings = readStoredBindings() as Record<string, unknown>;
         document = { version: 1, activeProfileId: profile.id, profiles: [profile] };
       }
-      const selected = document.profiles.find((profile) => profile.id === document.activeProfileId) ?? document.profiles[0];
-      document = { ...document, activeProfileId: selected.id };
+      const localId = readLocalPageProfile(auth.user.id, "edit");
+      const selected = document.profiles.find((profile) => profile.id === localId) ??
+        document.profiles.find((profile) => profile.id === getPageProfileId(document, "edit")) ?? document.profiles[0];
+      if (localId === selected.id) document = selectPageProfile(document, "edit", selected.id);
       const storedBindings = readStoredBindings(selected.editBindings);
       const restored = applySmcRelativeEncoding(storedBindings, selected.pairedDeviceName);
       if (restored !== storedBindings) {
@@ -355,6 +363,7 @@ export function useMidiLearn(
         type, number, value, channel,
         deviceName: input.name?.trim() || "MIDI input",
       });
+      if (pendingMonitorRef.current.length > 8) pendingMonitorRef.current.shift();
       scheduleFlush();
       if (type === "other") return;
       const noteOn = command === 0x90 && value > 0;
@@ -477,6 +486,7 @@ export function useMidiLearn(
       if (!active || !access) return;
       const inputs = [...access.inputs.values()].filter((input) => input.state !== "disconnected");
       outputsRef.current = [...access.outputs.values()].filter((output) => output.state !== "disconnected");
+      setOutputNames(outputsRef.current.map((output) => output.name?.trim() || "Unnamed MIDI output"));
       setOutputRevision((revision) => revision + 1);
       const currentIds = new Set(inputs.map((input) => input.id));
       attachedInputs.forEach((input, id) => {
@@ -693,9 +703,13 @@ export function useMidiLearn(
   const selectProfile = useCallback((profileId: string) => {
     const profile = profileDocumentRef.current.profiles.find((item) => item.id === profileId);
     if (!profile) return;
+    if (profileUserId) {
+      try { saveLocalPageProfile(profileUserId, "edit", profileId); }
+      catch (error) { console.error("Could not save local MIDI profile selection.", error); setAccessError("Could not save the selected MIDI profile in this browser."); }
+    }
     setActiveProfileId(profileId);
     activeProfileIdRef.current = profileId;
-    const nextDocument = { ...profileDocumentRef.current, activeProfileId: profileId };
+    const nextDocument = selectPageProfile(profileDocumentRef.current, "edit", profileId);
     profileDocumentRef.current = nextDocument;
     setProfileDocument(nextDocument);
     const nextBindings = applySmcRelativeEncoding(
@@ -709,14 +723,17 @@ export function useMidiLearn(
       setBindings(nextBindings);
     }
     stopListening();
-  }, [persist, stopListening]);
+  }, [persist, profileUserId, stopListening]);
   const createProfile = useCallback((name: string) => {
     const profile = createMidiControllerProfile(name);
-    const document = {
+    if (profileUserId) {
+      try { saveLocalPageProfile(profileUserId, "edit", profile.id); }
+      catch (error) { console.error("Could not save local MIDI profile selection.", error); setAccessError("Could not save the selected MIDI profile in this browser."); }
+    }
+    const document = selectPageProfile({
       ...profileDocumentRef.current,
-      activeProfileId: profile.id,
       profiles: [...profileDocumentRef.current.profiles, profile],
-    };
+    }, "edit", profile.id);
     profileDocumentRef.current = document;
     setProfileDocument(document);
     setActiveProfileId(profile.id);
@@ -724,7 +741,7 @@ export function useMidiLearn(
     bindingsRef.current = {};
     setBindings({});
     stopListening();
-  }, [stopListening]);
+  }, [profileUserId, stopListening]);
   const renameProfile = useCallback((profileId: string, name: string) => {
     const document = {
       ...profileDocumentRef.current,
@@ -738,7 +755,10 @@ export function useMidiLearn(
     const remaining = profileDocumentRef.current.profiles.filter((profile) => profile.id !== profileId);
     if (remaining.length === 0) return;
     const activeId = activeProfileIdRef.current === profileId ? remaining[0].id : activeProfileIdRef.current;
-    const document = { ...profileDocumentRef.current, profiles: remaining, activeProfileId: activeId };
+    const document = removePageProfileSelections({
+      ...profileDocumentRef.current, profiles: remaining,
+      activeProfileId: profileDocumentRef.current.activeProfileId === profileId ? remaining[0].id : profileDocumentRef.current.activeProfileId,
+    }, profileId);
     profileDocumentRef.current = document;
     setProfileDocument(document);
     if (activeProfileIdRef.current === profileId) {
@@ -779,6 +799,7 @@ export function useMidiLearn(
 
   return {
     isSupported, isConnected, activeDeviceName, devices, learningActionId, bindings,
+    outputNames,
     latestMessage, recentMessages, accessError, startListening, stopListening, clearBinding,
     resetAllBindings, applyMcuPreset, setBeatNoteCount, profileDocument, activeProfileId, isProfileLoading, isProfileSaving,
     selectProfile, createProfile, renameProfile, deleteProfile, pairDevice, scanMidiDevices,

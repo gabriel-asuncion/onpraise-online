@@ -12,7 +12,41 @@ export interface MidiControllerProfile {
 export interface MidiProfilesDocument {
   version: 1;
   activeProfileId: string | null;
+  activeProfileIds?: Partial<Record<MidiProfilePage, string>>;
   profiles: MidiControllerProfile[];
+}
+
+export type MidiProfilePage = "edit" | "live" | "solo";
+
+export function readLocalPageProfile(userId: string, page: MidiProfilePage): string | null {
+  try {
+    return window.localStorage.getItem(`onpraise:midi-profile:${userId}:${page}`);
+  } catch (error) {
+    console.error("Could not read the local MIDI profile selection.", error);
+    return null;
+  }
+}
+
+export function saveLocalPageProfile(userId: string, page: MidiProfilePage, profileId: string): void {
+  window.localStorage.setItem(`onpraise:midi-profile:${userId}:${page}`, profileId);
+}
+
+export function getPageProfileId(document: MidiProfilesDocument, page: MidiProfilePage): string | null {
+  const saved = document.activeProfileIds?.[page];
+  return document.profiles.some((profile) => profile.id === saved)
+    ? saved! : document.activeProfileId;
+}
+
+export function selectPageProfile(document: MidiProfilesDocument, page: MidiProfilePage, id: string): MidiProfilesDocument {
+  return { ...document, activeProfileIds: { ...document.activeProfileIds, [page]: id } };
+}
+
+export function removePageProfileSelections(document: MidiProfilesDocument, removedId: string): MidiProfilesDocument {
+  const selections = { ...document.activeProfileIds };
+  for (const page of ["edit", "live", "solo"] as const) {
+    if (selections[page] === removedId) delete selections[page];
+  }
+  return { ...document, activeProfileIds: selections };
 }
 
 export const EMPTY_MIDI_PROFILES: MidiProfilesDocument = {
@@ -51,7 +85,14 @@ export function parseMidiProfiles(value: unknown): MidiProfilesDocument {
     profiles.some((profile) => profile.id === record.activeProfileId)
     ? record.activeProfileId
     : profiles[0]?.id ?? null;
-  return { version: 1, activeProfileId, profiles };
+  const selections = record.activeProfileIds && typeof record.activeProfileIds === "object" && !Array.isArray(record.activeProfileIds)
+    ? record.activeProfileIds as Record<string, unknown> : {};
+  const activeProfileIds: MidiProfilesDocument["activeProfileIds"] = {};
+  for (const page of ["edit", "live", "solo"] as const) {
+    const id = selections[page];
+    if (typeof id === "string" && profiles.some((profile) => profile.id === id)) activeProfileIds[page] = id;
+  }
+  return { version: 1, activeProfileId, profiles, activeProfileIds };
 }
 
 export function createMidiControllerProfile(name: string): MidiControllerProfile {

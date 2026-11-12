@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import {
   CONTROL_ACTIONS,
   ControlActionId,
@@ -15,6 +15,10 @@ export interface MidiSetupModalProps {
   profileDocument: MidiProfilesDocument;
   activeProfileId: string | null;
   devices: MidiDeviceOption[];
+  outputNames: string[];
+  lastMidiMessage: string | null;
+  beatNoteCount: number;
+  setBeatNoteCount: (count: number) => string | null;
   isLoading: boolean;
   isSaving: boolean;
   isMidiSupported: boolean;
@@ -40,6 +44,10 @@ export function MidiSetupModal({
   profileDocument,
   activeProfileId,
   devices,
+  outputNames,
+  lastMidiMessage,
+  beatNoteCount,
+  setBeatNoteCount,
   isLoading,
   isSaving,
   isMidiSupported,
@@ -59,8 +67,10 @@ export function MidiSetupModal({
   onRenameProfile,
   onDeleteProfile,
 }: MidiSetupModalProps) {
-  const categories = ["Playback", "Audio", "Display"] as const;
+  const categories = ["Playback", "Audio", "Display", "Visuals / Hardware"] as const;
   const pairedDeviceConnected = devices.some((device) => device.id === preferences.pairedDeviceId);
+  const [draftCount, setDraftCount] = useState<string | null>(null);
+  const [countError, setCountError] = useState("");
 
   return (
     <div
@@ -135,6 +145,12 @@ export function MidiSetupModal({
                 MIDI is unavailable in this browser. Use a supported desktop browser over HTTPS, or continue with keyboard shortcuts.
               </p>
             )}
+            <p className="text-xs text-on-surface-variant">
+              MIDI outputs: {outputNames.length ? outputNames.join(", ") : "None detected. The Bluetooth bridge must expose a MIDI output for lights."}
+            </p>
+            <p className="text-xs text-on-surface-variant" aria-live="polite">
+              Last input: {lastMidiMessage ?? "No MIDI messages received yet. Press a controller button to test."}
+            </p>
             {midiError && <p role="alert" className="text-xs text-error">{midiError}</p>}
             {preferenceError && <p role="alert" className="text-xs text-error">{preferenceError}</p>}
             <p className="text-[10px] text-on-surface-variant">
@@ -144,10 +160,36 @@ export function MidiSetupModal({
 
           {learningAction && (
             <div role="status" className="flex items-center justify-between gap-3 rounded-xl border border-primary/40 bg-primary/10 px-4 py-3 text-sm">
-              <span>Press a controller button or move a fader for <strong>{CONTROL_ACTIONS.find((action) => action.id === learningAction)?.label}</strong>.</span>
+              <span>Press a controller button or move a fader for <strong>{learningAction === "beatLightFirst" ? "First beat light" : CONTROL_ACTIONS.find((action) => action.id === learningAction)?.label}</strong>.</span>
               <button type="button" onClick={onCancelLearn} className="shrink-0 rounded-md px-2 py-1 text-xs font-bold text-primary">Cancel</button>
             </div>
           )}
+
+          <section className="space-y-2 rounded-xl border border-outline-variant/20 bg-surface-container p-4">
+            <h3 className="text-sm font-bold">Metronome lights</h3>
+            <p className="text-xs text-on-surface-variant">Consecutive notes are split evenly across four beats. This profile&apos;s live and solo pages share this setting.</p>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-xs">Number of notes
+                <input type="number" min={4} max={128} step={4} value={draftCount ?? String(beatNoteCount)}
+                  onChange={(event) => { setDraftCount(event.target.value); setCountError(""); }}
+                  onBlur={() => {
+                    if (draftCount === null) return;
+                    const error = setBeatNoteCount(draftCount.trim() ? Number(draftCount) : NaN);
+                    setCountError(error ?? "");
+                    if (!error) setDraftCount(null);
+                  }}
+                  className="w-24 rounded-md border border-outline-variant/30 bg-surface-container-low px-2 py-1.5" />
+              </label>
+              <div className="text-xs">First note: {preferences.beatLights ? `${preferences.beatLights.firstNote} (Ch ${preferences.beatLights.channel + 1})` : "MCU default or editor profile"}</div>
+              <button type="button" disabled={!pairedDeviceConnected || Boolean(countError) ||
+                (draftCount !== null && (!Number.isInteger(Number(draftCount)) || Number(draftCount) < 4 || Number(draftCount) > 128 || Number(draftCount) % 4 !== 0))}
+                onClick={() => learningAction === "beatLightFirst" ? onCancelLearn() : onLearn("beatLightFirst")}
+                className="rounded-lg bg-primary px-3 py-2 text-xs font-bold text-on-primary disabled:opacity-40">
+                {learningAction === "beatLightFirst" ? "Cancel learn" : "Learn first note"}
+              </button>
+            </div>
+            {countError && <p role="alert" className="text-xs text-error">{countError}</p>}
+          </section>
 
           {categories.map((category) => (
             <section key={category} className="space-y-2">
@@ -167,6 +209,8 @@ export function MidiSetupModal({
                         <div className="mt-0.5 truncate text-[10px] text-on-surface-variant">
                           {isUnavailable
                             ? "Not available in Solo mode"
+                            : action.id === "cycleLightShowPreset" && mapping && mapping.messageType !== "cc"
+                              ? "Previous button mapping is inactive. Relearn using an MCU encoder."
                             : mappingDescription
                               ? `Keyboard: ${action.shortcut} · MIDI: ${mappingDescription}`
                               : `Keyboard: ${action.shortcut}`}

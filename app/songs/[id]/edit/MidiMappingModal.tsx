@@ -20,6 +20,7 @@ interface MidiMappingModalProps {
   isConnected: boolean;
   activeDeviceName: string | null;
   devices: Array<{ id: string; name: string; state: string }>;
+  outputNames: string[];
   profileDocument: MidiProfilesDocument;
   activeProfileId: string | null;
   isProfileLoading: boolean;
@@ -106,7 +107,7 @@ function BeatLightsSetup({ profile, binding, learning, disabled, startListening,
 
 export default function MidiMappingModal(props: MidiMappingModalProps) {
   const {
-    isOpen, onClose, isSupported, isConnected, activeDeviceName, devices,
+    isOpen, onClose, isSupported, isConnected, activeDeviceName, devices, outputNames,
     profileDocument, activeProfileId, isProfileLoading, isProfileSaving, learningActionId,
     bindings, recentMessages, accessError, startListening, stopListening, clearBinding,
     resetAllBindings, applyMcuPreset, setBeatNoteCount, setBindingMode, setBindingChannel, setRelativeEncoding,
@@ -168,6 +169,9 @@ export default function MidiMappingModal(props: MidiMappingModalProps) {
             <h2 id="midi-mapping-title" className="text-base font-extrabold">MIDI Setup</h2>
             <p className="mt-1 text-xs text-on-surface-variant">Pair one controller, then learn actions and faders.</p>
           </div>
+          <p className="text-[11px] text-on-surface-variant">
+            MIDI outputs: {outputNames.length ? outputNames.join(", ") : "None detected. The Bluetooth bridge must expose a MIDI output for lights."}
+          </p>
           <button type="button" onClick={() => { stopListening(); onClose(); }} aria-label="Close MIDI mappings" className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-container-high text-xl text-on-surface-variant hover:text-on-surface">×</button>
         </header>
 

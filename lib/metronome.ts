@@ -12,6 +12,11 @@ export function getMetronomeStep(speed: MetronomeSpeed): number {
   return speed === "double" ? 0.5 : speed === "half" ? 2 : 1;
 }
 
+export function getMissedClickSteps(nextTime: number, currentTime: number, interval: number): number {
+  if (!Number.isFinite(nextTime) || !Number.isFinite(currentTime) || !Number.isFinite(interval) || interval <= 0) return 0;
+  return Math.max(0, Math.ceil((currentTime - nextTime) / interval));
+}
+
 export function getMetronomePulse(
   clickIndex: number,
   speed: MetronomeSpeed,

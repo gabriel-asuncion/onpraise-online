@@ -35,6 +35,7 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
   const titleRefs = useRef<{ [key: string]: HTMLHeadingElement | null }>({});
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lastScrollTime = useRef(0);
+  const programmaticScrollUntil = useRef(0);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const didDragRef = useRef(false);
 
@@ -60,6 +61,7 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
   };
 
   const handleScroll = () => {
+    if (Date.now() < programmaticScrollUntil.current) return;
     const now = Date.now();
     if (now - lastScrollTime.current < 50) return; 
     lastScrollTime.current = now;
@@ -90,6 +92,19 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
       handleUserSelectTrackBadge(activeIdx);
     }
   };
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const section = container?.querySelector(`#stack-sec-${currentTrackIndex}-${currentSectionIndex}`);
+    const line = section?.querySelector(`#line-${currentSectionIndex}-${activeLineIndex}`);
+    const target = line ?? section;
+    if (!container || !target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    if (targetRect.top >= containerRect.top + 80 && targetRect.bottom <= containerRect.bottom - 20) return;
+    programmaticScrollUntil.current = Date.now() + 700;
+    container.scrollTo({ top: container.scrollTop + targetRect.top - containerRect.top - container.clientHeight / 2, behavior: "smooth" });
+  }, [currentTrackIndex, currentSectionIndex, activeLineIndex]);
 
   useEffect(() => {
     const checkOverflows = () => {

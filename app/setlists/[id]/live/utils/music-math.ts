@@ -12,6 +12,14 @@ export const normalizeKeyNote = (note: string): string => {
   return flatMap[note] || note;
 };
 
+export const transposeDisplayKey = (key: string, delta: number): string => {
+  const minor = key.endsWith("m");
+  const root = minor ? key.slice(0, -1) : key;
+  const index = CHROMATIC_SCALE.indexOf(normalizeKeyNote(root));
+  if (index < 0 || !Number.isFinite(delta)) return key;
+  return CHROMATIC_SCALE[((index + Math.trunc(delta)) % 12 + 12) % 12] + (minor ? "m" : "");
+};
+
 export const transposeSingleNote = (note: string, semitones: number): string => {
   const normalized = normalizeKeyNote(note);
   const idx = CHROMATIC_SCALE.indexOf(normalized);

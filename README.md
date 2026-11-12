@@ -61,6 +61,25 @@ npm run dev
 
 Open http://localhost:3000 with your browser to see the result.
 
+### Live and solo MIDI EQ
+
+In MIDI Setup, pair a controller and learn **EQ / Light Show Mode**, **Shuffle Light Show Preset**, and
+**Stop and Return to 0:00**. Light show mode exclusively controls MCU channel-one notes 0–31. The mode
+toggle, preset encoder, mapped faders, and mapped knobs remain usable; other MIDI button actions are
+blocked. It cycles through 24 animated presets, selecting a
+new one when playback starts and every four measures. The preset encoder selects a preset until playback
+restarts or the HUD shuffle is pressed. The HUD can shuffle or exit the show.
+Exiting restores normal MIDI feedback. Play / Stop pauses at the current position; the separate stop
+action returns to YouTube 0:00. Scrubbing before the first section is limited by the song's sync offset.
+In live and solo modes, the **Local Click Offset** MIDI encoder shifts only this device's click by 10 ms per
+step (clockwise later, counter-clockwise earlier), up to 1,000 ms either way. A floating value appears
+while adjusting. It resets on stop and
+does not change the song, guide cues, other devices, or the saved sync offset.
+MIDI Setup also offers transpose and reset, click-sound selection, and timeline zoom. Live transpose
+is shared for the current session by the music director; solo transpose is local. Reset returns to
+the setlist key in live or the original song key in solo. Relearn the light-show preset control as an
+MCU encoder if it was previously assigned to a button.
+
 🏗️ Architecture Highlights
 The Engine Loop
 The performance teleprompter bypasses React's traditional state management for high-frequency updates. The metronome and progress bars are mutated via direct DOM Ref manipulation, ensuring the engine never triggers a re-render cascade during a song.

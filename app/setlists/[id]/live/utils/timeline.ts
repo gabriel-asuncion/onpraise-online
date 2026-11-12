@@ -65,6 +65,63 @@ export function getYoutubeTimeForTimeline(
   return Math.max(0, (absoluteQuarterBeat * beatDurationMs + elapsedTimelineMs + syncOffsetMs) / 1000);
 }
 
+export function formatPlaybackTime(seconds: number): string {
+  const tenths = Math.floor(Math.max(0, seconds) * 10);
+  return `${Math.floor(tenths / 600)}:${String(Math.floor(tenths / 10) % 60).padStart(2, "0")}.${tenths % 10}`;
+}
+
+export function getYoutubeStartBeat(tempo: number, syncOffsetMs: number): number {
+  return -syncOffsetMs / (60_000 / (tempo || 75));
+}
+
+export function getTimelinePosition(
+  beat: number,
+  sectionStarts: number[],
+  totalBeats: number,
+  sections: Array<{ section_name: string }>,
+  lineCounts: number[],
+  sectionTimings: unknown,
+): { sectionIndex: number; lineIndex: number } {
+  let sectionIndex = 0;
+  for (let index = 0; index < sectionStarts.length; index++) {
+    if (sectionStarts[index] > beat) break;
+    sectionIndex = index;
+  }
+  const section = sections[sectionIndex];
+  if (!section) return { sectionIndex: 0, lineIndex: 0 };
+  const meter = getTimelineMeter(sectionTimings);
+  const timings = parseRecord(parseRecord(sectionTimings)[section.section_name]);
+  const lineCount = Math.max(1, lineCounts[sectionIndex] || 1);
+  const lineTimings = parseRecord(timings.line_timings);
+  const lineDurations = Array.from({ length: lineCount }, (_, index) => {
+    const line = parseRecord(lineTimings[String(index)]);
+    return (getNonNegativeNumber(line, "measures", 0) * meter.quarterBeatsPerMeasure +
+      getNonNegativeNumber(line, "beats", 0)) * (Math.max(0, Number(line.repeats) || 0) + 1);
+  });
+  const lineTotal = lineDurations.reduce((sum, duration) => sum + duration, 0);
+  const loop = lineTotal > 0 ? lineTotal :
+    getNonNegativeNumber(timings, "measures", 4) * meter.quarterBeatsPerMeasure +
+    getNonNegativeNumber(timings, "beats", 0);
+  const repeats = Math.max(0, Number(timings.repeats) || 0) + 1;
+  const head = getNonNegativeNumber(timings, "head_m", 0) * meter.quarterBeatsPerMeasure;
+  const end = sectionStarts[sectionIndex + 1] ?? totalBeats;
+  const sectionBeat = Math.floor(Math.max(0, Math.min(beat - (sectionStarts[sectionIndex] ?? 0), Math.max(0, end - (sectionStarts[sectionIndex] ?? 0) - 0.001))));
+  const core = Math.min(Math.max(0, sectionBeat - head), Math.max(0, loop * repeats - 1));
+  const within = core % Math.max(1, loop);
+  let lineIndex = 0;
+  if (lineTotal > 0) {
+    let accumulated = 0;
+    for (let index = 0; index < lineCount; index++) {
+      accumulated += lineDurations[index];
+      lineIndex = index;
+      if (within < accumulated) break;
+    }
+  } else {
+    lineIndex = Math.min(lineCount - 1, Math.floor(within / (Math.max(1, loop) / lineCount)));
+  }
+  return { sectionIndex, lineIndex };
+}
+
 export function compileTimelineBeatMap(
   sections: Array<{ id: string; section_name: string }>,
   sectionTimings: unknown,

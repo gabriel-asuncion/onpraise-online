@@ -13,8 +13,13 @@ import { useLocalPreferences } from "../../setlists/[id]/live/hooks/useLocalPref
 import { useYouTubeSync } from "../../setlists/[id]/live/hooks/useYouTubeSync";
 import { useHardwareClock } from "../../setlists/[id]/live/hooks/useHardwareClock";
 import { useKeyboardMidiControls } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
+import { useLocalClickOffset } from "../../setlists/[id]/live/hooks/useLocalClickOffset";
+import { useControlFeedback } from "../../setlists/[id]/live/hooks/useControlFeedback";
 
 import { LiveHeader } from "../../setlists/[id]/live/components/LiveHeader";
+import { EqualizerStatus } from "../../setlists/[id]/live/components/EqualizerStatus";
+import { ClickOffsetFeedback } from "../../setlists/[id]/live/components/ClickOffsetFeedback";
+import { ControlFeedback } from "../../setlists/[id]/live/components/ControlFeedback";
 import { SimplifiedStackView } from "../../setlists/[id]/live/components/SimplifiedStackView";
 import { StandardSheetView } from "../../setlists/[id]/live/components/StandardSheetView";
 import { TracksView } from "../../setlists/[id]/live/components/TracksView";
@@ -28,11 +33,13 @@ import {
   compileTimelineBeatMap,
   getNextTimelineBeat,
   getTimelineLineStartBeat,
+  getTimelinePosition,
   getTimelineMeasureBeat,
   getTimelineMeter,
+  getYoutubeStartBeat,
   getYoutubeTimeForTimeline
 } from "../../setlists/[id]/live/utils/timeline";
-import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote } from "../../setlists/[id]/live/utils/music-math";
+import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote, transposeDisplayKey } from "../../setlists/[id]/live/utils/music-math";
 import { normalizeSectionNameToAudioFile } from "../../setlists/[id]/live/utils/setlist-helpers"; 
 
 // ✅ SURGICAL ADDITION: Timeline Segment Models & Color Engine
@@ -112,6 +119,12 @@ export default function SoloPracticeRoomPage() {
   const localPresenceUserRef = useRef<any>(localPresenceUser);
 
   const [audioLatencyOffsetMs, setAudioLatencyOffsetMs] = useState<number>(0);
+  const localClickOffset = useLocalClickOffset();
+  const controlFeedback = useControlFeedback();
+  const [midiZoomSteps, setMidiZoomSteps] = useState(0);
+  const displayKeyRef = useRef(activeDisplayKey);
+  useEffect(() => { displayKeyRef.current = activeDisplayKey; }, [activeDisplayKey]);
+  const localClickOffsetMsRef = localClickOffset.offsetMsRef;
   const [metronomeSoundType, setMetronomeSoundType] = useState<"blip" | "bell" | "block" | "glass">("blip");
   const metronomeSoundTypeRef = useRef(metronomeSoundType);
   useEffect(() => { metronomeSoundTypeRef.current = metronomeSoundType; }, [metronomeSoundType]);
@@ -152,6 +165,7 @@ export default function SoloPracticeRoomPage() {
   const zenOverlayRef = useRef<HTMLDivElement | null>(null);
 
   const [isPlayingFlow, setIsPlayingFlow] = useState(false);
+  const [midiBeatLight, setMidiBeatLight] = useState<number | null>(null);
   const [currentSectionIndex, setCurrentSectionIndex] = useState<number>(0);
   const [currentBeat, setCurrentBeat] = useState<number>(1);
   const [tracksPlayheadBeat, setTracksPlayheadBeat] = useState(0);
@@ -330,7 +344,7 @@ export default function SoloPracticeRoomPage() {
   }, [loading]);
 
   useEffect(() => {
-    if (isPlayingFlow && !showSyncBack) {
+    if (!showSyncBack && !isSimplifiedMode && !isTracksMode) {
       const activeLineId = `line-${currentSectionIndex}-${activeLineIndex}`;
       const activeContainer = trackScrollRefs.current[currentTrackIndex]?.current;
       const targetLine = activeContainer?.querySelector(`#${activeLineId}`) || document.getElementById(activeLineId);
@@ -342,7 +356,7 @@ export default function SoloPracticeRoomPage() {
         (window as any)._autoScrollTimeout = setTimeout(() => { isAutoScrollingRef.current = false; }, 550); 
       }
     }
-  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack, currentTrackIndex]);
+  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack, currentTrackIndex, isSimplifiedMode, isTracksMode]);
 
   useEffect(() => {
     let reqId: number;
@@ -377,7 +391,7 @@ export default function SoloPracticeRoomPage() {
   useEffect(() => { if (!isSettingsModalOpen) setIsTestingSync(false); }, [isSettingsModalOpen]);
 
   const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4, absoluteBeat?: number) => {
-    if (isTracksMode && absoluteBeat !== undefined) setTracksPlayheadBeat(absoluteBeat);
+    if ((isTracksMode || isPlaying) && absoluteBeat !== undefined) setTracksPlayheadBeat(absoluteBeat);
     metronomeRefs.current.forEach((el, index) => {
       if (!el) return;
       const beatNum = index + 1;
@@ -601,7 +615,7 @@ export default function SoloPracticeRoomPage() {
         playZeroLatencyAudio(
           clickKey,
           localClickVolumeRef.current,
-          audioAnchor.audioTime - (audioLatencyOffsetMs / 1000)
+          audioAnchor.audioTime + (localClickOffsetMsRef.current - audioLatencyOffsetMs) / 1000
         );
       }
     } catch (error) {
@@ -704,10 +718,10 @@ export default function SoloPracticeRoomPage() {
   useHardwareClock({
     isPlayingFlow, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
-    audioLatencyOffsetMs, isYtBackingTrackStartRef,
+    audioLatencyOffsetMs, localClickOffsetMsRef, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
     queuedSectionIndexRef, queuedTrackIndexRef,
-    isDoubleMetronomeEnabledRef, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
+    isDoubleMetronomeEnabledRef, onMidiBeat: setMidiBeatLight, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
     playGuideCue, getAudioContext, audioContextStartTimeRef,
 
@@ -792,6 +806,7 @@ export default function SoloPracticeRoomPage() {
   }
 
   function executeLocalResetSequence() {
+    localClickOffset.reset();
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
     pendingYoutubeStartRef.current = null;
     if (youtubeStartTimeoutRef.current) {
@@ -821,8 +836,11 @@ export default function SoloPracticeRoomPage() {
       return;
     }
     if (isPlayingFlow) {
-      if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
-      handleResetFlowTrigger();
+      const song = playingSongRef.current || activeSongRef.current;
+      const beat = (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
+        (getGlobalTime() - (mdSectionStartTimeRef.current || getGlobalTime())) / (60000 / (song?.tempo || 75));
+      executeLocalResetSequence();
+      setStoppedSoloPosition(beat);
     } else {
       if (sections.length === 0 || !activeSong) return;
       executeStartSequence(isYoutubeSyncEnabled && !!youtubeVideoId);
@@ -851,6 +869,7 @@ export default function SoloPracticeRoomPage() {
         (exactBeat === undefined ? 0 : (exactBeat - sectionStartBeat) * beatDurationMs);
       setExplicitScrubBeat(exactBeat ?? null);
       executeJumpNow(0, playableIndex, jumpTime, false, "explicit-jump", exactBeat);
+      setStoppedSoloPosition(exactBeat ?? sectionStartBeat);
       return;
     }
     if (clickTimeoutRef.current) {
@@ -1037,6 +1056,7 @@ export default function SoloPracticeRoomPage() {
   };
 
   function navigateSoloSection(direction: -1 | 1) {
+    soloMidiScrubRef.current = null;
     let targetIndex = currentSectionIndexRef.current + direction;
     while (
       targetIndex >= 0 &&
@@ -1044,15 +1064,15 @@ export default function SoloPracticeRoomPage() {
       sectionsRef.current[targetIndex].section_name.toLowerCase().startsWith("spacer")
     ) targetIndex += direction;
     if (targetIndex >= 0 && targetIndex < sectionsRef.current.length) {
-      handleSectionInteractiveSelection(targetIndex);
       if (!isPlayingRef.current) {
-        activeLineIndexRef.current = 0;
-        setActiveLineIndex(0);
-      }
+        const beat = beatMapRef.current.sectionStartBeats[targetIndex] ?? 0;
+        setStoppedSoloPosition(beat);
+      } else handleSectionInteractiveSelection(targetIndex);
     }
   }
 
   function navigateSoloLine(direction: -1 | 1) {
+    soloMidiScrubRef.current = null;
     if (!activeSongRef.current || sectionsRef.current.length === 0) return;
     let targetSectionIndex = currentSectionIndexRef.current;
     let targetLineIndex = activeLineIndexRef.current + direction;
@@ -1086,22 +1106,101 @@ export default function SoloPracticeRoomPage() {
     const jumpTime = getGlobalTime() - (targetAbsoluteBeat - sectionStartBeat) * beatDurationMs;
 
     setExplicitScrubBeat(targetAbsoluteBeat);
-    executeJumpNow(0, targetSectionIndex, jumpTime, false, "explicit-jump", targetAbsoluteBeat);
+    if (!isPlayingRef.current) {
+      setStoppedSoloPosition(targetAbsoluteBeat);
+    } else executeJumpNow(0, targetSectionIndex, jumpTime, false, "explicit-jump", targetAbsoluteBeat);
     activeLineIndexRef.current = targetLineIndex;
     setActiveLineIndex(targetLineIndex);
   }
 
   function cycleSoloView() {
-    const modes = ["sheet", "tracks"] as const;
-    const current = isTracksMode ? "tracks" : "sheet";
+    const modes = ["sheet", "stack", "tracks"] as const;
+    const current = isTracksMode ? "tracks" : isSimplifiedMode ? "stack" : "sheet";
     const next = modes[(modes.indexOf(current) + 1) % modes.length];
     setIsZenMode(false);
     setIsTracksMode(next === "tracks");
-    setIsSimplifiedMode(false);
+    setIsSimplifiedMode(next === "stack");
   }
+
+  function setStoppedSoloPosition(beat: number) {
+    const song = activeSongRef.current;
+    if (!song) return;
+    const position = getTimelinePosition(beat, beatMapRef.current.sectionStartBeats, beatMapRef.current.totalBeats,
+      sectionsRef.current, astTreeRef.current.map((section) => section.lines.length), song.section_timings);
+    currentSectionIndexRef.current = position.sectionIndex;
+    activeLineIndexRef.current = position.lineIndex;
+    setCurrentSectionIndex(position.sectionIndex);
+    setActiveLineIndex(position.lineIndex);
+    setExplicitScrubBeat(beat);
+    setTracksPlayheadBeat(beat);
+    setShowSyncBack(false);
+  }
+
+  const soloMidiScrubRef = useRef<{ beat: number; time: number } | null>(null);
+  function scrubSolo(delta: number) {
+    const song = activeSongRef.current;
+    const map = beatMapRef.current;
+    if (!song || !map.sectionStartBeats.length || map.totalBeats <= 0) return;
+    const pending = soloMidiScrubRef.current;
+    const base = pending && performance.now() - pending.time < 350 ? pending.beat :
+      isPlayingRef.current && mdSectionStartTimeRef.current
+        ? (map.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
+          (getGlobalTime() - mdSectionStartTimeRef.current) / (60000 / (song.tempo || 75))
+        : explicitScrubBeat ?? map.sectionStartBeats[currentSectionIndexRef.current] ?? 0;
+    const start = Math.min(map.totalBeats - 0.001, getYoutubeStartBeat(song.tempo || 75, song.youtube_sync_offset_ms || 0));
+    const target = Math.max(start, Math.min(map.totalBeats - 0.001, base + delta * 0.25));
+    soloMidiScrubRef.current = { beat: target, time: performance.now() };
+    const position = getTimelinePosition(target, map.sectionStartBeats, map.totalBeats,
+      sectionsRef.current, astTreeRef.current.map((section) => section.lines.length), song.section_timings);
+    const jumpTime = getGlobalTime() - (target - map.sectionStartBeats[position.sectionIndex]) * (60000 / (song.tempo || 75));
+    setExplicitScrubBeat(target);
+    executeJumpNow(0, position.sectionIndex, jumpTime, false, "explicit-jump", target);
+    if (!isPlayingRef.current) setStoppedSoloPosition(target);
+  }
+
+  function stopSoloAtYoutubeStart() {
+    const song = activeSongRef.current;
+    if (!song) return;
+    const beat = getYoutubeStartBeat(song.tempo || 75, song.youtube_sync_offset_ms || 0);
+    executeLocalResetSequence();
+    soloMidiScrubRef.current = null;
+    setStoppedSoloPosition(beat);
+    ytPlayerRef.current?.seekTo?.(0, true);
+  }
+
+  const soloStackAst = useMemo(() => activeSong ? [{
+    trackId: activeSong.id, trackIndex: 0, title: activeSong.title, tempo: activeSong.tempo, displayKey: activeDisplayKey, ast: memoizedSongAstTree,
+  }] : [], [activeSong, activeDisplayKey, memoizedSongAstTree]);
 
   const keyboardMidiControls = useKeyboardMidiControls(supabase, {
     playStop: handleToggleFlowPlaybackState,
+    stopAndReturn: stopSoloAtYoutubeStart,
+    clickOffset: (delta) => {
+      if (typeof delta === "number" && isPlayingRef.current) localClickOffset.adjust(delta);
+    },
+    transpose: (delta) => {
+      if (typeof delta !== "number") return;
+      const key = transposeDisplayKey(displayKeyRef.current, delta);
+      displayKeyRef.current = key;
+      setActiveDisplayKey(key);
+      controlFeedback.show("Key", key);
+    },
+    resetTranspose: () => {
+      const key = activeSongRef.current?.original_key;
+      if (!key) return;
+      displayKeyRef.current = key;
+      setActiveDisplayKey(key);
+      controlFeedback.show("Key", key);
+    },
+    timelineZoom: (delta) => { if (typeof delta === "number") setMidiZoomSteps((value) => value + delta); },
+    clickSound: (delta) => { if (typeof delta === "number") {
+      const sounds = ["blip", "bell", "block", "glass"] as const;
+      const next = sounds[((sounds.indexOf(metronomeSoundTypeRef.current) + delta) % sounds.length + sounds.length) % sounds.length];
+      metronomeSoundTypeRef.current = next;
+      setMetronomeSoundType(next);
+      controlFeedback.show("Click sound", next);
+    } },
+    jogScrub: (delta) => { if (typeof delta === "number") scrubSolo(delta); },
     previousSection: () => navigateSoloSection(-1),
     nextSection: () => navigateSoloSection(1),
     previousLine: () => navigateSoloLine(-1),
@@ -1121,6 +1220,9 @@ export default function SoloPracticeRoomPage() {
     clickVolume: (value) => { if (typeof value === "number") setLocalClickVolume(value); },
     guideVolume: (value) => { if (typeof value === "number") setGuideVolume(value); },
     youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
+  }, isPlayingFlow ? midiBeatLight : null, "solo", {
+    isPlaying: isPlayingFlow, beat: tracksPlayheadBeat, tempo: activeSong?.tempo || 75,
+    ...getTimelineMeter(activeSong?.section_timings),
   });
 
   if (loading) return <PageSkeleton message="LOADING SONG..." variant="live" />;
@@ -1156,12 +1258,20 @@ export default function SoloPracticeRoomPage() {
           setIsChaptersModalOpen={setIsChaptersModalOpen} // ✅ Add prop to trigger modal
         />
       )}
+      {keyboardMidiControls.isEqModeActive && <EqualizerStatus
+        presetName={keyboardMidiControls.presetName} error={keyboardMidiControls.midiError ?? (keyboardMidiControls.outputNames.length === 0 ? "No MIDI output detected." : null)}
+        onShuffle={keyboardMidiControls.shuffle} onClose={keyboardMidiControls.toggleEqMode}
+      />}
+      {localClickOffset.showFeedback && <ClickOffsetFeedback offsetMs={localClickOffset.offsetMs} />}
+      {controlFeedback.feedback && <ControlFeedback feedback={controlFeedback.feedback} />}
+      {keyboardMidiControls.lightShowFeedback && <ControlFeedback feedback={keyboardMidiControls.lightShowFeedback} />}
 
       {/* ✅ EXACT MATCH: Restored the flex-row container that wraps the SheetView and Scrubber[cite: 5] */}
       <div className="flex-1 flex flex-row w-full h-full relative" style={{ overscrollBehaviorX: 'none', touchAction: 'pan-y' }}>
         <div className="w-full h-full shrink-0 relative flex flex-col">
           {isTracksMode ? (
             <TracksView
+              midiZoomSteps={midiZoomSteps}
               activeSong={activeSong}
               sections={sections}
               songAst={memoizedSongAstTree}
@@ -1187,6 +1297,7 @@ export default function SoloPracticeRoomPage() {
             />
           ) : isSimplifiedMode ? (
               <SimplifiedStackView 
+                setlistAst={soloStackAst}
                 memoizedSongAstTree={memoizedSongAstTree} 
                 currentSectionIndex={currentSectionIndex}
                 queuedSectionIndex={queuedSectionIndex}
@@ -1260,6 +1371,10 @@ export default function SoloPracticeRoomPage() {
           profileDocument: keyboardMidiControls.profileDocument,
           activeProfileId: keyboardMidiControls.activeProfileId,
           devices: keyboardMidiControls.devices,
+          outputNames: keyboardMidiControls.outputNames,
+          lastMidiMessage: keyboardMidiControls.lastMidiMessage,
+          beatNoteCount: keyboardMidiControls.beatNoteCount,
+          setBeatNoteCount: keyboardMidiControls.setBeatNoteCount,
           isLoading: keyboardMidiControls.isLoading,
           isSaving: keyboardMidiControls.isSaving,
           isMidiSupported: keyboardMidiControls.isMidiSupported,

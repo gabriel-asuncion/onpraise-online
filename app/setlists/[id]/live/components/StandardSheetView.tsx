@@ -141,7 +141,7 @@ export function StandardSheetView(props: StandardSheetViewProps) {
 
               <div className="pl-0.5 select-text selection:bg-primary-container/30 text-on-surface space-y-0.5 mt-2 relative z-10">
                 {section.lines.length === 0 ? <div className="h-4" /> : section.lines.map((line, lIdx) => {
-                  const isCurrentlyPlayingLine = isThisSectionActivePlayback && activeLineIndex === lIdx;
+                  const isCurrentlyPlayingLine = (isThisSectionActivePlayback || (isInteractive && isStagedUnstartedTarget)) && activeLineIndex === lIdx;
                   return (
                     <div key={lIdx} className={`transition-all duration-300 ${isCurrentlyPlayingLine ? "opacity-100" : isThisSectionActivePlayback ? "opacity-35" : "opacity-100"}`}>
                       <MemoizedLyricLine 

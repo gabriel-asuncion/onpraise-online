@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { SongRecord, ArrangementSection, CompiledBeatMap, CompiledSectionToken } from "../types/setlist";
-import { getMetronomePulse, getMetronomeStep, type MetronomePattern, type MetronomeSpeed } from "../../../../../lib/metronome";
+import { getMetronomePulse, getMetronomeStep, getMissedClickSteps, type MetronomePattern, type MetronomeSpeed } from "../../../../../lib/metronome";
+import { getOffsetMidiBeat } from "./midiInput";
 import {
   getTimelineDurationBeats,
   getTimelineMeasureBeat,
@@ -22,6 +23,7 @@ export interface HardwareClockConfig {
   astTreeRef: React.MutableRefObject<CompiledSectionToken[]>;
   mdSectionStartTimeRef: React.MutableRefObject<number | null>;
   audioLatencyOffsetMs: number;
+  localClickOffsetMsRef?: React.MutableRefObject<number>;
   isYtBackingTrackStartRef: React.MutableRefObject<boolean>;
   backdropProgressRef: React.MutableRefObject<HTMLDivElement | null>;
   accentProgressBarRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -111,6 +113,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
 
     config.lastBeatRef.current = 0;
     let previousClickStep: number | null = null;
+    let lastMidiBeat: number | null = null;
     let lastHeartbeatTime = 0;
     let lastYoutubeResyncTime = 0;
     const clockExecutionTick = () => {
@@ -242,7 +245,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
         const beatUnitQuarter = meter.unitQuarterBeats * getMetronomeStep(clickSpeed);
         const currentAudioTime = audioCtx.currentTime;
 
-        const audioOffsetSecs = -(c.audioLatencyOffsetMs / 1000);
+        const audioOffsetSecs = ((c.localClickOffsetMsRef?.current ?? 0) - c.audioLatencyOffsetMs) / 1000;
 
         // ✅ SURGICAL FIX: Use Math.floor to ensure we catch the exact beat boundary (0-indexed timeline)
         // instead of aggressively rounding up to the next beat.
@@ -257,8 +260,14 @@ export function useHardwareClock(config: HardwareClockConfig) {
             c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
         }
         let nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
-
-        while (nextBeatTime < currentAudioTime + lookaheadSecs) {
+        if (!pendingAudioCorrection) {
+          const missed = getMissedClickSteps(nextBeatTime + audioOffsetSecs, currentAudioTime, beatUnitQuarter * beatSpeedSecs);
+          c.lastAudioBeatRef.current += missed * beatUnitQuarter;
+          nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
+        }
+        let scheduledSteps = 0;
+        while (nextBeatTime + audioOffsetSecs < currentAudioTime + lookaheadSecs && scheduledSteps < 256) {
+          scheduledSteps++;
           if (
             pendingAudioCorrection?.applyAtAudioTime !== null &&
             pendingAudioCorrection?.applyAtAudioTime !== undefined &&
@@ -304,8 +313,15 @@ export function useHardwareClock(config: HardwareClockConfig) {
       if (elapsedMs >= 0) {
         const localSectionElapsedBeats = elapsedMs / beatSpeedMsCurrent;
         const absoluteVisualBeatFloat = (c.beatMapRef.current.sectionStartBeats[idx] || 0) + localSectionElapsedBeats;
-        const midiClickIndex = Math.floor(absoluteVisualBeatFloat / (meter.unitQuarterBeats * getMetronomeStep(clickSpeed)));
-        c.onMidiBeat?.(((midiClickIndex % 4) + 4) % 4);
+        const clockBeat = c.audioContextStartTimeRef?.current != null && audioCtx?.state === "running"
+          ? (audioCtx.currentTime - c.audioContextStartTimeRef.current) / (beatSpeedMsCurrent / 1000)
+          : absoluteVisualBeatFloat;
+        const midiBeat = getOffsetMidiBeat(clockBeat, beatSpeedMsCurrent, meter.unitQuarterBeats * getMetronomeStep(clickSpeed),
+          c.localClickOffsetMsRef?.current ?? 0, c.audioLatencyOffsetMs);
+        if (midiBeat !== lastMidiBeat) {
+          lastMidiBeat = midiBeat;
+          c.onMidiBeat?.(midiBeat);
+        }
         const { beatIndex: currentVisualBeatPulse, measureLength: activeMeasureLength } =
           getTimelineMeasureBeat(absoluteVisualBeatFloat, meter);
 

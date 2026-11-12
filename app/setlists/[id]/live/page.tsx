@@ -8,7 +8,7 @@ import PageSkeleton from '../../../../components/PageSkeleton';
 import { useTimesync } from '../../../../hooks/useTimesync';
 
 import { CompiledSectionToken, CompiledBeatMap, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "./types/setlist";
-import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote } from "./utils/music-math";
+import { CHROMATIC_SCALE, transposeBracketContent, normalizeKeyNote, transposeDisplayKey } from "./utils/music-math";
 import { normalizeSectionNameToAudioFile } from "./utils/setlist-helpers";
 import {
   compileTimelineBeatMap,
@@ -16,7 +16,9 @@ import {
   getTimelineDurationBeats,
   getTimelineMeasureBeat,
   getTimelineLineStartBeat,
+  getTimelinePosition,
   getTimelineMeter,
+  getYoutubeStartBeat,
   getYoutubeTimeForTimeline
 } from "./utils/timeline";
 
@@ -28,9 +30,14 @@ import { useLivePresence } from "./hooks/useLivePresence";
 import { useYouTubeSync } from "./hooks/useYouTubeSync";
 import { useHardwareClock } from "./hooks/useHardwareClock";
 import { useKeyboardMidiControls } from "./hooks/useKeyboardMidiControls";
+import { useLocalClickOffset } from "./hooks/useLocalClickOffset";
+import { useControlFeedback } from "./hooks/useControlFeedback";
 import { getMetronomePulse, getMetronomeStep, isClickVolumeMuted, METRONOME_PATTERNS, METRONOME_SPEEDS, type MetronomePattern, type MetronomeSpeed } from "../../../../lib/metronome";
 
 import { LiveHeader } from "./components/LiveHeader";
+import { EqualizerStatus } from "./components/EqualizerStatus";
+import { ClickOffsetFeedback } from "./components/ClickOffsetFeedback";
+import { ControlFeedback } from "./components/ControlFeedback";
 import { SimplifiedStackView } from "./components/SimplifiedStackView";
 import { StandardSheetView } from "./components/StandardSheetView";
 import { TracksView } from "./components/TracksView";
@@ -70,6 +77,8 @@ interface PlaybackStatePayload {
   mdAbsoluteBeat?: number;
   mdGlobalBeatTime?: number;
   exactBeat?: number;
+  keyOverrides?: Record<string, string>;
+  key?: string;
   isYtSource?: boolean;
   is_recording?: boolean;
   is_paused?: boolean;
@@ -92,7 +101,8 @@ const VERSIONED_PLAYBACK_ACTIONS = new Set([
   "QUEUE",
   "HEARTBEAT",
   "PLAYBACK_STATE",
-  "TELEMETRY_SYNC"
+  "TELEMETRY_SYNC",
+  "KEY_CHANGE"
 ]);
 
 interface RehearsalHistoryItem {
@@ -219,6 +229,12 @@ export default function SetlistPerformanceRoomPage() {
   } = useLivePresence(supabase, simulatedUserId, simulatedRole);
 
   const [audioLatencyOffsetMs, setAudioLatencyOffsetMs] = useState<number>(0);
+  const localClickOffset = useLocalClickOffset();
+  const controlFeedback = useControlFeedback();
+  const [midiZoomSteps, setMidiZoomSteps] = useState(0);
+  const [keyOverrides, setKeyOverrides] = useState<Record<string, string>>({});
+  const keyOverridesRef = useRef<Record<string, string>>({});
+  const localClickOffsetMsRef = localClickOffset.offsetMsRef;
   const [metronomeSoundType, setMetronomeSoundType] = useState<"blip" | "bell" | "block" | "glass">("blip");
   const metronomeSoundTypeRef = useRef(metronomeSoundType);
   useEffect(() => { metronomeSoundTypeRef.current = metronomeSoundType; }, [metronomeSoundType]);
@@ -260,6 +276,7 @@ export default function SetlistPerformanceRoomPage() {
   const isUserLobbyOpenRef = useRef(isUserLobbyOpen);
 
   const [explicitScrubBeat, setExplicitScrubBeat] = useState<number | null>(null);
+  const stoppedBeatRef = useRef<number | null>(null);
 
   useEffect(() => {
     isUserLobbyOpenRef.current = isUserLobbyOpen;
@@ -548,14 +565,8 @@ export default function SetlistPerformanceRoomPage() {
     }
   }, [loading]);
 
-  const wasPlayingFlowRef = useRef(isPlayingFlow);
   useEffect(() => {
-    const justStopped = wasPlayingFlowRef.current && !isPlayingFlow;
-    wasPlayingFlowRef.current = isPlayingFlow;
-    if (justStopped) return;
-
-    // ✅ SURGICAL FIX: Removed `isPlayingFlow` so non-MDs jump to the section even when playback is paused!
-    if (!showSyncBack) {
+    if (!showSyncBack && !isSimplifiedMode && !isTracksMode) {
       const activeLineId = `line-${currentSectionIndex}-${activeLineIndex}`;
 
       const activeContainer = trackScrollRefs.current[currentTrackIndex]?.current;
@@ -568,7 +579,7 @@ export default function SetlistPerformanceRoomPage() {
         return () => clearTimeout(timeout);
       }
     }
-  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack, currentTrackIndex]);
+  }, [activeLineIndex, currentSectionIndex, isPlayingFlow, showSyncBack, currentTrackIndex, isSimplifiedMode, isTracksMode]);
 
   useEffect(() => {
     let reqId: number;
@@ -840,7 +851,7 @@ export default function SetlistPerformanceRoomPage() {
 
   const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4, absoluteBeat?: number) => {
     // ✅ SURGICAL FIX: Directly calculate negative sub-beats to perfectly glide through pre-rolls without snapping to 0
-    if (isTracksMode) {
+    if (isTracksMode || isPlaying) {
       if (isPlaying && mdSectionStartTimeRef.current && activeSongRef.current) {
         const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
         const elapsedMs = getGlobalTime() - mdSectionStartTimeRef.current;
@@ -1137,6 +1148,14 @@ export default function SetlistPerformanceRoomPage() {
       pendingPlaybackStateRef.current = payload;
       return;
     }
+    if (payload.keyOverrides && typeof payload.keyOverrides === "object") {
+      const entries = Object.entries(payload.keyOverrides).filter(([id, key]) =>
+        tracksListRef.current.some((track) => track.id === id) &&
+        typeof key === "string" && /^[A-G](?:#|b)?m?$/.test(key));
+      const overrides = Object.fromEntries(entries);
+      keyOverridesRef.current = overrides;
+      setKeyOverrides(overrides);
+    }
 
     if (payload.isPlaying) {
       applySharedPlaybackState(payload, "snapshot");
@@ -1154,9 +1173,12 @@ export default function SetlistPerformanceRoomPage() {
     ) return;
     playbackSyncRevisionRef.current++;
     executeLocalResetSequence();
-    mountTargetSetlistTrackIndex(trackIndex);
-    currentSectionIndexRef.current = sectionIndex;
-    setCurrentSectionIndex(sectionIndex);
+    if (typeof payload.exactBeat === "number") setStoppedLivePosition(payload.exactBeat, trackIndex);
+    else {
+      mountTargetSetlistTrackIndex(trackIndex);
+      currentSectionIndexRef.current = sectionIndex;
+      setCurrentSectionIndex(sectionIndex);
+    }
     playingTrackIndexRef.current = trackIndex;
     setPlayingTrackIndex(trackIndex);
     setQueuedTrackIndex(null);
@@ -1209,6 +1231,11 @@ export default function SetlistPerformanceRoomPage() {
       pendingPlaybackStateRef.current = null;
       playbackSyncRevisionRef.current++;
       executeLocalResetSequence(true);
+      if (typeof payload.exactBeat === "number") {
+        setStoppedLivePosition(payload.exactBeat, payload.trackIndex);
+        const song = activeSongRef.current;
+        if (song) ytPlayerRef.current?.seekTo?.(getYoutubeTimeForTimeline(payload.exactBeat, 0, song.tempo || 75, song.youtube_sync_offset_ms || 0), true);
+      }
     }
     else if (payload.action === "JUMP") {
       clearPlaybackStateRetry();
@@ -1228,6 +1255,7 @@ export default function SetlistPerformanceRoomPage() {
           "explicit-jump",
           payload.exactBeat
         );
+        if (!isPlayingRef.current && typeof payload.exactBeat === "number") setStoppedLivePosition(payload.exactBeat, payload.trackIndex);
       }
     }
     else if (payload.action === "TRACK_CHANGE") { playbackSyncRevisionRef.current++; mountTargetSetlistTrackIndex(payload.trackIndex); }
@@ -1249,8 +1277,10 @@ export default function SetlistPerformanceRoomPage() {
           action: "PLAYBACK_STATE",
           targetConnectionId: payload.requesterConnectionId,
           isPlaying,
+          keyOverrides: keyOverridesRef.current,
           trackIndex,
           sectionIndex: currentSectionIndexRef.current,
+          ...(!isPlaying && stoppedBeatRef.current !== null ? { exactBeat: stoppedBeatRef.current } : {}),
           mdSectionStartTime: startTime,
           ...(elapsedBeats === null || typeof startTime !== "number" ? {} : {
             mdAbsoluteBeat: sectionStartBeat + elapsedBeats,
@@ -1264,6 +1294,13 @@ export default function SetlistPerformanceRoomPage() {
     }
     else if (payload.action === "PLAYBACK_STATE") {
       applyPlaybackState(payload);
+    }
+    else if (payload.action === "KEY_CHANGE") {
+      const track = tracksListRef.current[payload.trackIndex];
+      if (!track || typeof payload.key !== "string" || !/^[A-G](?:#|b)?m?$/.test(payload.key)) return;
+      const updated = { ...keyOverridesRef.current, [track.id]: payload.key };
+      keyOverridesRef.current = updated;
+      setKeyOverrides(updated);
     }
     else if (payload.action === "MD_TAKEOVER") {
       latestMdBroadcastRef.current = { mdId: payload.newMdId, timestamp: Date.now() };
@@ -1579,7 +1616,7 @@ export default function SetlistPerformanceRoomPage() {
         playZeroLatencyAudio(
           clickKey,
           localClickVolumeRef.current,
-          audioAnchor.audioTime - (audioLatencyOffsetMs / 1000)
+          audioAnchor.audioTime + (localClickOffsetMsRef.current - audioLatencyOffsetMs) / 1000
         );
       }
     } catch (error) {
@@ -1745,7 +1782,7 @@ export default function SetlistPerformanceRoomPage() {
   useHardwareClock({
     isPlayingFlow, playbackSessionId, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
-    audioLatencyOffsetMs, isYtBackingTrackStartRef,
+    audioLatencyOffsetMs, localClickOffsetMsRef, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
     queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, metronomeSpeedRef: clickSpeedRef, metronomePatternRef: clickPatternRef,
@@ -2033,6 +2070,7 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   function executeLocalResetSequence(preservePosition = false) {
+    localClickOffset.reset();
     playbackCommandRevisionRef.current++;
     if (autoAdvanceTimeoutRef.current) {
       clearTimeout(autoAdvanceTimeoutRef.current);
@@ -2052,7 +2090,8 @@ export default function SetlistPerformanceRoomPage() {
     pendingYoutubeStartRef.current = null;
     isYtBackingTrackStartRef.current = false;
 
-    setExplicitScrubBeat(null); // Clear memory on reset
+    setExplicitScrubBeat(null);
+    stoppedBeatRef.current = null;
     if (!preservePosition) setTracksPlayheadBeat(0);
 
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
@@ -2168,8 +2207,14 @@ export default function SetlistPerformanceRoomPage() {
       return;
     }
     if (isPlayingRef.current) {
-      if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
-      handleResetFlowTrigger();
+      const song = playingSongRef.current || activeSongRef.current;
+      const trackIndex = playingTrackIndexRef.current;
+      const beat = (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
+        (getGlobalTime() - (mdSectionStartTimeRef.current || getGlobalTime())) / (60000 / (song?.tempo || 75));
+      void stopPlaybackTelemetry();
+      executeLocalResetSequence(true);
+      setStoppedLivePosition(beat, trackIndex);
+      if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP", exactBeat: beat, trackIndex });
     } else {
       if (sections.length === 0 || !activeSong) return;
       executeStartSequence(localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
@@ -2216,7 +2261,10 @@ export default function SetlistPerformanceRoomPage() {
       const effectiveStartTime = jumpTime - timeOffsetMs;
       // ✅ SURGICAL FIX: Must pass exactBeat down to executeJumpNow
       executeJumpNow(targetTrackIndex, index, effectiveStartTime, false, "explicit-jump", exactBeat);
-      sendSupabaseBroadcast({ action: "JUMP", trackIndex: targetTrackIndex, sectionIndex: index, mdSectionStartTime: effectiveStartTime });
+      if (targetTrackIndex === currentTrackIndexRef.current) {
+        setStoppedLivePosition(exactBeat ?? beatMapRef.current.sectionStartBeats[index] ?? 0);
+      }
+      sendSupabaseBroadcast({ action: "JUMP", trackIndex: targetTrackIndex, sectionIndex: index, mdSectionStartTime: effectiveStartTime, exactBeat: exactBeat ?? beatMapRef.current.sectionStartBeats[index] ?? 0 });
       return;
     }
 
@@ -2403,6 +2451,12 @@ export default function SetlistPerformanceRoomPage() {
     });
   }, [tracksList]);
 
+  useEffect(() => {
+    const track = tracksList[currentTrackIndex];
+    if (!track?.songs) return;
+    setActiveDisplayKey(keyOverrides[track.id] || track.custom_key || track.songs.original_key || "G");
+  }, [currentTrackIndex, keyOverrides, tracksList, setActiveDisplayKey]);
+
   beatMapRef.current = useMemo(() => {
     if (!activeSong || sections.length === 0) {
       return { totalBeats: 0, nodes: [], sectionStartBeats: [] };
@@ -2467,6 +2521,7 @@ export default function SetlistPerformanceRoomPage() {
 
   function navigateLiveSection(direction: -1 | 1) {
     if (!hasCurrentPlaybackAuthority()) return;
+    midiScrubRef.current = null;
     const targetTrackIndex = isPlayingRef.current
       ? playingTrackIndexRef.current
       : currentTrackIndexRef.current;
@@ -2480,16 +2535,17 @@ export default function SetlistPerformanceRoomPage() {
       currentSections[targetIndex].section_name.toLowerCase().startsWith("spacer")
     ) targetIndex += direction;
     if (targetIndex >= 0 && targetIndex < currentSections.length) {
-      handleSectionInteractiveSelection(targetIndex, targetTrackIndex);
       if (!isPlayingRef.current) {
-        activeLineIndexRef.current = 0;
-        setActiveLineIndex(0);
-      }
+        const beat = beatMapRef.current.sectionStartBeats[targetIndex] ?? 0;
+        setStoppedLivePosition(beat);
+        if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP", exactBeat: beat, trackIndex: targetTrackIndex });
+      } else handleSectionInteractiveSelection(targetIndex, targetTrackIndex);
     }
   }
 
   function navigateLiveLine(direction: -1 | 1) {
     if (!hasCurrentPlaybackAuthority()) return;
+    midiScrubRef.current = null;
     const targetTrackIndex = isPlayingRef.current
       ? playingTrackIndexRef.current
       : currentTrackIndexRef.current;
@@ -2544,10 +2600,13 @@ export default function SetlistPerformanceRoomPage() {
     const jumpTime = getGlobalTime() - (targetAbsoluteBeat - sectionStartBeat) * beatDurationMs;
 
     setExplicitScrubBeat(targetAbsoluteBeat);
-    executeJumpNow(targetTrackIndex, targetSectionIndex, jumpTime, false, "explicit-jump", targetAbsoluteBeat);
+    if (!isPlayingRef.current) {
+      setStoppedLivePosition(targetAbsoluteBeat);
+      if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP", exactBeat: targetAbsoluteBeat, trackIndex: targetTrackIndex });
+    } else executeJumpNow(targetTrackIndex, targetSectionIndex, jumpTime, false, "explicit-jump", targetAbsoluteBeat);
     activeLineIndexRef.current = targetLineIndex;
     setActiveLineIndex(targetLineIndex);
-    sendSupabaseBroadcast({
+    if (isPlayingRef.current) sendSupabaseBroadcast({
       action: "JUMP",
       trackIndex: targetTrackIndex,
       sectionIndex: targetSectionIndex,
@@ -2582,8 +2641,14 @@ export default function SetlistPerformanceRoomPage() {
     if (!map.sectionStartBeats.length || map.totalBeats <= 0) return;
     const pending = midiScrubRef.current;
     const base = pending && performance.now() - pending.time < 350 ? pending.beat :
-      isPlayingRef.current ? tracksPlayheadBeat : explicitScrubBeat ?? map.sectionStartBeats[currentSectionIndexRef.current] ?? 0;
-    const target = Math.max(0, Math.min(map.totalBeats - 0.001, base + delta * 0.25));
+      isPlayingRef.current && mdSectionStartTimeRef.current
+        ? (map.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
+          (getGlobalTime() - mdSectionStartTimeRef.current) / (60000 / ((playingSongRef.current?.tempo || 75)))
+        : explicitScrubBeat ?? map.sectionStartBeats[currentSectionIndexRef.current] ?? 0;
+    const song = isPlayingRef.current ? playingSongRef.current : activeSongRef.current;
+    if (!song) return;
+    const start = Math.min(map.totalBeats - 0.001, getYoutubeStartBeat(song.tempo || 75, song.youtube_sync_offset_ms || 0));
+    const target = Math.max(start, Math.min(map.totalBeats - 0.001, base + delta * 0.25));
     midiScrubRef.current = { beat: target, time: performance.now() };
     let sectionIndex = 0;
     for (let index = 0; index < map.sectionStartBeats.length; index++) {
@@ -2591,16 +2656,58 @@ export default function SetlistPerformanceRoomPage() {
       sectionIndex = index;
     }
     const trackIndex = isPlayingRef.current ? playingTrackIndexRef.current : currentTrackIndexRef.current;
-    const song = isPlayingRef.current ? playingSongRef.current : activeSongRef.current;
-    if (!song) return;
     const jumpTime = getGlobalTime() - (target - map.sectionStartBeats[sectionIndex]) * (60000 / (song.tempo || 75));
     setExplicitScrubBeat(target);
     executeJumpNow(trackIndex, sectionIndex, jumpTime, false, "explicit-jump", target);
+    if (!isPlayingRef.current) {
+      setStoppedLivePosition(target);
+      if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP", exactBeat: target, trackIndex });
+    }
     if (isPlayingRef.current) sendSupabaseBroadcast({ action: "JUMP", trackIndex, sectionIndex, mdSectionStartTime: jumpTime, exactBeat: target });
+  }
+
+  function setStoppedLivePosition(beat: number, trackIndex = currentTrackIndexRef.current) {
+    if (trackIndex !== currentTrackIndexRef.current) {
+      const target = tracksListRef.current[trackIndex];
+      const ast = memoizedSetlistAst[trackIndex]?.ast;
+      if (!target?.songs || !ast) return;
+      const mounted = mountTargetSetlistTrackIndex(trackIndex);
+      if (!mounted) return;
+      astTreeRef.current = ast;
+      beatMapRef.current = compileTimelineBeatMap(mounted, target.songs.section_timings,
+        ast.map((section) => section.lines.length), target.songs.default_structure);
+    }
+    const song = activeSongRef.current;
+    if (!song) return;
+    const position = getTimelinePosition(beat, beatMapRef.current.sectionStartBeats, beatMapRef.current.totalBeats,
+      sectionsRef.current, astTreeRef.current.map((section) => section.lines.length), song.section_timings);
+    currentSectionIndexRef.current = position.sectionIndex;
+    activeLineIndexRef.current = position.lineIndex;
+    setCurrentSectionIndex(position.sectionIndex);
+    setActiveLineIndex(position.lineIndex);
+    setExplicitScrubBeat(beat);
+    stoppedBeatRef.current = beat;
+    setTracksPlayheadBeat(beat);
+    setShowSyncBack(false);
+  }
+
+  function stopLiveAtYoutubeStart() {
+    if (!hasCurrentPlaybackAuthority()) { setIsMdLockModalOpen(true); return; }
+    const trackIndex = isPlayingRef.current ? playingTrackIndexRef.current : currentTrackIndexRef.current;
+    const song = isPlayingRef.current ? playingSongRef.current : activeSongRef.current;
+    if (!song) return;
+    const beat = getYoutubeStartBeat(song.tempo || 75, song.youtube_sync_offset_ms || 0);
+    void stopPlaybackTelemetry();
+    executeLocalResetSequence();
+    midiScrubRef.current = null;
+    setStoppedLivePosition(beat, trackIndex);
+    ytPlayerRef.current?.seekTo?.(0, true);
+    if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP", exactBeat: beat, trackIndex });
   }
 
   const keyboardMidiControls = useKeyboardMidiControls(supabase, {
     playStop: handleToggleFlowPlaybackState,
+    stopAndReturn: stopLiveAtYoutubeStart,
     previousSong: () => navigateLiveTrack(-1),
     nextSong: () => navigateLiveTrack(1),
     previousSection: () => navigateLiveSection(-1),
@@ -2623,10 +2730,48 @@ export default function SetlistPerformanceRoomPage() {
     clickVolume: (value) => { if (typeof value === "number") { setLocalClickVolume(value); setMixerMutes((current) => ({ ...current, click: isClickVolumeMuted(value * 100) })); } },
     clickSpeed: () => setClickSpeedSelection(METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(clickSpeed) + 1) % METRONOME_SPEEDS.length]),
     clickPattern: () => setClickPattern((current) => METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(current) + 1) % METRONOME_PATTERNS.length]),
+    clickOffset: (delta) => {
+      if (typeof delta !== "number" || !isPlayingRef.current) return;
+      localClickOffset.adjust(delta);
+    },
+    transpose: (delta) => {
+      if (typeof delta !== "number" || !hasCurrentPlaybackAuthority()) return;
+      const track = tracksListRef.current[currentTrackIndexRef.current];
+      if (!track?.songs) return;
+      const current = keyOverridesRef.current[track.id] || track.custom_key || track.songs.original_key || "C";
+      const key = transposeDisplayKey(current, delta);
+      const next = { ...keyOverridesRef.current, [track.id]: key };
+      keyOverridesRef.current = next;
+      setKeyOverrides(next);
+      controlFeedback.show("Key", key);
+      sendSupabaseBroadcast({ action: "KEY_CHANGE", trackIndex: currentTrackIndexRef.current, key });
+    },
+    resetTranspose: () => {
+      if (!hasCurrentPlaybackAuthority()) return;
+      const track = tracksListRef.current[currentTrackIndexRef.current];
+      if (!track?.songs) return;
+      const key = track.custom_key || track.songs.original_key || "C";
+      const next = { ...keyOverridesRef.current, [track.id]: key };
+      keyOverridesRef.current = next;
+      setKeyOverrides(next);
+      controlFeedback.show("Key", key);
+      sendSupabaseBroadcast({ action: "KEY_CHANGE", trackIndex: currentTrackIndexRef.current, key });
+    },
+    timelineZoom: (delta) => { if (typeof delta === "number") setMidiZoomSteps((value) => value + delta); },
+    clickSound: (delta) => { if (typeof delta === "number") {
+      const sounds = ["blip", "bell", "block", "glass"] as const;
+      const next = sounds[((sounds.indexOf(metronomeSoundTypeRef.current) + delta) % sounds.length + sounds.length) % sounds.length];
+      metronomeSoundTypeRef.current = next;
+      setMetronomeSoundType(next);
+      controlFeedback.show("Click sound", next);
+    } },
     jogScrub: (delta) => { if (typeof delta === "number") scrubLive(delta); },
     guideVolume: (value) => { if (typeof value === "number") setGuideVolume(value); },
     youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
-  }, isPlayingFlow ? midiBeatLight : null);
+  }, isPlayingFlow ? midiBeatLight : null, "live", {
+    isPlaying: isPlayingFlow, beat: tracksPlayheadBeat, tempo: activeSong?.tempo || 75,
+    ...getTimelineMeter(activeSong?.section_timings),
+  });
 
   if (loading) return <PageSkeleton message="LOADING SETLIST..." variant="live" />;
 
@@ -2668,10 +2813,13 @@ export default function SetlistPerformanceRoomPage() {
           getGlobalTime={getGlobalTime}
         />
       )}
-      {!isZenMode && <div className="flex gap-2 px-3 py-1">
-        <button type="button" className="rounded-md bg-surface-container-high px-3 py-1 text-xs font-bold" onClick={() => setClickSpeedSelection(METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(clickSpeed) + 1) % METRONOME_SPEEDS.length])}>Click speed: {clickSpeed}</button>
-        <button type="button" className="rounded-md bg-surface-container-high px-3 py-1 text-xs font-bold" onClick={() => setClickPattern((current) => METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(current) + 1) % METRONOME_PATTERNS.length])}>Click pattern: {clickPattern}</button>
-      </div>}
+      {localClickOffset.showFeedback && <ClickOffsetFeedback offsetMs={localClickOffset.offsetMs} />}
+      {controlFeedback.feedback && <ControlFeedback feedback={controlFeedback.feedback} />}
+      {keyboardMidiControls.lightShowFeedback && <ControlFeedback feedback={keyboardMidiControls.lightShowFeedback} />}
+      {keyboardMidiControls.isEqModeActive && <EqualizerStatus
+        presetName={keyboardMidiControls.presetName} error={keyboardMidiControls.midiError ?? (keyboardMidiControls.outputNames.length === 0 ? "No MIDI output detected." : null)}
+        onShuffle={keyboardMidiControls.shuffle} onClose={keyboardMidiControls.toggleEqMode}
+      />}
 
       {playbackClockNotice && (
         <div role="status" className="fixed top-20 left-1/2 z-[500000] -translate-x-1/2 rounded-xl bg-amber-100 px-4 py-2 text-center text-sm font-bold text-amber-900 shadow-lg">
@@ -2685,7 +2833,7 @@ export default function SetlistPerformanceRoomPage() {
       {isSimplifiedMode ? (
         <div className="flex-1 w-full h-full relative overflow-hidden bg-surface">
           <SimplifiedStackView
-            setlistAst={memoizedSetlistAst}
+            setlistAst={memoizedSetlistAst.map((item, index) => index === currentTrackIndex ? { ...item, ast: memoizedSongAstTree, displayKey: activeDisplayKey } : item)}
             memoizedSongAstTree={memoizedSongAstTree}
             currentSectionIndex={currentSectionIndex}
             queuedSectionIndex={queuedSectionIndex}
@@ -2705,6 +2853,7 @@ export default function SetlistPerformanceRoomPage() {
       ) : isTracksMode ? (
         <div className="flex-1 w-full h-full relative overflow-hidden bg-[#09090b]">
           <TracksView
+             midiZoomSteps={midiZoomSteps}
              activeSong={activeSong} // ✅ SURGICAL FIX: Feed the raw song data so it can parse line timings
              sections={sections}
              songAst={memoizedSongAstTree}
@@ -2817,6 +2966,10 @@ export default function SetlistPerformanceRoomPage() {
           profileDocument: keyboardMidiControls.profileDocument,
           activeProfileId: keyboardMidiControls.activeProfileId,
           devices: keyboardMidiControls.devices,
+          outputNames: keyboardMidiControls.outputNames,
+          lastMidiMessage: keyboardMidiControls.lastMidiMessage,
+          beatNoteCount: keyboardMidiControls.beatNoteCount,
+          setBeatNoteCount: keyboardMidiControls.setBeatNoteCount,
           isLoading: keyboardMidiControls.isLoading,
           isSaving: keyboardMidiControls.isSaving,
           isMidiSupported: keyboardMidiControls.isMidiSupported,
@@ -2892,6 +3045,18 @@ export default function SetlistPerformanceRoomPage() {
 
           const formatted = `${modalRoot}${modalAccidental}${activeSong.original_key.endsWith("m") ? "m" : ""}`;
 
+          const track = tracksListRef.current[currentTrackIndexRef.current];
+          if (track) {
+            const next = { ...keyOverridesRef.current };
+            if (hasCurrentPlaybackAuthority()) {
+              next[track.id] = formatted;
+              sendSupabaseBroadcast({ action: "KEY_CHANGE", trackIndex: currentTrackIndexRef.current, key: formatted });
+            } else {
+              delete next[track.id];
+            }
+            keyOverridesRef.current = next;
+            setKeyOverrides(next);
+          }
           // 1. Instantly update the local React State
           setActiveDisplayKey(formatted);
           setIsTransposerOpen(false);

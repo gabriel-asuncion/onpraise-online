@@ -23,6 +23,7 @@ interface TracksViewProps {
   activeDisplayKey: string;
   handleSectionInteractiveSelection: (idx: number, trackIdx?: number, exactBeat?: number) => void;
   isMD?: boolean;
+  midiZoomSteps?: number;
 }
 
 function getSectionColor(label: string) {
@@ -39,14 +40,16 @@ function getSectionColor(label: string) {
 export function TracksView(props: TracksViewProps) {
   const {
     activeSong, sections, songAst, sectionStarts, sectionDurations, totalBeats, quarterBeatsPerMeasure,
-    activeSectionIndex, playheadBeat, isPlaying, tempo, showChords, lyricsFontSize,
-    lineSpacing, chordFormat, activeDisplayKey, handleSectionInteractiveSelection, isMD
+    activeSectionIndex, activeLineIndex, playheadBeat, isPlaying, tempo, showChords, lyricsFontSize,
+    lineSpacing, chordFormat, activeDisplayKey, handleSectionInteractiveSelection, isMD, midiZoomSteps = 0
   } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
+  const programmaticScrollRef = useRef<number | null>(null);
 
   const [pixelsPerBeat, setPixelsPerBeat] = useState(40);
+  const lastMidiZoomRef = useRef(0);
   const [visualActiveIndex, setVisualActiveIndex] = useState(0);
 
   // 1. Responsive Zoom & Offset Calculation
@@ -58,14 +61,22 @@ export function TracksView(props: TracksViewProps) {
     const handleResize = () => {
       if (containerRef.current) {
         const width = containerRef.current.clientWidth;
-        const optimal = Math.max(30, Math.min(80, (width * 0.8) / Math.max(1, totalBeats)));
+        const optimal = width / Math.max(1, totalCanvasBeats);
         setPixelsPerBeat(optimal);
       }
     };
     handleResize();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [totalBeats]);
+  }, [totalBeats, totalCanvasBeats]);
+
+  useEffect(() => {
+    const delta = midiZoomSteps - lastMidiZoomRef.current;
+    lastMidiZoomRef.current = midiZoomSteps;
+    if (!delta || !containerRef.current) return;
+    const minimum = containerRef.current.clientWidth / Math.max(1, totalCanvasBeats);
+    setPixelsPerBeat((current) => Math.min(Math.max(200, minimum), Math.max(minimum, current + delta * 10)));
+  }, [midiZoomSteps, totalCanvasBeats]);
 
   // 2. Exact Line Parsing Engine
   const getLineBeats = (secName: string, expectedLineCount: number, durationBeats: number) => {
@@ -142,6 +153,16 @@ export function TracksView(props: TracksViewProps) {
   const lastBeatTimeRef = useRef(performance.now());
   const visualLineRef = useRef(0);
 
+  useEffect(() => {
+    if (!isPlaying && containerRef.current) {
+      const target = Math.max(0, (playheadBeat + offsetBeats) * pixelsPerBeat);
+      if (Math.abs(containerRef.current.scrollLeft - target) > 1) {
+        containerRef.current.scrollLeft = target;
+        programmaticScrollRef.current = containerRef.current.scrollLeft;
+      }
+    }
+  }, [isPlaying, playheadBeat, offsetBeats, pixelsPerBeat]);
+
   if (playheadBeat !== lastBeatRef.current) {
     lastBeatRef.current = playheadBeat;
     lastBeatTimeRef.current = performance.now();
@@ -166,12 +187,15 @@ export function TracksView(props: TracksViewProps) {
           exactFloatBeat = (containerRef.current.scrollLeft / pixelsPerBeat) - offsetBeats;
         }
 
-        // Transition lyrics exactly 1.0 beats before the line ends
-        let newVisualIdx = flatLines.length - 1;
-        for (let i = 0; i < flatLines.length; i++) {
-          if (exactFloatBeat < flatLines[i].endBeat - 1.0) {
-            newVisualIdx = i;
-            break;
+        let newVisualIdx = !isPlaying
+          ? flatLines.findIndex((line) => line.sIdx === activeSectionIndex && line.lIdx === activeLineIndex)
+          : flatLines.length - 1;
+        if (isPlaying) {
+          for (let i = 0; i < flatLines.length; i++) {
+            if (exactFloatBeat < flatLines[i].endBeat - 1.0) {
+              newVisualIdx = i;
+              break;
+            }
           }
         }
 
@@ -184,11 +208,16 @@ export function TracksView(props: TracksViewProps) {
     };
     rAF = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rAF);
-  }, [flatLines]);
+  }, [flatLines, activeSectionIndex, activeLineIndex]);
 
   // 5. Interactive Timeline Scrubbing (Clean implementation)
   const handleTimelineScroll = () => {
     if (isPlaying || !isMD) return;
+    if (programmaticScrollRef.current !== null) {
+      const expected = programmaticScrollRef.current;
+      programmaticScrollRef.current = null;
+      if (containerRef.current && Math.abs(containerRef.current.scrollLeft - expected) < 1) return;
+    }
     if (scrollTimeout.current) clearTimeout(scrollTimeout.current);
 
     scrollTimeout.current = setTimeout(() => {
@@ -404,8 +433,8 @@ export function TracksView(props: TracksViewProps) {
 
       {/* ✅ ZOOM CONTROLS */}
       <div className="absolute right-4 bottom-[27vh] z-50 flex flex-col gap-1 bg-[#18181b]/80 backdrop-blur-md border border-white/10 p-1 rounded-lg shadow-xl">
-        <button onClick={() => setPixelsPerBeat(p => Math.min(200, p + 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">add</span></button>
-        <button onClick={() => setPixelsPerBeat(p => Math.max(15, p - 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">remove</span></button>
+        <button onClick={() => setPixelsPerBeat(p => Math.min(Math.max(200, (containerRef.current?.clientWidth || 0) / Math.max(1, totalCanvasBeats)), p + 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">add</span></button>
+        <button onClick={() => setPixelsPerBeat(p => Math.max((containerRef.current?.clientWidth || 0) / Math.max(1, totalCanvasBeats), p - 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">remove</span></button>
       </div>
 
       <div className="h-[25vh] min-h-[120px] bg-[#09090b] shrink-0" />

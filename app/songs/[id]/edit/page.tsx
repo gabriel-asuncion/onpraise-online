@@ -4770,6 +4770,7 @@ function formatTimeWithMs(seconds: number) {
             isConnected={midiLearn.isConnected}
             activeDeviceName={midiLearn.activeDeviceName}
             devices={midiLearn.devices}
+            outputNames={midiLearn.outputNames}
             profileDocument={midiLearn.profileDocument}
             activeProfileId={midiLearn.activeProfileId}
             isProfileLoading={midiLearn.isProfileLoading}
