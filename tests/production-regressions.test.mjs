@@ -3,7 +3,7 @@ import test from "node:test";
 import { parseAllowedGeniusSongUrl, resolveAllowedGeniusRedirect } from "../app/api/lyrics/url-validation.ts";
 import { compileTimelineBeatMap, formatPlaybackTime, getTimelineMeter, getTimelinePosition, getYoutubeStartBeat, getYoutubeTimeForTimeline } from "../app/setlists/[id]/live/utils/timeline.ts";
 import { clearEqualizerOutputs, clearQueuedMidiOutputs } from "../app/setlists/[id]/live/hooks/equalizer.ts";
-import { createLightShowScene, LIGHT_SHOW_PRESETS, moveLightShowPreset, pickNextRandomPresetIndex, shouldShuffleLightShow, SMC_MATRIX_NOTES } from "../app/setlists/[id]/live/hooks/lightShowPresets.ts";
+import { createFrequencyScene, createLightShowScene, LIGHT_SHOW_PRESETS, moveLightShowPreset, pickNextRandomPresetIndex, shouldShuffleLightShow, SMC_MATRIX_NOTES } from "../app/setlists/[id]/live/hooks/lightShowPresets.ts";
 import { startPlaybackWithSupplementaryAudio } from "../app/setlists/[id]/live/utils/playback-start.ts";
 import { loadSongSectionsBySongId } from "../app/setlists/[id]/live/utils/load-song-sections.ts";
 import { adjustMidiLineBeats, getMidiLaneIndex, getMidiScrubTime, getMidiSectionTimingValue } from "../app/songs/[id]/edit/midiTimeline.ts";
@@ -11,11 +11,12 @@ import { findMidiConflicts, updateMidiBinding } from "../app/songs/[id]/edit/mid
 import { buildFeedbackScene, createBeatControls, feedbackKey, getConfiguredBeatControls, getMidiOutputs, isShortcutLightActive, parseBeatLightSettings, syncFeedbackOutputs } from "../app/songs/[id]/edit/midiFeedback.ts";
 import { createMcuBeatControls, createMcuPreset, decodeMcuVpot, MCU_REC_PAIRS, parsePitchBend, scalePitchBend } from "../app/songs/[id]/edit/mcuProtocol.ts";
 import { getPageProfileId, parseMidiProfiles, removePageProfileSelections, selectPageProfile } from "../app/setlists/[id]/live/hooks/midiProfiles.ts";
-import { adjustLocalClickOffset, formatLocalClickOffset, getOffsetMidiBeat, isMidiActionAllowedInEq, matchesPairedMidiMapping, shouldTriggerMidiButton } from "../app/setlists/[id]/live/hooks/midiInput.ts";
+import { adjustLocalClickOffset, formatLocalClickOffset, getMidiFaderValue, getOffsetMidiBeat, isMidiActionAllowedInEq, matchesPairedMidiMapping, shouldTriggerMidiButton } from "../app/setlists/[id]/live/hooks/midiInput.ts";
 import { transposeDisplayKey } from "../app/setlists/[id]/live/utils/music-math.ts";
 import { getMetronomePulse, getMetronomeStep, getMissedClickSteps, isClickVolumeMuted } from "../lib/metronome.ts";
 import {
   getAccountLandingPath,
+  getEntryPath,
   hasProfileMembership,
   resolveAccountLandingDecision,
 } from "../lib/account-routing.ts";
@@ -34,6 +35,21 @@ import {
   getCanonicalYouTubeUrl,
   suggestSongFromYouTubeTitle,
 } from "../lib/youtube-import.ts";
+
+test("MIDI faders preserve 14-bit pitch-bend precision", () => {
+  assert.equal(getMidiFaderValue("pitchbend", new Uint8Array([0xe7, 0, 64])), 8192 / 16383);
+  assert.equal(getMidiFaderValue("cc", new Uint8Array([0xb0, 7, 127])), 1);
+  assert.equal(getMidiFaderValue("note", new Uint8Array([0x90, 7, 127])), 1);
+  assert.equal(getMidiFaderValue("unknown", new Uint8Array([0x90, 7, 127])), null);
+});
+
+test("frequency scene maps eight independent four-high bars to the SMC matrix", () => {
+  const scene = createFrequencyScene([0, 0.25, 0.5, 0.75, 1, 0, 0, 0]);
+  for (let col = 0; col < 5; col++) {
+    const active = SMC_MATRIX_NOTES.reduce((sum, row) => sum + Number(scene.get(`note:0:${row[col]}`).active), 0);
+    assert.equal(active, col);
+  }
+});
 
 test("metronome speeds and patterns use the selected click grid", () => {
   assert.equal(isClickVolumeMuted(0), true);
@@ -415,6 +431,14 @@ test("MCU profile protocol survives persistence without modifying legacy profile
   assert.equal(parsed.editProtocol, "mcu");
   assert.equal(parsed.editBeatNoteCount, 12);
   assert.equal(parseMidiProfiles({ profiles: [{ ...profile, editProtocol: undefined }] }).profiles[0].editProtocol, undefined);
+});
+
+test("entry routing preserves auth context and sends ordinary visits to the dashboard", () => {
+  assert.equal(getEntryPath(new URLSearchParams()), "/dashboard");
+  assert.equal(getEntryPath(new URLSearchParams("mode=open")), "/dashboard?mode=open");
+  assert.equal(getEntryPath(new URLSearchParams("invite=abcd-12345")), "/login?invite=abcd-12345");
+  assert.equal(getEntryPath(new URLSearchParams("invite=bad&switch_account=1")), "/login?invite=bad&switch_account=1");
+  assert.equal(getEntryPath(new URLSearchParams("auth_error=1")), "/login?auth_error=1");
 });
 
 test("account routing recognizes existing team and ministry members without optional names", () => {

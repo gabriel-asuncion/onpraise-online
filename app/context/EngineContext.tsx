@@ -4,12 +4,16 @@ import React, { createContext, useContext, useState, useEffect, useRef } from "r
 import { createClient } from "../../utils/supabase/client";
 import { resolveAccountLandingDecision } from "../../lib/account-routing";
 import { normalizeJoinCode } from "../../lib/invitations";
+import { clearAuthSnapshot, getOfflineAuthSnapshot, isNetworkFailure, saveAuthSnapshot } from "../../lib/offline-auth";
+import { clearOfflineData } from "../../lib/offline-db";
+import { useOnlineStatus } from "./NetworkContext";
 
 export type RoleType = "admin" | "moderator" | "musician" | "member" | "none";
 
 interface EngineContextProps {
   simulatedRole: RoleType;
   activeRole: string;
+  realUserId: string;
   simulatedUserId: string; 
   userTeamId: string | null;
   primaryTeamId: string | null;
@@ -31,6 +35,7 @@ const MOCK_UUIDS = {
 
 export function EngineProvider({ children }: { children: React.ReactNode }) {
   const supabase = createClient();
+  const { isOnline, reportConnectionFailure, reportConnectionRestored } = useOnlineStatus();
   const [simulatedRole, setSimulatedRoleState] = useState<RoleType>("none");
   const [simulatedUserId, setSimulatedUserId] = useState<string>("");
   const [realUserId, setRealUserId] = useState<string>("");
@@ -70,26 +75,63 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     let active = true;
     async function fetchRealUserSession() {
       const authGeneration = authGenerationRef.current;
+      const invalidateOfflineAccount = async () => {
+        clearAuthSnapshot();
+        resetAuthContext();
+        await clearOfflineData();
+        if (active && window.location.pathname !== "/login") window.location.replace("/login");
+      };
+      const restoreOffline = async () => {
+        reportConnectionFailure();
+        const snapshot = await getOfflineAuthSnapshot(supabase);
+        if (!active || authGeneration !== authGenerationRef.current) return;
+        if (!snapshot) {
+          if (window.location.pathname !== "/login") window.location.replace("/login");
+          return;
+        }
+        setRealUserId(snapshot.userId);
+        setSimulatedUserId(snapshot.userId);
+        setRealRole(snapshot.activeRole);
+        setPrimaryTeamId(snapshot.primaryTeamId);
+        setSecondaryTeamIds(snapshot.secondaryTeamIds);
+        setUserTeamId(snapshot.userTeamId);
+        setIsSuperAdmin(false);
+      };
+      if (!navigator.onLine) {
+        await restoreOffline();
+        return;
+      }
       const { data: { user }, error: authError } = await supabase.auth.getUser();
       if (!active || authGeneration !== authGenerationRef.current) return;
       if (authError && authError.name !== "AuthSessionMissingError") {
+        if (isNetworkFailure(authError)) {
+          await restoreOffline();
+          return;
+        }
+        if (authError.status === 401 || authError.status === 403) {
+          await invalidateOfflineAccount();
+          return;
+        }
         console.error("Could not restore the Supabase session for the application.", authError);
         return;
       }
 
       if (!user) {
-        if (typeof window !== "undefined" && window.location.pathname !== "/" && !window.location.pathname.startsWith("/auth/")) {
+        if (localStorage.getItem("onpraise_offline_auth")) {
+          await invalidateOfflineAccount();
+          return;
+        }
+        if (typeof window !== "undefined" && window.location.pathname !== "/login" && !window.location.pathname.startsWith("/auth/")) {
           const invite = normalizeJoinCode(new URLSearchParams(window.location.search).get("invite")) ||
             normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
           if (invite) localStorage.setItem("onpraise_pending_invite", invite);
-          const loginUrl = new URL("/", window.location.origin);
+          const loginUrl = new URL("/login", window.location.origin);
           if (invite) loginUrl.searchParams.set("invite", invite);
           window.location.replace(`${loginUrl.pathname}${loginUrl.search}`);
         }
         return;
       }
 
-      setRealUserId(user.id);
       let accountDecision: Awaited<ReturnType<typeof resolveAccountLandingDecision>>;
       try {
         accountDecision = await resolveAccountLandingDecision(async () => {
@@ -110,12 +152,32 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           return Boolean(membership?.length);
         });
       } catch (error) {
+        if (isNetworkFailure(error)) {
+          await restoreOffline();
+          return;
+        }
         console.error("Could not resolve the authenticated user's account setup state.", error);
         return;
       }
       const profile = accountDecision.profile;
 
       if (!active || authGeneration !== authGenerationRef.current) return;
+      reportConnectionRestored();
+      const authorizedWorkspace = profile?.team_id && (
+        localStorage.getItem("active_workspace_id") === profile.team_id ||
+        (profile.secondary_team_ids || []).includes(localStorage.getItem("active_workspace_id") || "")
+      ) ? localStorage.getItem("active_workspace_id") : profile?.team_id || null;
+      saveAuthSnapshot({
+        userId: user.id,
+        email: user.email || null,
+        activeRole: profile?.role || "member",
+        userTeamId: authorizedWorkspace,
+        primaryTeamId: profile?.team_id || null,
+        secondaryTeamIds: profile?.secondary_team_ids || [],
+        setupComplete: accountDecision.destination === "/dashboard",
+        lastVerifiedAt: new Date().toISOString(),
+      });
+      setRealUserId(user.id);
       if (profile) {
         if (profile.team_id) {
           setPrimaryTeamId(profile.team_id);
@@ -140,7 +202,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
 
       if (typeof window !== "undefined" &&
           !window.location.pathname.includes("/onboarding") &&
-          window.location.pathname !== "/" &&
+          window.location.pathname !== "/login" &&
           accountDecision.destination === "/onboarding") {
         const invite = normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
         const onboardingUrl = new URL("/onboarding", window.location.origin);
@@ -156,8 +218,17 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     void fetchRealUserSession().catch((error: unknown) => {
       console.error("Could not initialize the authenticated account context.", error);
     });
-    return () => { active = false; };
-  }, [supabase]);
+    const handleOnline = () => {
+      void fetchRealUserSession().catch((error: unknown) => {
+        console.error("Could not re-verify the authenticated account.", error);
+      });
+    };
+    window.addEventListener("online", handleOnline);
+    const retry = window.setInterval(() => {
+      if (!isOnline && navigator.onLine) handleOnline();
+    }, 30_000);
+    return () => { active = false; window.removeEventListener("online", handleOnline); window.clearInterval(retry); };
+  }, [supabase, isOnline, reportConnectionFailure, reportConnectionRestored]);
   
 
   const setSimulatedRole = (role: RoleType) => {
@@ -179,21 +250,33 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_OUT" || (event === "TOKEN_REFRESHED" && !session)) {
+        if ((!navigator.onLine || !isOnline) && localStorage.getItem("onpraise_offline_auth")) return;
+        clearAuthSnapshot();
+        const cleanup = clearOfflineData();
         localStorage.removeItem("active_workspace_id");
         localStorage.removeItem("onpraise_sim_role");
         resetAuthContext();
         
         // ONLY auto-redirect if they weren't explicitly kicked out (allowing the modal to show!)
         if (!isKickedOutRef.current) {
-          if (typeof window !== "undefined" && window.location.pathname !== "/") {
+          if (typeof window !== "undefined" && window.location.pathname !== "/login") {
             const invite = normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
             const switchAccount = localStorage.getItem("onpraise_switch_account") === "1";
-            const loginUrl = new URL("/", window.location.origin);
+            const loginUrl = new URL("/login", window.location.origin);
             if (invite) loginUrl.searchParams.set("invite", invite);
             if (switchAccount) loginUrl.searchParams.set("switch_account", "1");
             localStorage.removeItem("onpraise_switch_account");
-            window.location.replace(`${loginUrl.pathname}${loginUrl.search}`);
+            void cleanup.then(() => {
+              window.location.replace(`${loginUrl.pathname}${loginUrl.search}`);
+            }).catch((error: unknown) => {
+              console.error("Could not clear offline downloads after sign-out.", error);
+              alert("Could not clear offline downloads. Please close other tabs and try signing out again.");
+            });
+          } else {
+            void cleanup.catch((error: unknown) => console.error("Could not clear offline downloads after sign-out.", error));
           }
+        } else {
+          void cleanup.catch((error: unknown) => console.error("Could not clear offline downloads after sign-out.", error));
         }
       }
     });
@@ -201,7 +284,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     return () => {
       authListener.subscription.unsubscribe();
     };
-  }, [supabase.auth, realUserId]);
+  }, [supabase.auth, realUserId, isOnline]);
   
   // ✅ SURGICAL FIX: Trigger the modal instead of an instant redirect (Strict-Mode safe)
   useEffect(() => {
@@ -221,6 +304,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           isKickedOutRef.current = true;
           setIsKickedOut(true);
 
+          clearAuthSnapshot();
+          await clearOfflineData();
           await supabase.auth.signOut();
           localStorage.removeItem("active_workspace_id");
           localStorage.removeItem("onpraise_sim_role");
@@ -277,6 +362,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     <EngineContext.Provider value={{ 
       simulatedRole, 
       activeRole,
+      realUserId,
       // isAdmin,
       simulatedUserId, 
       userTeamId, 
@@ -299,7 +385,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           <button
             onClick={() => {
               // Finish the redirect when they acknowledge it
-              window.location.href = "/";
+              window.location.href = "/login";
             }}
             className="px-8 py-3.5 bg-zinc-100 hover:bg-white text-zinc-900 font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-md active:scale-95 cursor-pointer"
           >

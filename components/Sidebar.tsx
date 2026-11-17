@@ -5,6 +5,9 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "../utils/supabase/client";
 import { useEngine } from "../app/context/EngineContext";
+import PwaInstallPrompt from "./PwaInstallPrompt";
+import { clearOfflineData } from "../lib/offline-db";
+import { clearAuthSnapshot } from "../lib/offline-auth";
 
 import { DayPicker, DateRange } from "react-day-picker";
 import "react-day-picker/dist/style.css";
@@ -59,10 +62,14 @@ export default function Sidebar() {
   
   const handleLogout = async () => {
     try {
-      await supabase.auth.signOut();
-      router.replace("/");
+      clearAuthSnapshot();
+      await clearOfflineData();
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      router.replace("/login");
     } catch (error) {
       console.error("Error logging out:", error);
+      alert("Could not sign out or clear offline downloads. Please try again.");
     }
   };
   
@@ -879,6 +886,7 @@ export default function Sidebar() {
                   </form>
 
                   <div className="mt-4 pt-4 border-t border-outline-variant/30">
+                    <div className="mb-3"><PwaInstallPrompt /></div>
                     <button 
                       type="button" 
                       onClick={handleLogout}

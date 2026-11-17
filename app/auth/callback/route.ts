@@ -6,7 +6,7 @@ export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
   const code = searchParams.get('code')
   const invite = normalizeJoinCode(searchParams.get('invite'))
-  const destination = new URL('/', origin)
+  const destination = new URL('/login', origin)
   if (invite) destination.searchParams.set('invite', invite)
 
   if (code) {

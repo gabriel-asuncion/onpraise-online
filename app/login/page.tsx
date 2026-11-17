@@ -1,0 +1,506 @@
+"use client";
+
+import React, { useState, useEffect, useRef } from 'react';
+import { createClient } from '../../utils/supabase/client';
+import { useRouter, useSearchParams } from 'next/navigation';
+import dynamic from 'next/dynamic';
+import type { Session } from '@supabase/supabase-js';
+import { resolveAccountLandingDecision } from '../../lib/account-routing';
+import { getInvitationPath, normalizeJoinCode } from '../../lib/invitations';
+import LoginLoading from './loading';
+import { getOfflineAuthSnapshot, isNetworkFailure } from '../../lib/offline-auth';
+import { useOnlineStatus } from '../context/NetworkContext';
+import PwaInstallPrompt from '../../components/PwaInstallPrompt';
+
+// ✅ SURGICAL FIX: Force the Lottie Player to only load on the client side (browser)
+const Player = dynamic(
+  () => import('@lottiefiles/react-lottie-player').then((mod) => mod.Player),
+  { ssr: false } // This tells Next.js to skip this during the server build!
+);
+// ============================================================================
+// ✅ SURGICAL ADDITION: REUSABLE BLOB COMPONENT FOR CLEAN JSX
+// ============================================================================
+const Blob = ({ 
+  color, w, hasEyes, animClass, delay, top, left, right, bottom 
+}: { 
+  color: string, w: string, hasEyes: boolean, animClass: string, delay: string, top?: string, left?: string, right?: string, bottom?: string 
+}) => (
+  <div 
+    className={`absolute z-0 opacity-70 ${animClass}`} 
+    style={{ animationDelay: delay, top, left, right, bottom, width: w }}
+  >
+    {/* <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+      <path fill={color} d="M45.7,-76.3C58.9,-69.3,69.1,-55.3,77.5,-41.1C85.9,-26.9,92.5,-12.4,90.4,1.4C88.4,15.2,77.7,28.3,67.6,40.4C57.5,52.5,48,63.6,35.5,70.5C23,77.4,7.5,80.1,-6.9,78C-21.3,75.9,-34.5,69.1,-46.8,60.8C-59.1,52.5,-70.5,42.7,-78.6,30.3C-86.7,17.9,-91.5,2.9,-88.4,-10.8C-85.3,-24.5,-74.3,-36.9,-62,-46.1C-49.7,-55.3,-36.1,-61.3,-23.1,-68.2C-10.1,-75.1,2.3,-82.9,16.4,-82.6C30.5,-82.3,46,-73.9,45.7,-76.3Z" transform="translate(100 100)" />
+      {hasEyes && (
+        <>
+          <circle cx="85" cy="90" r="8" fill="white" className="animate-blink" />
+          <circle cx="115" cy="90" r="8" fill="white" className="animate-blink" />
+        </>
+      )}
+    </svg> */}
+  </div>
+);
+
+export default function LoginPage() {
+  const supabase = createClient();
+  const router = useRouter();
+  const { openNoConnectionModal, reportConnectionFailure } = useOnlineStatus();
+  
+  const searchParams = useSearchParams();
+  const inviteCode = searchParams.get("invite");
+  const isAccountSwitch = searchParams.get("switch_account") === "1";
+  const authErrorParam = searchParams.get("auth_error");
+  const [authRoutingError, setAuthRoutingError] = useState(() => {
+    if (authErrorParam) return "Sign-in could not be completed. Please try again.";
+    if (inviteCode && !normalizeJoinCode(inviteCode)) {
+      return "This invitation link is not valid. You can still sign in and request a new invite.";
+    }
+    return "";
+  });
+  const [isResolvingAccount, setIsResolvingAccount] = useState(true);
+  const routingAttemptRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (isAccountSwitch) localStorage.removeItem("onpraise_switch_account");
+  }, [isAccountSwitch]);
+
+  const [activeSlide, setActiveSlide] = useState(0);
+  const [isTransitioning, setIsTransitioning] = useState(true);
+
+  // Keep the invite available across OAuth redirects and embedded-browser reloads.
+  useEffect(() => {
+    const rawInvite = inviteCode;
+    const normalizedInvite = normalizeJoinCode(rawInvite);
+    if (rawInvite && normalizedInvite) {
+      localStorage.setItem("onpraise_pending_invite", normalizedInvite);
+    } else if (rawInvite) {
+      localStorage.removeItem("onpraise_pending_invite");
+    }
+
+    let isActive = true;
+    const routeOffline = async () => {
+      reportConnectionFailure();
+      const snapshot = await getOfflineAuthSnapshot(supabase);
+      if (!isActive) return;
+      if (snapshot?.setupComplete) router.replace("/songs");
+      else {
+        setIsResolvingAccount(false);
+        setAuthRoutingError("Connect to the internet to sign in and prepare your offline account.");
+      }
+    };
+    const routeForSession = async (session: Session | null) => {
+      if (!navigator.onLine) {
+        await routeOffline();
+        return;
+      }
+      if (!session) {
+        routingAttemptRef.current = null;
+        if (isActive) setIsResolvingAccount(false);
+        return;
+      }
+
+      const stashedInvite = rawInvite ? null : localStorage.getItem("onpraise_pending_invite");
+      const activeInvite = normalizedInvite || normalizeJoinCode(stashedInvite);
+      const routeKey = `${session.user.id}:${activeInvite || "account"}`;
+      if (routingAttemptRef.current === routeKey) return;
+      routingAttemptRef.current = routeKey;
+      if (isActive) {
+        setIsResolvingAccount(true);
+        if (!rawInvite || normalizedInvite) setAuthRoutingError("");
+      }
+
+      try {
+        const accountDecision = await resolveAccountLandingDecision(async () => {
+          const { data: profile, error: profileError } = await supabase
+            .from("profiles")
+            .select("full_name, team_id, secondary_team_ids, ministries")
+            .eq("id", session.user.id)
+            .maybeSingle();
+          if (profileError) throw profileError;
+          return profile;
+        }, async () => {
+          const { data: membership, error: membershipError } = await supabase
+            .from("team_members")
+            .select("id")
+            .eq("user_id", session.user.id)
+            .limit(1);
+          if (membershipError) throw membershipError;
+          return Boolean(membership?.length);
+        });
+
+        if (!isActive) return;
+        if (rawInvite && !normalizedInvite) {
+          setIsResolvingAccount(false);
+          routingAttemptRef.current = null;
+          setAuthRoutingError("This invitation link is not valid. You can still sign in and request a new invite.");
+          return;
+        }
+
+        if (activeInvite) {
+          localStorage.setItem("onpraise_pending_invite", activeInvite);
+          router.replace(getInvitationPath(activeInvite));
+        } else {
+          router.replace(accountDecision.destination);
+        }
+      } catch (error) {
+        if (isNetworkFailure(error)) {
+          reportConnectionFailure();
+          const snapshot = await getOfflineAuthSnapshot(supabase);
+          if (!isActive) return;
+          if (snapshot?.setupComplete) {
+            router.replace("/songs");
+            return;
+          }
+        }
+        console.error("Could not resolve account onboarding state.", error);
+        if (isActive) {
+          routingAttemptRef.current = null;
+          setIsResolvingAccount(false);
+          setAuthRoutingError("We couldn't verify your account yet. Check your connection and try again.");
+        }
+      }
+    };
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" && session) {
+        window.setTimeout(() => { if (isActive) void routeForSession(session); }, 0);
+      } else if (event === "SIGNED_OUT") {
+        routingAttemptRef.current = null;
+        if (isActive) setIsResolvingAccount(false);
+      }
+    });
+
+    if (!navigator.onLine) {
+      void routeForSession(null);
+    } else void supabase.auth.getSession()
+      .then(async ({ data, error }) => {
+        if (!isActive) return;
+        if (error) {
+          if (isNetworkFailure(error)) { await routeOffline(); return; }
+          console.error("Could not restore the Supabase session.", error);
+          setIsResolvingAccount(false);
+          setAuthRoutingError("We couldn't restore your sign-in session. Sign in again or open this link in your browser.");
+          return;
+        }
+        return routeForSession(data.session);
+      })
+      .catch(async (error: unknown) => {
+        if (isNetworkFailure(error)) { await routeOffline(); return; }
+        console.error("Could not restore the Supabase session.", error);
+        if (isActive) {
+          setIsResolvingAccount(false);
+          setAuthRoutingError("We couldn't restore your sign-in session. Sign in again or open this link in your browser.");
+        }
+      });
+
+    return () => {
+      isActive = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, [supabase, router, inviteCode, reportConnectionFailure]);
+
+  const handleGoogleLogin = async () => {
+    if (!navigator.onLine) {
+      openNoConnectionModal("Google sign-in");
+      return;
+    }
+    const supabase = createClient();
+    const storedInvite = localStorage.getItem("onpraise_pending_invite");
+    const activeInvite = normalizeJoinCode(inviteCode) || normalizeJoinCode(storedInvite);
+    if (inviteCode && !activeInvite) {
+      setAuthRoutingError("This invitation code is invalid. Ask the team owner for a new link.");
+      return;
+    }
+    if (activeInvite) localStorage.setItem("onpraise_pending_invite", activeInvite);
+
+    const callbackUrl = new URL("/auth/callback", window.location.origin);
+    if (activeInvite) callbackUrl.searchParams.set("invite", activeInvite);
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: callbackUrl.toString(),
+          ...(isAccountSwitch ? { queryParams: { prompt: "select_account" } } : {}),
+        },
+      });
+      if (error) throw error;
+    } catch (error) {
+      console.error("Google sign-in could not be started.", error);
+      setAuthRoutingError("Google sign-in could not be started. Please try again.");
+    }
+  };
+
+  // ✅ THE SLIDES ARRAY WITH DENSE, UNIQUE BLOB CLUSTERS
+  const slides = [
+    {
+      title: "Sync your stage.",
+      desc: "Realtime sets, connected bands, and zero paper. No pressure, just presence.",
+      graphics: (
+        // ✅ SURGICAL FIX: Bound the container to bottom-[250px] so it never touches the text below it
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+          {/* Main Eyed Blobs (Snappy & Morphing) */}
+          <Blob color="#2563EB" w="110px" hasEyes animClass="animate-dart-x" delay="-1s" top="15%" left="15%" />
+          <Blob color="#60A5FA" w="90px" hasEyes animClass="animate-morph-squish" delay="-3s" top="35%" right="20%" />
+          {/* Scatter Cluster (Eyeless) */}
+          <Blob color="#DBEAFE" w="30px" hasEyes={false} animClass="animate-orbit-cw" delay="0s" top="10%" right="30%" />
+          <Blob color="#BFDBFE" w="40px" hasEyes={false} animClass="animate-float-spin" delay="-2s" top="45%" left="10%" />
+          <Blob color="#93C5FD" w="20px" hasEyes={false} animClass="animate-zigzag-pop" delay="-5s" top="20%" left="40%" />
+          <Blob color="#EFF6FF" w="60px" hasEyes={false} animClass="animate-pulse-ghost" delay="-1s" top="50%" right="10%" />
+          <Blob color="#60A5FA" w="25px" hasEyes={false} animClass="animate-drift-a" delay="-7s" top="5%" left="50%" />
+          <Blob color="#DBEAFE" w="35px" hasEyes={false} animClass="animate-drift-b" delay="-4s" top="25%" right="15%" />
+          
+          <Player autoplay loop src="/assets/login_01.json" className="w-full max-w-[320px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
+        </div>
+      )
+    },
+    {
+      title: "Perfectly timed.",
+      desc: "Sample-accurate metronomes and vocal cues locked to your band's flow.",
+      graphics: (
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+          {/* Main Eyed Blobs */}
+          <Blob color="#EF4444" w="120px" hasEyes animClass="animate-dart-y" delay="-2s" top="10%" right="18%" />
+          <Blob color="#FCA5A5" w="80px" hasEyes animClass="animate-pulse-ghost" delay="-4s" top="40%" left="22%" />
+          <Blob color="#FECACA" w="95px" hasEyes animClass="animate-zigzag-pop" delay="-1s" top="20%" left="12%" />
+          {/* Scatter Cluster */}
+          <Blob color="#FEE2E2" w="25px" hasEyes={false} animClass="animate-orbit-ccw" delay="-3s" top="30%" right="10%" />
+          <Blob color="#F87171" w="45px" hasEyes={false} animClass="animate-morph-squish" delay="-6s" top="50%" left="15%" />
+          <Blob color="#FEF2F2" w="30px" hasEyes={false} animClass="animate-float-spin" delay="-8s" top="15%" right="40%" />
+          <Blob color="#FCA5A5" w="15px" hasEyes={false} animClass="animate-drift-b" delay="-2s" top="5%" left="30%" />
+          <Blob color="#EF4444" w="35px" hasEyes={false} animClass="animate-dart-x" delay="-7s" top="45%" right="25%" />
+          
+          <Player autoplay loop src="/assets/login_02.json" className="w-[85%] max-w-[320px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
+        </div>
+      )
+    },
+    {
+      title: "Build your set.",
+      desc: "Arrange songs, map sections, and transpose keys on the fly. Total control.",
+      graphics: (
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+          {/* Main Eyed Blobs */}
+          <Blob color="#F59E0B" w="100px" hasEyes animClass="animate-morph-squish" delay="0s" top="35%" left="18%" />
+          {/* Scatter Cluster */}
+          <Blob color="#FEF3C7" w="40px" hasEyes={false} animClass="animate-zigzag-pop" delay="-2s" top="12%" right="20%" />
+          <Blob color="#FDE68A" w="25px" hasEyes={false} animClass="animate-orbit-cw" delay="-5s" top="45%" right="15%" />
+          <Blob color="#FBBF24" w="35px" hasEyes={false} animClass="animate-pulse-ghost" delay="-1s" top="15%" left="30%" />
+          <Blob color="#FFFBEB" w="50px" hasEyes={false} animClass="animate-dart-y" delay="-8s" top="25%" left="8%" />
+          <Blob color="#FCD34D" w="20px" hasEyes={false} animClass="animate-float-spin" delay="-3s" top="50%" left="40%" />
+          <Blob color="#F59E0B" w="30px" hasEyes={false} animClass="animate-drift-a" delay="-6s" top="8%" right="40%" />
+          <Blob color="#FEF3C7" w="15px" hasEyes={false} animClass="animate-dart-x" delay="-4s" top="30%" right="5%" />
+
+          <Player autoplay loop src="/assets/login_03.json" className="w-[95%] max-w-[340px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
+        </div>
+      )
+    },
+    {
+      title: "Ready to play.",
+      desc: "Join your team's workspace and perform with absolute confidence.",
+      graphics: (
+        <div className="absolute top-0 left-0 w-full bottom-[180px] md:bottom-[220px] flex items-center justify-center pt-8 md:pt-12 pointer-events-none">
+          {/* Main Eyed Blobs */}
+          <Blob color="#A855F7" w="110px" hasEyes animClass="animate-float-spin" delay="-3s" top="25%" right="15%" />
+          <Blob color="#C084FC" w="85px" hasEyes animClass="animate-dart-y" delay="-1s" top="40%" left="15%" />
+          {/* Scatter Cluster */}
+          <Blob color="#F3E8FF" w="35px" hasEyes={false} animClass="animate-morph-squish" delay="-5s" top="10%" left="25%" />
+          <Blob color="#E9D5FF" w="20px" hasEyes={false} animClass="animate-orbit-ccw" delay="-2s" top="45%" right="25%" />
+          <Blob color="#D8B4FE" w="45px" hasEyes={false} animClass="animate-zigzag-pop" delay="-7s" top="15%" right="35%" />
+          <Blob color="#FAF5FF" w="25px" hasEyes={false} animClass="animate-pulse-ghost" delay="-4s" top="30%" left="8%" />
+          <Blob color="#A855F7" w="15px" hasEyes={false} animClass="animate-drift-b" delay="-8s" top="5%" right="15%" />
+          <Blob color="#C084FC" w="30px" hasEyes={false} animClass="animate-dart-x" delay="-2.5s" top="50%" left="35%" />
+
+          <Player autoplay loop src="/assets/login_04.json" className="w-[85%] max-w-[320px] md:max-w-[450px] max-h-[85%] object-contain animate-float-lottie relative z-10" />
+        </div>
+      )
+    }
+  ];
+
+  const extendedSlides = [...slides, slides[0]];
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setIsTransitioning(true);
+      setActiveSlide((prev) => prev + 1);
+    }, 4000); // 👈 Slightly longer so the crazy blob animations have time to shine
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (activeSlide === slides.length) {
+      const timer = setTimeout(() => {
+        setIsTransitioning(false);
+        setActiveSlide(0);
+      }, 700); 
+      return () => clearTimeout(timer);
+    }
+  }, [activeSlide, slides.length]);
+
+  if (isResolvingAccount) return <LoginLoading />;
+
+  return (
+    <main className="relative flex min-h-[100svh] min-h-[100dvh] w-full flex-col overflow-x-hidden bg-white pointer-events-none">
+      
+      {/* ======================================================= */}
+      {/* ✅ SURGICAL ADDITION: THE ANIMATION BANK MASSIVE UPGRADE  */}
+      {/* ======================================================= */}
+      <style dangerouslySetInnerHTML={{__html: `
+        /* 1. Lottie Base Float */
+        @keyframes float-lottie {
+          0%, 100% { transform: translateY(0px) rotate(0deg); }
+          50% { transform: translateY(-10px) rotate(3deg); }
+        }
+        .animate-float-lottie { animation: float-lottie 6s ease-in-out infinite; }
+
+        /* 2. Snappy Horizontal Dart */
+        @keyframes dart-x {
+          0%, 100% { transform: translateX(0) scale(1); }
+          2%, 6% { transform: translateX(30px) scale(0.9, 1.1) rotate(5deg); }
+          8%, 50% { transform: translateX(30px) scale(1) rotate(5deg); }
+          52%, 56% { transform: translateX(-15px) scale(1.1, 0.9) rotate(-2deg); }
+          58%, 95% { transform: translateX(-15px) scale(1) rotate(-2deg); }
+        }
+        
+        /* 3. Snappy Vertical Dart */
+        @keyframes dart-y {
+          0%, 100% { transform: translateY(0) scale(1); }
+          5%, 10% { transform: translateY(-35px) scale(0.9, 1.1); }
+          12%, 60% { transform: translateY(-35px) scale(1); }
+          65%, 70% { transform: translateY(15px) scale(1.1, 0.9); }
+          72%, 90% { transform: translateY(15px) scale(1); }
+        }
+
+        /* 4. Morphing & Squishing */
+        @keyframes morph-squish {
+          0%, 100% { transform: scale(1) rotate(0deg); }
+          25% { transform: scale(1.2, 0.8) rotate(10deg); }
+          50% { transform: scale(0.9, 1.15) rotate(-5deg); }
+          75% { transform: scale(1.05, 0.95) rotate(15deg); }
+        }
+
+        /* 5. Multiplying / Ghosting (Opacity + Scale out) */
+        @keyframes pulse-ghost {
+          0%, 100% { transform: scale(1); opacity: 0.7; }
+          30% { transform: scale(1.6); opacity: 0.1; }
+          40% { transform: scale(0.8); opacity: 0.9; }
+        }
+
+        /* 6. Orbital Spinning Clockwise */
+        @keyframes orbit-cw {
+          0% { transform: rotate(0deg) translateX(15px) rotate(0deg); }
+          100% { transform: rotate(360deg) translateX(15px) rotate(-360deg); }
+        }
+
+        /* 7. Orbital Spinning Counter-Clockwise */
+        @keyframes orbit-ccw {
+          0% { transform: rotate(0deg) translateX(25px) rotate(0deg); }
+          100% { transform: rotate(-360deg) translateX(25px) rotate(360deg); }
+        }
+
+        /* 8. Zig-Zag Popping */
+        @keyframes zigzag-pop {
+          0%, 100% { transform: translate(0,0) scale(1); }
+          15% { transform: translate(20px, -20px) scale(1.2); }
+          30% { transform: translate(-10px, -30px) scale(0.8); }
+          45% { transform: translate(15px, 10px) scale(1.1); }
+        }
+
+        /* 9. Float & Spin */
+        @keyframes float-spin {
+          0%, 100% { transform: translateY(0) rotate(0deg); }
+          50% { transform: translateY(-20px) rotate(180deg); }
+        }
+
+        /* 10. Classic Drifts */
+        @keyframes drift-a { 0%, 100% { transform: translate(0,0); } 50% { transform: translate(-10px, -15px); } }
+        @keyframes drift-b { 0%, 100% { transform: translate(0,0); } 50% { transform: translate(15px, -10px); } }
+
+        /* Eye Blinking Math */
+        @keyframes blink {
+          0%, 96%, 100% { transform: scaleY(1); opacity: 1; }
+          98% { transform: scaleY(0.1); opacity: 0; }
+        }
+
+        /* Assigning Prime Number Durations so they naturally randomize and rarely sync up */
+        .animate-dart-x { animation: dart-x 7s cubic-bezier(0.34, 1.56, 0.64, 1) infinite; }
+        .animate-dart-y { animation: dart-y 11s cubic-bezier(0.34, 1.56, 0.64, 1) infinite; }
+        .animate-morph-squish { animation: morph-squish 5s ease-in-out infinite; }
+        .animate-pulse-ghost { animation: pulse-ghost 7s ease-in-out infinite; }
+        .animate-orbit-cw { animation: orbit-cw 13s linear infinite; }
+        .animate-orbit-ccw { animation: orbit-ccw 17s linear infinite; }
+        .animate-zigzag-pop { animation: zigzag-pop 11s ease-in-out infinite; }
+        .animate-float-spin { animation: float-spin 19s ease-in-out infinite; }
+        .animate-drift-a { animation: drift-a 7s ease-in-out infinite; }
+        .animate-drift-b { animation: drift-b 11s ease-in-out infinite; }
+        .animate-blink { animation: blink 4s infinite; transform-origin: center; }
+      `}} />
+
+      {/* DYNAMIC PROGRESS DOTS */}
+      <div className="absolute top-0 left-0 w-full z-50 flex items-center justify-center pt-[calc(env(safe-area-inset-top)+1.5rem)] pb-4">
+        <div className="flex items-center gap-2 bg-white/50 backdrop-blur-md px-3 py-1.5 rounded-full shadow-sm">
+          {slides.map((_, idx) => {
+            const isActive = activeSlide === idx || (activeSlide === slides.length && idx === 0);
+            return (
+              <div 
+                key={idx} 
+                className={`h-1.5 rounded-full transition-all duration-500 ease-out ${
+                  isActive ? "w-6 bg-blue-600" : "w-1.5 bg-zinc-300"
+                }`}
+              />
+            );
+          })}
+        </div>
+      </div>
+
+      {/* CAROUSEL TRACK */}
+      <div className="relative h-[65svh] min-h-[360px] max-h-[720px] w-full flex-none supports-[height:65dvh]:h-[65dvh]">
+        <div 
+          className="flex h-full w-full items-center"
+          style={{
+            transform: `translateX(-${activeSlide * 100}%)`,
+            transition: isTransitioning ? 'transform 0.8s cubic-bezier(0.16, 1, 0.3, 1)' : 'none' 
+          }}
+        >
+          {extendedSlides.map((slide, idx) => (
+            <div key={idx} className="w-full h-full flex-shrink-0 relative overflow-hidden">
+              {slide.graphics}
+              <div className="absolute bottom-[135px] md:bottom-[180px] left-0 w-full z-40 px-5 flex flex-col text-center">
+                <h1 className="text-4xl md:text-5xl font-black text-zinc-950 tracking-tighter leading-[1.1] mb-3 drop-shadow-sm">
+                  {slide.title}
+                </h1>
+                <p className="text-[15px] font-bold text-zinc-500 max-w-[280px] mx-auto leading-relaxed">
+                  {slide.desc}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+
+      {/* BUTTONS */}
+      <div className="relative z-50 flex w-full flex-col items-center justify-center px-6 pt-3 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] pointer-events-auto">
+        
+        <div className="mb-3 w-full max-w-sm"><PwaInstallPrompt /></div>
+        {authRoutingError && (
+          <p className="mb-3 w-full max-w-sm rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-center text-xs font-bold text-red-700" role="alert">
+            {authRoutingError}
+          </p>
+        )}
+        <button
+          onClick={handleGoogleLogin}
+          className="w-full max-w-sm bg-white hover:bg-zinc-50 text-zinc-800 font-black text-sm uppercase tracking-wider py-4 px-4 rounded-2xl border border-zinc-200/80 shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all active:scale-95 flex items-center justify-center gap-3 cursor-pointer"
+        >
+          <svg className="w-5 h-5" viewBox="0 0 24 24">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+          </svg>
+          Continue with Google
+        </button>
+      </div>
+      
+    </main>
+  );
+}

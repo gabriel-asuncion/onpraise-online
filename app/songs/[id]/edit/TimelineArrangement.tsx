@@ -69,7 +69,7 @@ interface TimelineArrangementProps {
   onSnapChange: (snap: TimelineSnap) => void;
   onDownbeatOffsetChange: (offsetMs: number) => void;
   onCaptureDownbeat: () => number | null;
-  onPlayFromDownbeat: () => void;
+  onPlayFromDownbeat: (overrideOffsetMs?: number) => void;
   onSeekToZero: () => void;
   onToggleMetronome: () => void;
   onNavigateToContentSection: (sectionId: string) => void;
@@ -209,7 +209,77 @@ export default function TimelineArrangement({
   const [resizePreview, setResizePreview] = useState<{ id: string; duration: number } | null>(null);
   const [partitionPreview, setPartitionPreview] = useState<{ sectionId: string; lineDurations: number[]; activeHandle: number; handleBeat: number } | null>(null);
   const [offsetDraft, setOffsetDraft] = useState((downbeatOffsetMs / 1000).toFixed(2));
+  const [isEditingOffset, setIsEditingOffset] = useState(false);
+  const latestOffsetMsRef = useRef(downbeatOffsetMs);
+  latestOffsetMsRef.current = downbeatOffsetMs;
+  const offsetHoldIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [offsetHoldStage, setOffsetHoldStage] = useState<null | { direction: -1 | 1; stepMs: 10 | 100 | 1000 }>(null);
   const [sequenceDraggingId, setSequenceDraggingId] = useState<string | null>(null);
+
+  const stopOffsetHold = useCallback(() => {
+    if (offsetHoldIntervalRef.current !== null) {
+      clearInterval(offsetHoldIntervalRef.current);
+      offsetHoldIntervalRef.current = null;
+    }
+    setOffsetHoldStage(null);
+  }, []);
+
+  useEffect(() => () => stopOffsetHold(), [stopOffsetHold]);
+
+  useEffect(() => {
+    if (!isEditingOffset && offsetHoldIntervalRef.current === null) {
+      setOffsetDraft((downbeatOffsetMs / 1000).toFixed(2));
+    }
+  }, [downbeatOffsetMs, isEditingOffset]);
+
+  const commitOffsetDraft = useCallback((raw = offsetDraft): number => {
+    const parsed = Number(raw);
+    const nextMs = Number.isFinite(parsed) ? Math.round(parsed * 1000) : latestOffsetMsRef.current;
+    latestOffsetMsRef.current = nextMs;
+    setOffsetDraft((nextMs / 1000).toFixed(2));
+    if (nextMs !== downbeatOffsetMs) {
+      onDownbeatOffsetChange(nextMs);
+    }
+    return nextMs;
+  }, [downbeatOffsetMs, offsetDraft, onDownbeatOffsetChange]);
+
+  const stepOffsetMs = useCallback((deltaMs: number) => {
+    const parsed = Number(offsetDraft);
+    const baseMs = isEditingOffset && Number.isFinite(parsed) ? Math.round(parsed * 1000) : latestOffsetMsRef.current;
+    const nextMs = baseMs + deltaMs;
+    latestOffsetMsRef.current = nextMs;
+    setIsEditingOffset(false);
+    setOffsetDraft((nextMs / 1000).toFixed(2));
+    onDownbeatOffsetChange(nextMs);
+  }, [isEditingOffset, offsetDraft, onDownbeatOffsetChange]);
+
+  const startOffsetHold = useCallback((direction: -1 | 1) => {
+    stopOffsetHold();
+    stepOffsetMs(direction * 10);
+    setOffsetHoldStage({ direction, stepMs: 10 });
+    const startedAt = performance.now();
+    offsetHoldIntervalRef.current = setInterval(() => {
+      const elapsed = performance.now() - startedAt;
+      if (elapsed < 1500) return;
+      const stepMs: 100 | 1000 = elapsed >= 2000 ? 1000 : 100;
+      setOffsetHoldStage({ direction, stepMs });
+      stepOffsetMs(direction * stepMs);
+    }, 120);
+  }, [stepOffsetMs, stopOffsetHold]);
+
+  useEffect(() => {
+    if (!isSettingsOpen || !isEditingOffset) return;
+    const timer = setTimeout(() => {
+      const parsed = Number(offsetDraft);
+      if (!Number.isFinite(parsed)) return;
+      const nextMs = Math.round(parsed * 1000);
+      latestOffsetMsRef.current = nextMs;
+      if (nextMs !== downbeatOffsetMs) {
+        onDownbeatOffsetChange(nextMs);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [downbeatOffsetMs, isEditingOffset, isSettingsOpen, offsetDraft, onDownbeatOffsetChange]);
   const [sequenceDropIndex, setSequenceDropIndex] = useState<number | null>(null);
   const portalTarget = typeof document === "undefined" ? null : document.body;
 
@@ -371,12 +441,17 @@ export default function TimelineArrangement({
     if (!isSequenceOpen && !isSettingsOpen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (isSettingsOpen) {
+        stopOffsetHold();
+        setIsEditingOffset(false);
+        commitOffsetDraft();
+      }
       setIsSequenceOpen(false);
       setIsSettingsOpen(false);
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isSequenceOpen, isSettingsOpen]);
+  }, [commitOffsetDraft, isSequenceOpen, isSettingsOpen, stopOffsetHold]);
 
   useEffect(() => {
     const handleTimelineShortcuts = (event: KeyboardEvent) => {
@@ -1624,13 +1699,23 @@ export default function TimelineArrangement({
               data-timeline-overlay
               className="fixed inset-0 z-[250000] flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm md:items-center md:p-4"
               onMouseDown={(event) => {
-                if (event.target === event.currentTarget) setIsSettingsOpen(false);
+                if (event.target === event.currentTarget) {
+                  stopOffsetHold();
+                  setIsEditingOffset(false);
+                  commitOffsetDraft();
+                  setIsSettingsOpen(false);
+                }
               }}
             >
               <div role="dialog" aria-modal="true" aria-labelledby="timeline-settings-title" className="w-full max-w-sm space-y-5 rounded-t-3xl border border-outline-variant/40 bg-surface-container-lowest p-5 shadow-2xl animate-in slide-in-from-bottom-full duration-300 md:rounded-2xl md:animate-in md:zoom-in-95">
                 <div className="flex items-center justify-between">
                   <h3 id="timeline-settings-title" className="text-sm font-black text-on-surface">Timeline settings</h3>
-                  <button type="button" onClick={() => setIsSettingsOpen(false)} aria-label="Close timeline settings" className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant hover:bg-surface-container-high">
+                  <button type="button" onClick={() => {
+                    stopOffsetHold();
+                    setIsEditingOffset(false);
+                    commitOffsetDraft();
+                    setIsSettingsOpen(false);
+                  }} aria-label="Close timeline settings" className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant hover:bg-surface-container-high">
                     <span className="material-symbols-outlined !text-[19px]">close</span>
                   </button>
                 </div>
@@ -1654,18 +1739,102 @@ export default function TimelineArrangement({
                     <option value="thirtysecond">1/32 note</option>
                   </select>
                 </label>
-                <label className="flex flex-col gap-2 text-xs font-bold text-on-surface">
-                  Downbeat offset (seconds)
-                  <input aria-label="Downbeat offset in seconds" type="number" step="0.01" value={offsetDraft} onChange={(event) => setOffsetDraft(event.target.value)} className="w-full rounded-lg border border-outline-variant/40 bg-surface-container-low px-3 py-2" />
-                </label>
+                <div className="flex flex-col gap-2 text-xs font-bold text-on-surface">
+                  <div className="flex items-center justify-between">
+                    <label htmlFor="downbeat-offset-input">Downbeat offset (seconds)</label>
+                    <span className="font-mono text-[10px] font-semibold text-on-surface-variant">
+                      {offsetHoldStage
+                        ? `${offsetHoldStage.direction > 0 ? "+" : "-"}${offsetHoldStage.stepMs}ms`
+                        : `${latestOffsetMsRef.current} ms`}
+                    </span>
+                  </div>
+                  <div className="flex items-stretch overflow-hidden rounded-xl border border-outline-variant/40 bg-surface-container-low focus-within:border-primary focus-within:ring-1 focus-within:ring-primary">
+                    <button
+                      type="button"
+                      aria-label="Decrease downbeat offset"
+                      title="Tap: -10ms · Hold 1.5s: -100ms · Hold 2s: -1000ms"
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        startOffsetHold(-1);
+                      }}
+                      onPointerUp={stopOffsetHold}
+                      onPointerCancel={stopOffsetHold}
+                      onLostPointerCapture={stopOffsetHold}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          stepOffsetMs(-10);
+                        }
+                      }}
+                      className="flex w-11 shrink-0 select-none items-center justify-center border-r border-outline-variant/30 bg-surface-container text-base font-black text-on-surface hover:bg-surface-container-high active:bg-primary/20 active:text-primary touch-none cursor-pointer"
+                    >
+                      −
+                    </button>
+                    <input
+                      id="downbeat-offset-input"
+                      aria-label="Downbeat offset in seconds"
+                      type="number"
+                      step="0.01"
+                      value={offsetDraft}
+                      onFocus={() => setIsEditingOffset(true)}
+                      onChange={(event) => {
+                        setIsEditingOffset(true);
+                        setOffsetDraft(event.target.value);
+                      }}
+                      onBlur={() => {
+                        setIsEditingOffset(false);
+                        commitOffsetDraft();
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          setIsEditingOffset(false);
+                          commitOffsetDraft();
+                        }
+                      }}
+                      className="min-w-0 flex-1 bg-transparent px-3 py-2 text-center font-mono text-sm font-bold text-on-surface outline-none"
+                    />
+                    <button
+                      type="button"
+                      aria-label="Increase downbeat offset"
+                      title="Tap: +10ms · Hold 1.5s: +100ms · Hold 2s: +1000ms"
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        startOffsetHold(1);
+                      }}
+                      onPointerUp={stopOffsetHold}
+                      onPointerCancel={stopOffsetHold}
+                      onLostPointerCapture={stopOffsetHold}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          stepOffsetMs(10);
+                        }
+                      }}
+                      className="flex w-11 shrink-0 select-none items-center justify-center border-l border-outline-variant/30 bg-surface-container text-base font-black text-on-surface hover:bg-surface-container-high active:bg-primary/20 active:text-primary touch-none cursor-pointer"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <button type="button" onClick={onPlayFromDownbeat} className="flex items-center justify-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-low px-3 py-2.5 text-xs font-bold text-on-surface hover:bg-surface-container-high">
+                  <button type="button" onClick={() => {
+                    setIsEditingOffset(false);
+                    const committedMs = commitOffsetDraft();
+                    onPlayFromDownbeat(committedMs);
+                  }} className="flex items-center justify-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-low px-3 py-2.5 text-xs font-bold text-on-surface hover:bg-surface-container-high">
                     <span className="material-symbols-outlined !text-[16px]">play_arrow</span>
                     Play from offset
                   </button>
                   <button type="button" onClick={() => {
                     const capturedOffset = onCaptureDownbeat();
-                    if (capturedOffset !== null) setOffsetDraft((capturedOffset / 1000).toFixed(2));
+                    if (capturedOffset !== null) {
+                      setIsEditingOffset(false);
+                      latestOffsetMsRef.current = capturedOffset;
+                      setOffsetDraft((capturedOffset / 1000).toFixed(2));
+                    }
                   }} className="flex items-center justify-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-low px-3 py-2.5 text-xs font-bold text-on-surface hover:bg-surface-container-high">
                     <span className="material-symbols-outlined !text-[16px]">pin_drop</span>
                     Capture current time
@@ -1687,7 +1856,9 @@ export default function TimelineArrangement({
                   </button>
                 </div>
                 <button type="button" onClick={() => {
-                  onDownbeatOffsetChange(Math.round((Number(offsetDraft) || 0) * 1000));
+                  stopOffsetHold();
+                  setIsEditingOffset(false);
+                  commitOffsetDraft();
                   setIsSettingsOpen(false);
                 }} className="w-full rounded-xl bg-primary px-4 py-2.5 text-xs font-black text-on-primary hover:bg-primary/90">
                   Done

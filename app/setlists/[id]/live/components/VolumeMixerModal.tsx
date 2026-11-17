@@ -1,8 +1,31 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useCallback, useState, useRef, useEffect } from "react";
+import type { useMultitrackEngine } from "../../../../../hooks/useMultitrackEngine";
+import {
+  getSongAudioStems, saveSongAudioStem, removeSongAudioStem, inferStemRole,
+  getSavedAudioFolderHandle, pickAndSaveRootAudioFolder, verifyFolderPermission, findSongAudioFiles,
+  type StoredAudioStem, type AudioDirectoryHandle,
+} from "../../../../../lib/offline-audio";
+import { getStemSlot, groupStemSlots, type StemSlot } from "../../../../../lib/stem-slots";
+import type { MultitrackEngine } from "../../../../../lib/multitrack-engine";
+import { STEM_MIDI_ACTION_GROUPS } from "../hooks/midiProfiles";
+import type { ControlActionId, MidiControlMapping } from "../hooks/useKeyboardMidiControls";
 
 interface VolumeMixerModalProps {
+  audioSource?: "youtube" | "local";
+  multitrack?: ReturnType<typeof useMultitrackEngine>;
+  songId?: string;
+  songTitle?: string;
+  userId?: string | null;
+  midiBindings?: Partial<Record<ControlActionId, MidiControlMapping>>;
+  learningActionId?: ControlActionId | null;
+  onStartMidiLearn?: (actionId: ControlActionId) => void;
+  onClearMidiBinding?: (actionId: ControlActionId) => void;
+  onApplySmcStemPreset?: () => void;
+  onStemsChanged?: (stems: StoredAudioStem[]) => void;
+  isStemsLoading?: boolean;
+  midiError?: string | null;
   isOpen: boolean;
   onClose: () => void;
   localClickVolume: number;
@@ -24,7 +47,7 @@ interface VolumeMixerModalProps {
 
 // --- REUSABLE CUSTOM FADER COMPONENT ---
 interface FaderChannelProps {
-  id: 'click' | 'yt' | 'guide';
+  id: string;
   label: string;
   val: number;
   setVal: (v: number) => void;
@@ -33,10 +56,20 @@ interface FaderChannelProps {
   anySoloActive: boolean;
   toggleMute: () => void;
   toggleSolo: () => void;
+  top?: React.ReactNode;
+  disabled?: boolean;
+  meterActive?: boolean;
+  assignMode?: boolean;
+  actions?: { vol: ControlActionId; mute: ControlActionId; solo: ControlActionId };
+  learningActionId?: ControlActionId | null;
+  midiBindings?: Partial<Record<ControlActionId, MidiControlMapping>>;
+  onStartMidiLearn?: (actionId: ControlActionId) => void;
+  onClearMidiBinding?: (actionId: ControlActionId) => void;
 }
 
 const FaderChannel = ({ 
-  id, label, val, setVal, isMuted, isSoloed, anySoloActive, toggleMute, toggleSolo
+  label, val, setVal, isMuted, isSoloed, anySoloActive, toggleMute, toggleSolo,
+  top, disabled, meterActive = true, assignMode, actions, learningActionId, midiBindings, onStartMidiLearn, onClearMidiBinding,
 }: FaderChannelProps) => {
   const trackRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
@@ -55,6 +88,11 @@ const FaderChannel = ({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (assignMode && actions) {
+      onStartMidiLearn?.(actions.vol);
+      return;
+    }
+    if (disabled) return;
     isDraggingRef.current = true;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     updateValueFromPointer(e.clientY);
@@ -67,20 +105,37 @@ const FaderChannel = ({
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     isDraggingRef.current = false;
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  const badge = (action: ControlActionId) => {
+    const binding = midiBindings?.[action];
+    if (!assignMode || !binding) return null;
+    return <span className="text-[9px] text-cyan-300">{binding.messageType === "pitchbend" ? `PB ${binding.channel + 1}` : `${binding.messageType === "note" ? "N" : "CC"} ${binding.number}`}
+      <button type="button" aria-label={`Clear ${action} binding`} onClick={() => onClearMidiBinding?.(action)}> ×</button></span>;
   };
 
   return (
-    <div className="flex flex-col items-center bg-[#333336] p-2 sm:p-3 rounded-lg border border-[#222] shadow-xl w-[90px] sm:w-[100px] shrink-0 select-none touch-none">
-      <div className="h-48 relative flex justify-center items-center my-3 w-full">
+    <div className="flex flex-col items-center bg-[#333336] p-3 sm:p-4 rounded-xl border border-[#222] shadow-xl w-[108px] sm:w-[118px] shrink-0 select-none touch-none">
+      {top && <div className="w-full min-h-[34px] flex flex-col justify-center mb-1">{top}</div>}
+      <div className={`h-48 relative flex justify-center items-center my-3 w-full ${disabled ? "opacity-45" : ""}`}>
         {/* Left Decibel Markers */}
-        <div className="absolute left-1 top-0 bottom-0 flex flex-col justify-between text-[8px] text-zinc-500 font-mono h-full py-2 pointer-events-none">
+        <div className="absolute left-1.5 top-0 bottom-0 flex flex-col justify-between text-[8px] text-zinc-500 font-mono h-full py-2 pointer-events-none">
           <span>12</span><span>6</span><span>0</span><span>-5</span><span>-10</span><span>-24</span>
         </div>
         
         {/* CUSTOM FADER UI */}
         <div 
-          className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-12 flex justify-center touch-none cursor-pointer z-10"
+          className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-12 flex justify-center touch-none cursor-pointer z-10 rounded-lg ${actions && learningActionId === actions.vol ? "animate-pulse ring-2 ring-cyan-400" : ""}`}
+          role={assignMode && actions ? "button" : undefined}
+          aria-label={assignMode && actions ? `Assign ${label} fader MIDI` : undefined}
+          tabIndex={assignMode && actions ? 0 : undefined}
+          onKeyDown={(event) => {
+            if (assignMode && actions && (event.key === "Enter" || event.key === " ")) {
+              event.preventDefault();
+              onStartMidiLearn?.(actions.vol);
+            }
+          }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -93,9 +148,9 @@ const FaderChannel = ({
         </div>
         
         {/* Right LED Lights */}
-        <div className="absolute right-1 top-0 bottom-0 flex flex-col justify-between h-full py-2 opacity-80 pointer-events-none">
+        <div className="absolute right-1.5 top-0 bottom-0 flex flex-col justify-between h-full py-2 opacity-80 pointer-events-none">
           {[...Array(6)].map((_, i) => {
-            const isLightOn = val >= (1 - (i * 0.2)) - 0.01 && !isMuted && (!anySoloActive || isSoloed);
+            const isLightOn = meterActive && val >= (1 - (i * 0.2)) - 0.01 && !isMuted && (!anySoloActive || isSoloed);
             return (
               <div key={i} className={`w-1.5 h-1.5 rounded-sm ${isLightOn ? 'bg-green-400 shadow-[0_0_5px_#4ade80]' : 'bg-[#1a1a1a]'}`} />
             );
@@ -103,11 +158,12 @@ const FaderChannel = ({
         </div>
       </div>
 
-      <div className="flex gap-1.5 mt-2 w-full justify-center">
-        <button onClick={toggleMute} className={`w-8 h-8 rounded text-xs font-black shadow-sm transition-all active:scale-95 ${isMuted ? 'bg-cyan-500 text-white shadow-[0_0_10px_rgba(6,182,212,0.5)]' : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>M</button>
-        <button onClick={toggleSolo} className={`w-8 h-8 rounded text-xs font-black shadow-sm transition-all active:scale-95 ${isSoloed ? 'bg-amber-400 text-white shadow-[0_0_10px_rgba(251,191,36,0.5)]' : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>S</button>
+      <div className="flex gap-2 mt-2 w-full justify-center">
+        <button type="button" disabled={disabled && !assignMode} aria-label={`Mute ${label}`} aria-pressed={isMuted} onClick={() => assignMode && actions ? onStartMidiLearn?.(actions.mute) : toggleMute()} className={`w-8 h-8 rounded-md text-xs font-black shadow-sm transition-all active:scale-95 ${actions && learningActionId === actions.mute ? "animate-pulse ring-2 ring-cyan-400" : ""} ${isMuted ? (actions ? 'bg-amber-500 text-white' : 'bg-cyan-500 text-white shadow-[0_0_10px_rgba(6,182,212,0.5)]') : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>M</button>
+        <button type="button" disabled={disabled && !assignMode} aria-label={`Solo ${label}`} aria-pressed={isSoloed} onClick={() => assignMode && actions ? onStartMidiLearn?.(actions.solo) : toggleSolo()} className={`w-8 h-8 rounded-md text-xs font-black shadow-sm transition-all active:scale-95 ${actions && learningActionId === actions.solo ? "animate-pulse ring-2 ring-cyan-400" : ""} ${isSoloed ? 'bg-amber-400 text-white shadow-[0_0_10px_rgba(251,191,36,0.5)]' : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>S</button>
       </div>
-      <div className="mt-4 text-[9px] text-zinc-400 font-black tracking-widest uppercase text-center w-full truncate border-t border-[#444] pt-2">
+      {actions && assignMode && <div className="flex flex-col items-center gap-0.5 mt-1.5">{badge(actions.vol)}{badge(actions.mute)}{badge(actions.solo)}</div>}
+      <div className="mt-3.5 text-[10px] text-zinc-300 font-black tracking-widest uppercase text-center w-full truncate border-t border-[#444] pt-2.5">
         {label}
       </div>
     </div>
@@ -120,9 +176,159 @@ export function VolumeMixerModal({
   guideVolume, setGuideVolume, youtubeVolume, setYoutubeVolume,
   mixerMutes: mutes, setMixerMutes: setMutes, mixerSolos: solos, setMixerSolos: setSolos,
   isClickGuideHardPannedRight, setIsClickGuideHardPannedRight,
-  metronomeSoundType, setMetronomeSoundType
+  metronomeSoundType, setMetronomeSoundType, audioSource = "youtube", multitrack,
+  songId, songTitle, userId, midiBindings, learningActionId, onStartMidiLearn,
+  onClearMidiBinding, onApplySmcStemPreset, onStemsChanged, isStemsLoading = false, midiError,
 }: VolumeMixerModalProps) {
-  
+  const [stems, setStems] = useState<StoredAudioStem[]>([]);
+  const [mixes, setMixes] = useState<ReturnType<MultitrackEngine["getStemMixes"]>>([]);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasFolder, setHasFolder] = useState(false);
+  const [assignMode, setAssignMode] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [loadedKey, setLoadedKey] = useState("");
+  const batchInput = useRef<HTMLInputElement>(null);
+  const slotInput = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<AudioDirectoryHandle | null>(null);
+  const selectedSlot = useRef<StemSlot | null>(null);
+  const revision = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const getEngine = multitrack?.getEngine;
+  const loadWhilePaused = multitrack?.loadWhilePaused;
+
+  const reportError = useCallback((reason: unknown) => {
+    console.error("Stage mixer local audio error:", reason);
+    setError(reason instanceof Error ? reason.message : "Could not update local audio.");
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen || audioSource !== "local" || !userId || !songId) return;
+    const current = ++revision.current;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const start = async () => {
+      try {
+        const [saved, folder] = await Promise.all([getSongAudioStems(userId, songId), getSavedAudioFolderHandle(userId)]);
+        if (current !== revision.current) return;
+        setStems(saved);
+        onStemsChanged?.(saved);
+        setLoadedKey(`${userId}:${songId}`);
+        setHasFolder(Boolean(folder));
+        folderRef.current = folder?.handle ?? null;
+        if (onStemsChanged || !getEngine || !loadWhilePaused || saved.length === 0) return;
+        const engine = getEngine();
+        if (engine.getStemMixes().length === 0 && !engine.isPlaying) {
+          await loadWhilePaused(saved.map((stem) => ({ id: stem.stemId, blob: stem.blob, sourceVersion: stem.updatedAt })), controller.signal);
+        }
+      } catch (reason) {
+        if (current === revision.current) reportError(reason);
+      }
+    };
+    void start();
+    return () => { revision.current += 1; controller.abort(); folderRef.current = null; };
+  }, [isOpen, audioSource, userId, songId, getEngine, loadWhilePaused, reportError, onStemsChanged]);
+
+  useEffect(() => {
+    if (!isOpen || audioSource !== "local" || !getEngine) return;
+    let active = true;
+    let failed = false;
+    const update = () => {
+      if (failed) return;
+      try {
+        const engine = getEngine();
+        const next = engine.getStemMixes();
+        setPlaying(engine.isPlaying);
+        setMixes((previous) => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
+      } catch (reason) {
+        failed = true;
+        if (active) reportError(reason);
+      }
+    };
+    update();
+    const interval = window.setInterval(update, 150);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [isOpen, audioSource, getEngine, reportError]);
+
+  const run = async (action: (signal: AbortSignal) => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    const signal = abortRef.current?.signal;
+    try {
+      if (!userId || !songId || !multitrack) throw new Error("An active song, user, and multitrack engine are required.");
+      if (isStemsLoading) throw new Error("Wait for the song's stems to finish loading.");
+      const engine = multitrack.getEngine();
+      if (engine.isPlaying) throw new Error("Pause local playback before changing stems.");
+      if (loadedKey !== `${userId}:${songId}`) throw new Error("Wait for the song's stems to finish loading.");
+      if (engine.getStemMixes().some((mix) => !stems.some((stem) => stem.ownerId === userId && stem.songId === songId && stem.stemId === mix.id))) {
+        throw new Error("The audio engine contains other tracks. Clear them in the current player before changing files here.");
+      }
+      if (!signal || signal.aborted) throw new Error("The audio mixer is no longer active.");
+      await action(signal);
+    } catch (reason) {
+      if (!signal?.aborted) {
+        reportError(reason);
+        if (userId && songId) {
+          try {
+            const saved = await getSongAudioStems(userId, songId);
+            if (!signal?.aborted) { setStems(saved); onStemsChanged?.(saved); }
+          } catch (storageError) {
+            console.error("Could not refresh stored stems after the mixer error:", storageError);
+          }
+        }
+      }
+    }
+    finally { busyRef.current = false; setBusy(false); }
+  };
+
+  const reload = async (signal: AbortSignal) => {
+    if (!userId || !songId || !multitrack) throw new Error("An active song and audio engine are required.");
+    const saved = await getSongAudioStems(userId, songId);
+    if (signal.aborted) return;
+    setStems(saved);
+    onStemsChanged?.(saved);
+    if (!await multitrack.loadWhilePaused(saved.map((stem) => ({ id: stem.stemId, blob: stem.blob, sourceVersion: stem.updatedAt })), signal)) {
+      if (signal.aborted) return;
+      throw new Error("Audio loading was interrupted. Reopen the mixer and try again.");
+    }
+    setMixes(multitrack.getEngine().getStemMixes());
+  };
+
+  const importFiles = async (files: File[], signal: AbortSignal, slot?: StemSlot) => {
+    if (!userId || !songId) throw new Error("Select a song and sign in before importing audio.");
+    const existing = await getSongAudioStems(userId, songId);
+    const groups = groupStemSlots(existing);
+    const used = new Set<StemSlot>();
+    for (const file of files) {
+      if (signal.aborted) return;
+      const role = slot ?? getStemSlot(inferStemRole(file.name));
+      if (used.has(role) || groups[role].length > (slot ? 1 : 0)) {
+        throw new Error(`Multiple files match ${role.toUpperCase()}. Resolve the conflict before importing.`);
+      }
+      used.add(role);
+    }
+    for (const file of files) {
+      if (signal.aborted) return;
+      const role = slot ?? getStemSlot(inferStemRole(file.name));
+      const stemId = groups[role][0]?.stemId ?? crypto.randomUUID();
+      await saveSongAudioStem({ key: `${userId}:${songId}:${stemId}`, ownerId: userId, songId, stemId,
+        label: file.name, role, fileName: file.name, mimeType: file.type, blob: file, updatedAt: new Date().toISOString() });
+    }
+    await reload(signal);
+  };
+
+  const updateMix = (id: string, update: { volume?: number; muted?: boolean; solo?: boolean }) => {
+    try {
+      if (!getEngine) throw new Error("The audio engine is unavailable.");
+      const engine = getEngine();
+      engine.setStemMix(id, update);
+      setMixes(engine.getStemMixes());
+    } catch (reason) { reportError(reason); }
+  };
+
   // --- FLUID DISMISS ENGINE ---
   const [dragY, setDragY] = useState(0);
   const [isClosing, setIsClosing] = useState(false);
@@ -141,6 +347,7 @@ export function VolumeMixerModal({
   };
   const handleTouchEnd = () => { dragY > 100 ? handleClose() : setDragY(0); };
 
+  const groups = groupStemSlots(stems.filter((stem) => stem.ownerId === userId && stem.songId === songId));
   const anySoloActive = solos.click || solos.yt || solos.guide;
 
   if (!isOpen) return null;
@@ -153,10 +360,10 @@ export function VolumeMixerModal({
       <div className="absolute inset-0 bg-zinc-950/60 backdrop-blur-sm" onClick={handleClose} />
       
       <div 
-        className="w-full sm:max-w-md bg-[#2b2b2b] rounded-t-3xl sm:rounded-3xl shadow-2xl border border-[#444] overflow-hidden flex flex-col pb-safe relative z-10 animate-in slide-in-from-bottom-full duration-300"
+        className={`w-full ${audioSource === "local" ? "sm:max-w-4xl" : "sm:max-w-md"} bg-[#2b2b2b] rounded-t-3xl sm:rounded-3xl shadow-2xl border border-[#444] overflow-hidden flex flex-col pb-safe relative z-10 animate-in slide-in-from-bottom-full duration-300`}
         style={{ transform: isClosing ? 'translateY(100vh)' : (dragY > 0 ? `translateY(${dragY}px)` : undefined), transition: isClosing || dragY === 0 ? 'transform 0.25s cubic-bezier(0.32, 0.72, 0, 1)' : 'none' }}
       >
-        <div className="p-4 flex items-center justify-between border-b border-[#333] cursor-grab active:cursor-grabbing touch-none" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
+        <div className="px-5 py-4 flex items-center justify-between border-b border-[#333] cursor-grab active:cursor-grabbing touch-none" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
           <div className="flex flex-col flex-1 items-center sm:items-start pl-8 sm:pl-0">
             <div className="w-10 h-1 bg-[#555] rounded-full mb-3 sm:hidden" /> 
             <h3 className="text-sm font-black tracking-wider uppercase text-zinc-200">Stage Mixer</h3>
@@ -164,7 +371,43 @@ export function VolumeMixerModal({
           <button onClick={handleClose} className="w-8 h-8 bg-[#444] hover:bg-[#555] text-zinc-300 rounded-full flex items-center justify-center font-bold transition-colors shrink-0">✕</button>
         </div>
 
-        <div className="p-6 bg-[#222] flex items-stretch justify-center gap-2 sm:gap-4 overflow-x-auto">
+        {audioSource === "local" && <div className="flex flex-wrap items-center gap-2 px-5 py-3 bg-[#262628] border-b border-[#343438] text-[11px] font-bold text-zinc-200">
+          <input ref={batchInput} type="file" accept="audio/*" multiple className="hidden" onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
+            if (files.length) void run((signal) => importFiles(files, signal));
+          }} />
+          <input ref={slotInput} type="file" accept="audio/*" className="hidden" onChange={(event) => {
+            const file = event.currentTarget.files?.[0]; const slot = selectedSlot.current; event.currentTarget.value = "";
+            if (file && slot) void run((signal) => importFiles([file], signal, slot));
+          }} />
+          <button type="button" className="rounded-lg bg-[#38383d] hover:bg-[#44444a] border border-white/10 px-3 py-1.5 transition-colors disabled:opacity-40" disabled={busy || playing || !userId || !songId || !multitrack} onClick={() => batchInput.current?.click()}>Import Stems</button>
+          <button type="button" className="rounded-lg bg-[#38383d] hover:bg-[#44444a] border border-white/10 px-3 py-1.5 transition-colors disabled:opacity-40" disabled={busy || playing || !userId || !songId || !multitrack} onClick={() => void run(async (signal) => {
+            if (!userId || !songId) throw new Error("Select a song and sign in first.");
+            const saved = folderRef.current ? null : await pickAndSaveRootAudioFolder(userId);
+            const handle = saved?.handle ?? folderRef.current;
+            if (!handle || !await verifyFolderPermission(handle)) throw new Error("Folder permission was not granted.");
+            if (signal.aborted) return;
+            folderRef.current = handle; setHasFolder(true);
+            const files = await findSongAudioFiles(handle, songId, songTitle ?? "");
+            if (!files.length) throw new Error("No matching audio files were found in the linked folder.");
+            const existing = await getSongAudioStems(userId, songId);
+            const fresh = files.filter((file) => !existing.some((stem) => stem.fileName === file.name));
+            if (fresh.length) await importFiles(fresh, signal);
+          })}>{hasFolder ? "Reconnect Folder" : "Link Folder"}</button>
+          <div className="ml-auto flex items-center gap-2">
+            {assignMode && <button type="button" disabled={!onApplySmcStemPreset} className="rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-400/30 hover:bg-cyan-500/25 px-3 py-1.5 transition-colors disabled:opacity-40" onClick={onApplySmcStemPreset}>Auto-Map Strips 3–8</button>}
+            <button type="button" disabled={!onStartMidiLearn} aria-pressed={assignMode} className={`rounded-lg px-3 py-1.5 border transition-colors disabled:opacity-40 ${assignMode ? "bg-blue-600 border-blue-400 text-white" : "bg-[#38383d] hover:bg-[#44444a] border-white/10 text-zinc-200"}`} onClick={() => setAssignMode(!assignMode)}>MIDI Assign</button>
+          </div>
+          {assignMode && learningActionId && <span className="w-full text-cyan-300 pt-1" role="status">Move fader / press button on your controller...</span>}
+          {assignMode && midiError && <span className="w-full text-red-300 pt-1" role="alert">{midiError}</span>}
+          {isStemsLoading && <span className="w-full text-zinc-400 pt-1">Loading stems...</span>}
+          {playing && <span className="w-full text-zinc-400 pt-1">Pause playback to import or replace stems.</span>}
+          {(!multitrack || !userId || !songId) && <span className="w-full text-zinc-400 pt-1">Select a song to manage local stems.</span>}
+          {multitrack && stems.some((stem) => stem.ownerId === userId && stem.songId === songId && !mixes.some((mix) => mix.id === stem.stemId && mix.sourceVersion === stem.updatedAt)) &&
+            <div className="w-full text-amber-300 pt-1">Some saved stems are not loaded. <button type="button" disabled={busy || playing} className="underline disabled:opacity-50" onClick={() => void run(reload)}>Reload stems</button></div>}
+          {error && <span className="w-full text-red-300 pt-1" role="alert">{error}</span>}
+        </div>}
+        <div className={`px-6 py-7 bg-[#222] flex items-stretch gap-3 sm:gap-4 overflow-x-auto ${audioSource === "local" ? "justify-start" : "justify-center"}`}>
           
           {/* ✅ NEW: Metronome Sound Selector Sidebar */}
           <div className="flex flex-col justify-between py-2 pr-4 sm:pr-6 border-r border-[#333] shrink-0">
@@ -197,11 +440,71 @@ export function VolumeMixerModal({
             isMuted={mutes.guide} isSoloed={solos.guide} anySoloActive={anySoloActive}
             toggleMute={() => setMutes(p => ({...p, guide: !p.guide}))} toggleSolo={() => setSolos(p => ({...p, guide: !p.guide}))}
           />
-          <FaderChannel 
+          {audioSource !== "local" ? <FaderChannel
             id="yt" label="YT Sync" val={youtubeVolume} setVal={setYoutubeVolume}
             isMuted={mutes.yt} isSoloed={solos.yt} anySoloActive={anySoloActive}
             toggleMute={() => setMutes(p => ({...p, yt: !p.yt}))} toggleSolo={() => setSolos(p => ({...p, yt: !p.yt}))}
-          />
+          /> : STEM_MIDI_ACTION_GROUPS.map((group) => {
+            const candidates = groups[group.slot];
+            const stem = candidates.length === 1 ? candidates[0] : undefined;
+            const mix = mixes.find((item) => item.id === stem?.stemId && item.sourceVersion === stem?.updatedAt);
+            const anyStemSolo = mixes.some((item) => item.solo);
+            return <FaderChannel key={group.slot} id={group.slot} label={group.label}
+              val={mix?.volume ?? 1} isMuted={mix?.muted ?? false} isSoloed={mix?.solo ?? false} anySoloActive={anyStemSolo}
+              setVal={(volume) => stem && updateMix(stem.stemId, { volume })}
+              toggleMute={() => stem && mix && updateMix(stem.stemId, { muted: !mix.muted })}
+              toggleSolo={() => stem && mix && updateMix(stem.stemId, { solo: !mix.solo })}
+              disabled={!stem || !mix} meterActive={playing && Boolean(mix)} assignMode={assignMode} actions={group} learningActionId={learningActionId}
+              midiBindings={midiBindings} onStartMidiLearn={onStartMidiLearn} onClearMidiBinding={onClearMidiBinding}
+              top={<div className="w-full flex flex-col items-center gap-1 text-[9px] text-zinc-300">
+                {candidates.length > 1 ? <div className="w-full text-amber-300 text-center">Conflict ({candidates.length})
+                  {candidates.map((candidate) => <div key={candidate.stemId} className="flex items-center justify-between gap-1 px-1">
+                    <span className="truncate" title={candidate.fileName}>{candidate.fileName}</span>
+                    <button type="button" aria-label={`Clear ${candidate.fileName}`} disabled={busy || playing || !multitrack} onClick={() => void run(async (signal) => {
+                      if (!userId || !songId) throw new Error("Select a song and sign in first.");
+                      await removeSongAudioStem(userId, songId, candidate.stemId);
+                      await reload(signal);
+                    })}>×</button>
+                  </div>)}
+                </div> : stem ? (
+                  <div className="w-full flex items-center justify-between gap-1 rounded-md bg-[#262629] border border-white/5 px-2 py-1">
+                    <button
+                      type="button"
+                      title={`${stem.fileName} (Click to replace)`}
+                      disabled={busy || playing || !multitrack || !userId || !songId}
+                      onClick={() => { selectedSlot.current = group.slot; slotInput.current?.click(); }}
+                      className="truncate text-left font-medium text-zinc-200 hover:text-blue-300 disabled:opacity-50"
+                    >
+                      {stem.fileName}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${stem.fileName}`}
+                      title="Remove stem"
+                      disabled={busy || playing || !multitrack}
+                      onClick={() => void run(async (signal) => {
+                        if (!userId || !songId) throw new Error("Select a song and sign in first.");
+                        await removeSongAudioStem(userId, songId, stem.stemId);
+                        await reload(signal);
+                      })}
+                      className="shrink-0 text-zinc-500 hover:text-red-400 font-bold disabled:opacity-50"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy || playing || !multitrack || !userId || !songId}
+                    onClick={() => { selectedSlot.current = group.slot; slotInput.current?.click(); }}
+                    className="w-full rounded-md border border-dashed border-zinc-600/80 py-1 text-zinc-400 hover:border-blue-400/60 hover:text-blue-300 font-bold tracking-wider uppercase transition-colors disabled:opacity-40"
+                  >
+                    + Assign
+                  </button>
+                )}
+              </div>}
+            />;
+          })}
         </div>
         <div className="mx-4 mb-4 flex items-center justify-between gap-4 rounded-xl border border-[#3a3a3f] bg-[#29292d] px-4 py-3">
           <div className="min-w-0">

@@ -1,10 +1,17 @@
 "use client";
 
-import React, { useCallback, useEffect, useState, useRef, useMemo } from "react";
+import React, { useCallback, useEffect, useEffectEvent, useState, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext"; 
 import PageSkeleton from '../../../components/PageSkeleton';
+import OfflineSongButton from "../../../components/OfflineSongButton";
+import { getOfflineSong } from "../../../lib/offline-db";
+import { getSongAudioStems, type StoredAudioStem } from "../../../lib/offline-audio";
+import { getSavedAudioSource, refreshSavedAudioSource, resolveEffectiveAudioSource, saveAudioSourcePreference, type AudioSourceMode } from "../../../lib/audio-source-preference";
+import { groupStemSlots, type StemSlot } from "../../../lib/stem-slots";
+import { useOnlineStatus } from "../../context/NetworkContext";
+import { useMultitrackEngine } from "../../../hooks/useMultitrackEngine";
 
 import { useTimesync } from '../../../hooks/useTimesync';
 import { useWakeLock } from "../../setlists/[id]/live/hooks/useWakeLock";
@@ -12,7 +19,8 @@ import { useWebAudioEngine } from "../../setlists/[id]/live/hooks/useWebAudioEng
 import { useLocalPreferences } from "../../setlists/[id]/live/hooks/useLocalPreferences";
 import { useYouTubeSync } from "../../setlists/[id]/live/hooks/useYouTubeSync";
 import { useHardwareClock } from "../../setlists/[id]/live/hooks/useHardwareClock";
-import { useKeyboardMidiControls } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
+import { useKeyboardMidiControls, type ControlActions } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
+import { STEM_MIDI_ACTION_GROUPS } from "../../setlists/[id]/live/hooks/midiProfiles";
 import { useLocalClickOffset } from "../../setlists/[id]/live/hooks/useLocalClickOffset";
 import { useControlFeedback } from "../../setlists/[id]/live/hooks/useControlFeedback";
 
@@ -70,8 +78,6 @@ function formatTime(seconds: number) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-const { initAudioContext } = useWebAudioEngine();
-
 const supabase = createClient();
 
 export default function SoloPracticeRoomPage() {
@@ -79,11 +85,40 @@ export default function SoloPracticeRoomPage() {
   const params = useParams();
   const songId = params?.id as string;
 
-  const { getGlobalTime } = useTimesync();
-  const { activeRole } = useEngine(); 
+  const { getGlobalTime: getTimesyncTime } = useTimesync();
+  const { activeRole, realUserId } = useEngine();
+  const { isOnline, openNoConnectionModal } = useOnlineStatus();
   useWakeLock();
   
-  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
+  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext, cancelFutureAudio, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
+  const getLocalAudioContext = useCallback(() => {
+    if (!getAudioContext()) initAudioContext();
+    return getAudioContext();
+  }, [getAudioContext, initAudioContext]);
+  const multitrack = useMultitrackEngine(getLocalAudioContext);
+  const [audioSource, setAudioSource] = useState<"youtube" | "local">("youtube");
+  const [storedStems, setStoredStems] = useState<StoredAudioStem[]>([]);
+  const [isStemsLoading, setIsStemsLoading] = useState(false);
+  const localStemsAvailable = multitrack.durationSeconds > 0;
+  const savedAudioSourceRef = useRef<AudioSourceMode>("youtube");
+  const [localAudioError, setLocalAudioError] = useState<string | null>(null);
+  const audioSourceRef = useRef<"youtube" | "local">("youtube");
+  const localClockRef = useRef<{
+    audioTime: number; globalTime: number;
+    sourceStartAt?: number; sourceOffset?: number; sourceGlobalTime?: number;
+  } | null>(null);
+  const startRevisionRef = useRef(0);
+  const getGlobalTime = useCallback(() => {
+    const anchor = localClockRef.current;
+    const context = getAudioContext();
+    if (!anchor || !context) return getTimesyncTime();
+    if (anchor.sourceStartAt !== undefined && anchor.sourceOffset !== undefined &&
+        anchor.sourceGlobalTime !== undefined && context.currentTime >= anchor.sourceStartAt) {
+      const engine = multitrack.getEngine();
+      if (engine.isPlaying) return anchor.sourceGlobalTime + (engine.currentTimeSeconds - anchor.sourceOffset) * 1000;
+    }
+    return anchor.globalTime + (context.currentTime - anchor.audioTime) * 1000;
+  }, [getAudioContext, getTimesyncTime, multitrack.getEngine]);
   
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
@@ -240,12 +275,22 @@ export default function SoloPracticeRoomPage() {
   
   const metronomeRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
   useEffect(() => {
+    let active = true;
     async function fetchSoloSong() {
-      const { data: song, error } = await supabase
-        .from('songs')
-        .select('*, song_sections(*)')
-        .eq('id', songId)
-        .single();
+      if (!realUserId) return;
+      let song;
+      if (!isOnline) {
+        song = await getOfflineSong(songId, realUserId);
+      } else {
+        const result = await supabase
+          .from('songs')
+          .select('*, song_sections(*)')
+          .eq('id', songId)
+          .single();
+        if (result.error) throw result.error;
+        song = result.data;
+      }
+      if (!active) return;
         
       if (song) {
         setActiveSong(song);
@@ -308,17 +353,29 @@ export default function SoloPracticeRoomPage() {
         });
         uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${fileName}.wav`, fileName));
 
-        if (song.youtube_url && song.youtube_url.trim() !== "") {
+        if (isOnline && song.youtube_url && song.youtube_url.trim() !== "") {
           setIsYoutubeSyncEnabled(true);
         }
         
         setLoading(false);
       } else {
-        router.push("/songs");
+        openNoConnectionModal("This song");
+        router.replace("/songs");
       }
     }
-    fetchSoloSong();
-  }, [songId]);
+    void fetchSoloSong().catch((error: unknown) => {
+      console.error("Could not load the song.", error);
+      if (active) {
+        openNoConnectionModal("Loading this song");
+        router.replace("/songs");
+      }
+    });
+    return () => { active = false; };
+  }, [songId, realUserId, isOnline, openNoConnectionModal, router]);
+
+  useEffect(() => {
+    if (!isOnline) setIsYoutubeSyncEnabled(false);
+  }, [isOnline, setIsYoutubeSyncEnabled]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -424,6 +481,12 @@ export default function SoloPracticeRoomPage() {
 
   function executeStartSequence(isYtSource: boolean = false) {
     if (isPlayingRef.current || pendingYoutubeStartRef.current) return;
+    if (audioSourceRef.current === "local" && !localStemsAvailable) {
+      setLocalAudioError("Add or reconnect audio stems before starting local playback.");
+      return;
+    }
+    const revision = ++startRevisionRef.current;
+    setLocalAudioError(null);
     const audioReady = resumeAudioContextForPlayback();
     isYtBackingTrackStartRef.current = isYtSource; 
     playingTrackIndexRef.current = 0;
@@ -454,13 +517,22 @@ export default function SoloPracticeRoomPage() {
     }
 
     void audioReady.then(() => {
+      if (revision !== startRevisionRef.current) return;
+      if (audioSourceRef.current === "local") {
+        const context = getAudioContext();
+        if (!context) throw new Error("Web Audio is unavailable.");
+        localClockRef.current = { audioTime: context.currentTime, globalTime: getTimesyncTime() };
+      }
       const currentGlobalTime = getGlobalTime();
+      const localLeadMs = audioSourceRef.current === "local" ? 30 : 0;
       const currentStartTimestamp = exactBeat === null
-        ? currentGlobalTime
-        : currentGlobalTime - (exactBeat - sectionStartBeat) * beatDurationMs;
+        ? currentGlobalTime + localLeadMs
+        : currentGlobalTime + localLeadMs - (exactBeat - sectionStartBeat) * beatDurationMs;
       completeSoloStart(sectionIndex, currentStartTimestamp, false, exactBeat);
     }).catch((error) => {
       console.error("Could not resume audio before starting playback.", error);
+      setLocalAudioError(error instanceof Error ? error.message : "Could not start audio.");
+      localClockRef.current = null;
     });
   }
 
@@ -635,7 +707,7 @@ export default function SoloPracticeRoomPage() {
     youtubeVideoId, isYtPlayerReady,
     ytPlayerRef, isYtPlayerReadyRef, isYtBufferingRef
   } = useYouTubeSync({
-    activeSong, youtubeVolumeRef, isYoutubeSyncEnabled,
+    activeSong, youtubeVolumeRef, isYoutubeSyncEnabled: isYoutubeSyncEnabled && audioSource === "youtube" && isOnline,
     onPlaybackStarted: (currentTimeSeconds) => youtubePlaybackStartedHandlerRef.current(currentTimeSeconds),
     onPlaybackError: () => youtubePlaybackErrorHandlerRef.current()
   });
@@ -777,6 +849,32 @@ export default function SoloPracticeRoomPage() {
           const targetAbsoluteBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
           audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - (targetAbsoluteBeat * beatSpeedSecs);
         }
+        if (audioSourceRef.current === "local" && isPlayingRef.current && activeSongRef.current) {
+          cancelFutureAudio();
+          const song = activeSongRef.current;
+          const now = getGlobalTime();
+          const startAt = Math.max(audioCtx.currentTime + 0.03, audioCtx.currentTime + (jumpTime - now) / 1000);
+          const sectionStartBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
+          const elapsedMs = now + (startAt - audioCtx.currentTime) * 1000 - jumpTime;
+          const rawTime = (sectionStartBeat * beatSpeedSecs * 1000 + elapsedMs + (song.youtube_sync_offset_ms || 0)) / 1000;
+          try {
+            const sourceStartAt = startAt + Math.max(0, -rawTime);
+            const sourceOffset = Math.max(0, rawTime);
+            const sourceGlobalTime = now + (sourceStartAt - audioCtx.currentTime) * 1000;
+            multitrack.getEngine().play(sourceOffset, sourceStartAt);
+            localClockRef.current = {
+              audioTime: audioCtx.currentTime, globalTime: now,
+              sourceStartAt, sourceOffset, sourceGlobalTime,
+            };
+          } catch (error) {
+            console.error("Could not start local stems.", error);
+            setLocalAudioError(error instanceof Error ? error.message : "Could not start local stems.");
+            isPlayingRef.current = false;
+            setIsPlayingFlow(false);
+            localClockRef.current = null;
+            return;
+          }
+        }
       }
       if (youtubeSyncMode) {
         syncYoutubeToTimeline(targetSectionIdx, jumpTime, youtubeSyncMode);
@@ -806,6 +904,16 @@ export default function SoloPracticeRoomPage() {
   }
 
   function executeLocalResetSequence() {
+    startRevisionRef.current++;
+    cancelFutureAudio();
+    if (clickTimeoutRef.current) {
+      clearTimeout(clickTimeoutRef.current);
+      clickTimeoutRef.current = null;
+    }
+    pendingQuantizedJumpRef.current = null;
+    queuedSectionIndexRef.current = null;
+    if (audioSourceRef.current === "local" && localStemsAvailable) multitrack.getEngine().stop();
+    localClockRef.current = null;
     localClickOffset.reset();
     isPlayingRef.current = false; setIsPlayingFlow(false); hasPlayedCueRef.current = false;
     pendingYoutubeStartRef.current = null;
@@ -839,11 +947,12 @@ export default function SoloPracticeRoomPage() {
       const song = playingSongRef.current || activeSongRef.current;
       const beat = (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
         (getGlobalTime() - (mdSectionStartTimeRef.current || getGlobalTime())) / (60000 / (song?.tempo || 75));
+      if (audioSourceRef.current === "local" && localStemsAvailable) multitrack.getEngine().pause();
       executeLocalResetSequence();
       setStoppedSoloPosition(beat);
     } else {
       if (sections.length === 0 || !activeSong) return;
-      executeStartSequence(isYoutubeSyncEnabled && !!youtubeVideoId);
+      executeStartSequence(audioSourceRef.current === "youtube" && isOnline && isYoutubeSyncEnabled && !!youtubeVideoId);
     }
   }
 
@@ -1134,6 +1243,9 @@ export default function SoloPracticeRoomPage() {
     setExplicitScrubBeat(beat);
     setTracksPlayheadBeat(beat);
     setShowSyncBack(false);
+    if (audioSourceRef.current === "local" && localStemsAvailable) {
+      multitrack.getEngine().seek(getYoutubeTimeForTimeline(beat, 0, song.tempo || 75, song.youtube_sync_offset_ms || 0));
+    }
   }
 
   const soloMidiScrubRef = useRef<{ beat: number; time: number } | null>(null);
@@ -1168,11 +1280,124 @@ export default function SoloPracticeRoomPage() {
     ytPlayerRef.current?.seekTo?.(0, true);
   }
 
+  function changeAudioSource(source: "youtube" | "local") {
+    if (source === audioSourceRef.current) return;
+    const song = activeSongRef.current;
+    const beat = song && isPlayingRef.current
+      ? (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
+        (getGlobalTime() - (mdSectionStartTimeRef.current || getGlobalTime())) / (60000 / (song.tempo || 75))
+      : explicitScrubBeat ?? (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0);
+    if (isPlayingRef.current || pendingYoutubeStartRef.current) executeLocalResetSequence();
+    else startRevisionRef.current++;
+    if (source === "local") ytPlayerRef.current?.pauseVideo?.();
+    audioSourceRef.current = source;
+    setAudioSource(source);
+    setLocalAudioError(null);
+    if (song) setStoppedSoloPosition(beat);
+  }
+
+  const applyEffectiveSource = useEffectEvent((source: AudioSourceMode) => changeAudioSource(source));
+  useEffect(() => {
+    let active = true;
+    try {
+      savedAudioSourceRef.current = getSavedAudioSource(realUserId);
+      applyEffectiveSource(resolveEffectiveAudioSource(savedAudioSourceRef.current, isOnline));
+    } catch (error) {
+      console.error("Could not read the audio source preference.", error);
+      setLocalAudioError("Could not read your saved audio source preference.");
+    }
+    if (realUserId && isOnline) {
+      void refreshSavedAudioSource(realUserId).then((source) => {
+        if (!active || !source) return;
+        savedAudioSourceRef.current = source;
+        applyEffectiveSource(resolveEffectiveAudioSource(source, isOnline));
+      }).catch((error: unknown) => {
+        if (!active) return;
+        console.error("Could not sync the audio source preference.", error);
+        setLocalAudioError("Could not sync your audio source preference.");
+      });
+    }
+    return () => { active = false; };
+  }, [realUserId, isOnline]);
+
+  const { clear: clearStems, loadWhilePaused } = multitrack;
+  const resetForSongChange = useEffectEvent(() => executeLocalResetSequence());
+  useEffect(() => {
+    const controller = new AbortController();
+    resetForSongChange();
+    clearStems();
+    setStoredStems([]);
+    if (!realUserId || !songId || activeSong?.id !== songId) {
+      setIsStemsLoading(false);
+      return () => controller.abort();
+    }
+    setIsStemsLoading(true);
+    void getSongAudioStems(realUserId, songId).then(async (stems) => {
+      if (controller.signal.aborted) return;
+      setStoredStems(stems);
+      if (stems.length && !await loadWhilePaused(stems.map((stem) => ({
+        id: stem.stemId, blob: stem.blob, sourceVersion: stem.updatedAt,
+      })), controller.signal) && !controller.signal.aborted) {
+        throw new Error("Local audio loading was interrupted.");
+      }
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      console.error("Could not load local stems.", error);
+      setLocalAudioError(error instanceof Error ? error.message : "Could not load local stems.");
+    }).finally(() => { if (!controller.signal.aborted) setIsStemsLoading(false); });
+    return () => { controller.abort(); };
+  }, [realUserId, songId, activeSong?.id, clearStems, loadWhilePaused]);
+
+  function selectAudioSource(source: AudioSourceMode) {
+    if (source === "youtube" && !isOnline) {
+      openNoConnectionModal("YouTube playback");
+      return;
+    }
+    if (!realUserId) {
+      setLocalAudioError("Sign in before saving an audio source preference.");
+      return;
+    }
+    savedAudioSourceRef.current = source;
+    changeAudioSource(resolveEffectiveAudioSource(source, isOnline));
+    void saveAudioSourcePreference(realUserId, source).catch((error: unknown) => {
+      console.error("Could not save the audio source preference.", error);
+      setLocalAudioError(error instanceof Error ? error.message : "Could not save the audio source preference.");
+    });
+  }
+
+  function updateStemMidi(slot: StemSlot, action: "vol" | "mute" | "solo", value?: number) {
+    if (audioSourceRef.current !== "local") return;
+    const candidates = groupStemSlots(storedStems)[slot];
+    if (candidates.length !== 1) return;
+    try {
+      const engine = multitrack.getEngine();
+      const stem = candidates[0];
+      const mix = engine.getStemMixes().find((item) => item.id === stem.stemId && item.sourceVersion === stem.updatedAt);
+      if (!mix) throw new Error(`${slot.toUpperCase()} is not loaded. Reopen Stage Mixer and reload stems.`);
+      if (action === "vol") {
+        if (typeof value !== "number") return;
+        engine.setStemMix(stem.stemId, { volume: Math.max(0, Math.min(1, value)) });
+      } else if (action === "mute") engine.setStemMix(stem.stemId, { muted: !mix.muted });
+      else engine.setStemMix(stem.stemId, { solo: !mix.solo });
+    } catch (error) {
+      console.error("Could not apply stem MIDI control.", error);
+      setLocalAudioError(error instanceof Error ? error.message : "Could not apply stem MIDI control.");
+    }
+  }
+
+  const stemMidiActions: ControlActions = {};
+  for (const group of STEM_MIDI_ACTION_GROUPS) {
+    stemMidiActions[group.vol] = (value) => updateStemMidi(group.slot, "vol", value);
+    stemMidiActions[group.mute] = () => updateStemMidi(group.slot, "mute");
+    stemMidiActions[group.solo] = () => updateStemMidi(group.slot, "solo");
+  }
+
   const soloStackAst = useMemo(() => activeSong ? [{
     trackId: activeSong.id, trackIndex: 0, title: activeSong.title, tempo: activeSong.tempo, displayKey: activeDisplayKey, ast: memoizedSongAstTree,
   }] : [], [activeSong, activeDisplayKey, memoizedSongAstTree]);
 
   const keyboardMidiControls = useKeyboardMidiControls(supabase, {
+    ...stemMidiActions,
     playStop: handleToggleFlowPlaybackState,
     stopAndReturn: stopSoloAtYoutubeStart,
     clickOffset: (delta) => {
@@ -1210,7 +1435,7 @@ export default function SoloPracticeRoomPage() {
     chordFormat: () => setChordFormat(chordFormat === "Key" ? "Numbers" : "Key"),
     lineSpacing: () => setLineSpacing(lineSpacing === 16 ? 24 : lineSpacing === 24 ? 32 : 16),
     lyricsSize: () => setLyricsFontSize(lyricsFontSize === 14 ? 16 : lyricsFontSize === 16 ? 20 : lyricsFontSize === 20 ? 24 : 14),
-    youtubeSync: () => setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled),
+    youtubeSync: () => isOnline ? setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled) : openNoConnectionModal("YouTube sync"),
     clickMute: () => setMixerMutes((current) => ({ ...current, click: !current.click })),
     clickSolo: () => setMixerSolos((current) => ({ ...current, click: !current.click })),
     guideMute: () => setMixerMutes((current) => ({ ...current, guide: !current.guide })),
@@ -1223,12 +1448,17 @@ export default function SoloPracticeRoomPage() {
   }, isPlayingFlow ? midiBeatLight : null, "solo", {
     isPlaying: isPlayingFlow, beat: tracksPlayheadBeat, tempo: activeSong?.tempo || 75,
     ...getTimelineMeter(activeSong?.section_timings),
-  });
+  }, audioSource);
 
   if (loading) return <PageSkeleton message="LOADING SONG..." variant="live" />;
 
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
+      <div className="relative z-50 flex items-center justify-center gap-2 bg-zinc-900 p-2 text-white">
+        <OfflineSongButton songId={songId} />
+        {!isOnline && <button type="button" onClick={() => openNoConnectionModal("YouTube")} className="rounded-lg bg-zinc-700 px-3 py-2 text-xs font-bold">YouTube unavailable offline</button>}
+      </div>
+      {localAudioError && <p role="alert" className="relative z-40 bg-red-900 px-3 py-2 text-sm text-white">{localAudioError}</p>}
       
       {/* ✅ EXACT MATCH: Passed props identically to page_4 to ensure internal UI/Scroll hooks function[cite: 5] */}
       {!isZenMode && (
@@ -1349,6 +1579,12 @@ export default function SoloPracticeRoomPage() {
       )}
 
       <SettingsModal
+        audioSource={audioSource} onAudioSourceChange={selectAudioSource} isOnline={isOnline} openNoConnectionModal={openNoConnectionModal}
+        multitrack={multitrack} songId={activeSong?.id} songTitle={activeSong?.title} userId={realUserId}
+        onStemsChanged={setStoredStems} isStemsLoading={isStemsLoading}
+        midiBindings={keyboardMidiControls.preferences.mappings} learningActionId={keyboardMidiControls.learningAction}
+        onStartMidiLearn={keyboardMidiControls.learnMidiAction} onClearMidiBinding={keyboardMidiControls.clearMidiMapping}
+        onApplySmcStemPreset={keyboardMidiControls.applySmcStemPreset} midiError={keyboardMidiControls.midiError}
         isSettingsModalOpen={isSettingsModalOpen} setIsSettingsModalOpen={setIsSettingsModalOpen} localPresenceUser={localPresenceUser} onlineUsers={[]} handleToggleMusicDirectorMode={() => {}}
         showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode} isTracksMode={isTracksMode} setIsTracksMode={setIsTracksMode}
         isZenMode={isZenMode} setIsZenMode={setIsZenMode} metronomeSoundType={metronomeSoundType} setMetronomeSoundType={setMetronomeSoundType}

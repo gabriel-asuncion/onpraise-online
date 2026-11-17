@@ -61,6 +61,34 @@ npm run dev
 
 Open http://localhost:3000 with your browser to see the result.
 
+### Sign-in and onboarding
+
+The root URL redirects to the dashboard. A restored Supabase session goes directly there when
+account setup is complete; signed-out users are sent to `/login`, and accounts needing setup
+are sent to `/onboarding`. A Google session alone does not replace a valid app session: users
+without one must sign in on the login page.
+
+Invitation links retain their root URL format and take precedence over the normal dashboard
+redirect. Invites and account-switch requests are preserved through Google sign-in and onboarding.
+Configure `/auth/callback` for each application origin in the Supabase OAuth redirect allowlist.
+
+### Preparing for offline use
+
+While connected, sign in, choose **Install App**, and wait for offline files to finish preparing.
+Chromium requires a second click to open its install prompt. On iOS, use Safari's Share menu and
+choose **Add to Home Screen**; embedded social-media browsers cannot install the app. Open the
+installed app online and use **Prepare Offline Files**, then download the songs and setlists you
+need. Safari and the installed app can have separate storage.
+
+Offline access requires a previously verified account snapshot. A matching locally stored
+Supabase session is used when available; if the session has expired or is unavailable while
+disconnected, the snapshot alone permits offline use. Offline data is stored on the device, can be evicted by the browser, and is
+cleared on sign-out. It is not a substitute for server-side authorization: account changes or
+revocation cannot be verified until connectivity returns. Test the exact songs, setlists, and
+hardware on the performance device before going on stage. Offline setlist playback is local to
+that device; live synchronization and YouTube require a connection. After a disconnection, reload
+the live page when online to rejoin live synchronization.
+
 ### Live and solo MIDI EQ
 
 In MIDI Setup, pair a controller and learn **EQ / Light Show Mode**, **Shuffle Light Show Preset**, and

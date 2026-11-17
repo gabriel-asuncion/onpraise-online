@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FeedbackScene } from "../../../../songs/[id]/edit/midiFeedback";
-import { createLightShowScene, LIGHT_SHOW_PRESETS, moveLightShowPreset, pickNextRandomPresetIndex, shouldShuffleLightShow } from "./lightShowPresets";
+import { createFrequencyScene, createLightShowScene, LIGHT_SHOW_PRESETS, moveLightShowPreset, pickNextRandomPresetIndex, shouldShuffleLightShow } from "./lightShowPresets";
 
 export interface LightShowPlayback {
   isPlaying: boolean;
@@ -8,6 +8,7 @@ export interface LightShowPlayback {
   tempo: number;
   quarterBeatsPerMeasure: number;
   unitQuarterBeats: number;
+  getFrequencyBands?: () => number[] | null;
 }
 
 export function useLightShow(enabled: boolean, playback: LightShowPlayback, onFrame: (scene: FeedbackScene) => void) {
@@ -64,7 +65,8 @@ export function useLightShow(enabled: boolean, playback: LightShowPlayback, onFr
       previousPlaying = current.isPlaying;
       const beatInMeasure = Math.floor(((beat % measureLength) + measureLength) % measureLength / unit);
       const phase = ((beat / unit % 1) + 1) % 1;
-      frameRef.current(createLightShowScene(LIGHT_SHOW_PRESETS[indexRef.current], step++, phase, beatInMeasure));
+      const bands = current.isPlaying ? current.getFrequencyBands?.() : null;
+      frameRef.current(bands ? createFrequencyScene(bands) : createLightShowScene(LIGHT_SHOW_PRESETS[indexRef.current], step++, phase, beatInMeasure));
     };
     tick();
     const timer = window.setInterval(tick, 35);

@@ -6,6 +6,9 @@ import { createClient } from "../../utils/supabase/client";
 import { useEngine } from "../context/EngineContext";
 import { getAllSongs } from "../../utils/supabase/actions";
 import PageSkeleton from '../../components/PageSkeleton';
+import OfflineSongButton from "../../components/OfflineSongButton";
+import { captureOfflineGeneration, getOfflineSongs, getSongIndex, saveSongIndex } from "../../lib/offline-db";
+import { useOnlineStatus } from "../context/NetworkContext";
 
 import { getSongContentType, SongContentType } from "../setlists/[id]/live/utils/setlist-helpers";
 import {
@@ -77,7 +80,17 @@ export default function SongsListPage() {
 
   const scrollContainerRef = useRef<HTMLElement>(null);
   
-  const { simulatedUserId, activeRole, userTeamId } = useEngine();
+  const { simulatedUserId, realUserId, activeRole, userTeamId } = useEngine();
+  const { isOnline, openNoConnectionModal } = useOnlineStatus();
+  const [offlineSongIds, setOfflineSongIds] = useState<string[]>([]);
+  const [offlineLoadError, setOfflineLoadError] = useState("");
+
+  useEffect(() => {
+    if (!isOnline && new URLSearchParams(window.location.search).has("offline_edit")) {
+      openNoConnectionModal("Editing an arrangement");
+      window.history.replaceState(window.history.state, "", "/songs");
+    }
+  }, [isOnline, openNoConnectionModal]);
   const canEditLibrary = ["admin", "moderator", "musician"].includes(activeRole);
   const canApproveSongs = ["admin", "moderator"].includes(activeRole);
 
@@ -196,6 +209,7 @@ export default function SongsListPage() {
   };
 
   const openSongImport = () => {
+    if (!isOnline) { openNoConnectionModal("Creating a song"); return; }
     resetSongImport();
     setIsAddModalOpen(true);
   };
@@ -232,10 +246,23 @@ export default function SongsListPage() {
   const userSubmittedSongsCount = allDatabaseSongs.filter(song => song.created_by === simulatedUserId).length;
 
   const loadSongsData = async () => {
+    const generation = captureOfflineGeneration();
     setLoading(true);
     try {
+      if (!realUserId) return;
+      const downloads = await getOfflineSongs(realUserId);
+      setOfflineSongIds(downloads.map((song) => song.id));
+      if (!isOnline) {
+        const index = await getSongIndex(realUserId);
+        const indexedIds = new Set(index.map((song) => song.id));
+        setAllDatabaseSongs([...index, ...downloads.filter((song) => !indexedIds.has(song.id))]);
+        setOfflineLoadError("");
+        return;
+      }
       const songs = await getAllSongs();
       setAllDatabaseSongs(songs || []);
+      await saveSongIndex(songs.map((song) => ({ ...song, ownerId: realUserId })), generation);
+      setOfflineLoadError("");
 
       // Cross-Reference Matrix for Song Usage Footer
       let evtsQuery = supabase.from("events").select("id, title, event_date");
@@ -306,7 +333,7 @@ export default function SongsListPage() {
       setSongUsageData(usageMap);
     } catch (e) {
       console.error("Failed to load songs assets:", e);
-      setAllDatabaseSongs([]);
+      setOfflineLoadError("Could not load the song library. Check your connection or offline storage and try again.");
     } finally {
       setLoading(false);
     }
@@ -324,10 +351,36 @@ export default function SongsListPage() {
     syncActiveUserBookmarksMatrix();
   }, [simulatedUserId]);
 
-  useEffect(() => { void loadSongsData(); }, [userTeamId]);
+  useEffect(() => { void loadSongsData(); }, [userTeamId, realUserId, isOnline]);
+
+  useEffect(() => {
+    if (!realUserId) return;
+    const refresh = () => {
+      void getOfflineSongs(realUserId).then((songs) => setOfflineSongIds(songs.map((song) => song.id)))
+        .catch((error: unknown) => { console.error("Could not load offline song status.", error); setOfflineLoadError("Could not read offline storage."); });
+    };
+    window.addEventListener("onpraise-offline-data", refresh);
+    return () => window.removeEventListener("onpraise-offline-data", refresh);
+  }, [realUserId]);
+
+  const openSong = (id: string) => {
+    if (!isOnline && !offlineSongIds.includes(id)) {
+      openNoConnectionModal("This song");
+    } else if (!isOnline) {
+      window.location.assign(`/songs/${encodeURIComponent(id)}`);
+    } else {
+      router.push(`/songs/${id}`);
+    }
+  };
+
+  const editSong = (id: string) => {
+    if (!isOnline) openNoConnectionModal("Editing an arrangement");
+    else router.push(`/songs/${id}/edit`);
+  };
 
   const handleToggleBookmark = async (e: React.MouseEvent, songId: string) => {
     e.stopPropagation();
+    if (!isOnline) { openNoConnectionModal("Updating bookmarks"); return; }
     if (!simulatedUserId || simulatedUserId === "00000000-0000-0000-0000-000000000000") return;
     const alreadyBookmarked = bookmarkedSongIds.includes(songId);
     const updatedBookmarks = alreadyBookmarked ? bookmarkedSongIds.filter(id => id !== songId) : [...bookmarkedSongIds, songId];
@@ -347,6 +400,7 @@ export default function SongsListPage() {
 
   // ✅ FULLY RESTORED: Working YouTube Search Logic (Identical to Deployed Code + Safety Fallback)
   const handleSearchYouTube = async (e?: React.FormEvent | React.MouseEvent | React.KeyboardEvent) => {
+    if (!isOnline) { e?.preventDefault(); openNoConnectionModal("Searching YouTube"); return; }
     if (e) e.preventDefault();
     if (!ytSearchQuery.trim()) return;
     
@@ -379,6 +433,7 @@ export default function SongsListPage() {
 
   const handleProcessYoutubeLink = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isOnline) { openNoConnectionModal("Checking a YouTube video"); return; }
     if (!ytUrlInput.trim() || importInspectionInFlight.current) return;
     const generation = importGenerationRef.current;
     const controller = new AbortController();
@@ -442,6 +497,7 @@ export default function SongsListPage() {
   };
 
   const continueToSongEditor = () => {
+    if (!isOnline) { openNoConnectionModal("Creating a song"); return; }
     if (!importVideo || !importTitle.trim() || !importArtist.trim()) return;
     try {
       sessionStorage.removeItem("onpraise_song_import_lyrics");
@@ -593,7 +649,7 @@ export default function SongsListPage() {
     }
 
     return true;
-  });
+  }).sort((a, b) => !isOnline ? Number(offlineSongIds.includes(b.id)) - Number(offlineSongIds.includes(a.id)) : 0);
 
   if (loading) {
     return <PageSkeleton message="LOADING SONGS LIBRARY..." variant="song-library" />;
@@ -601,6 +657,7 @@ export default function SongsListPage() {
 
   return (
   <div className="h-[100dvh] w-full overflow-hidden flex flex-col relative bg-surface font-sans text-on-surface">
+    {offlineLoadError && <p role="alert" className="bg-red-950 p-3 text-center text-sm text-red-200">{offlineLoadError}</p>}
 
     {/* ========================================= */}
     {/* 1. TOP NAV & QUICK FILTERS                */}
@@ -613,7 +670,8 @@ export default function SongsListPage() {
           {canEditLibrary && (
             <button 
               onClick={openSongImport}
-              className="w-10 h-10 rounded-full bg-primary-container text-on-primary flex items-center justify-center shadow-lg active:scale-95 transition-transform cursor-pointer border border-primary/20"
+              aria-disabled={!isOnline}
+              className={`w-10 h-10 rounded-full bg-primary-container text-on-primary flex items-center justify-center shadow-lg active:scale-95 transition-transform cursor-pointer border border-primary/20 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <span className="material-symbols-outlined text-[24px]">add</span>
             </button>
@@ -810,7 +868,7 @@ export default function SongsListPage() {
           return (
             <article 
               key={song.id} 
-              className="relative overflow-hidden z-0 bg-surface-container-low rounded-2xl p-4 shadow-sm flex flex-col h-full transition-all duration-200 border border-outline-variant/30 hover:border-outline-variant/50"
+              className={`relative overflow-hidden z-0 bg-surface-container-low rounded-2xl p-4 shadow-sm flex flex-col h-full transition-all duration-200 border border-outline-variant/30 hover:border-outline-variant/50 ${!isOnline && !offlineSongIds.includes(song.id) ? "opacity-50" : ""}`}
             >
               {/* YouTube Background Overlay */}
               {ytId && (
@@ -830,6 +888,7 @@ export default function SongsListPage() {
 
               {/* Badges Row */}
               <div className="flex flex-wrap items-center gap-1.5 mb-4 pr-8 relative z-10">
+                {offlineSongIds.includes(song.id) && <span className="rounded-full bg-emerald-500/15 px-2 py-1 text-[9px] font-bold text-emerald-400">Offline Ready</span>}
                 {song.visibility_scope === "global" && (
                   <span className="h-5 inline-flex items-center gap-1 rounded-full border border-secondary/30 bg-secondary/10 px-2 text-[8px] font-black uppercase tracking-widest text-secondary">
                     <span className="material-symbols-outlined leading-none" style={{ fontSize: "11px" }}>public</span>
@@ -860,6 +919,7 @@ export default function SongsListPage() {
                    </span>
                 )}
               </div>
+              <OfflineSongButton songId={song.id} />
 
               {/* Title & Artist Row */}
               <div className="flex flex-col mb-4 relative z-10 pr-8">
@@ -895,15 +955,16 @@ export default function SongsListPage() {
                     <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
                       {canEditThisSong && (
                         <button 
-                          onClick={() => router.push(`/songs/${song.id}/edit`)}
-                          className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold hover:bg-surface-bright flex items-center justify-center gap-1 cursor-pointer border border-outline-variant/30 shadow-sm shrink-0 transition-colors active:scale-95"
+                          onClick={() => editSong(song.id)}
+                          aria-disabled={!isOnline}
+                          className={`h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold hover:bg-surface-bright flex items-center justify-center gap-1 cursor-pointer border border-outline-variant/30 shadow-sm shrink-0 transition-colors active:scale-95 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                         >
                           <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>edit</span>
                           <span className="hidden sm:inline">Edit</span>
                         </button>
                       )}
                       <button 
-                        onClick={() => setPendingWarningSongId(song.id)} // ✅ Intercept click with Warning Modal
+                        onClick={() => !isOnline && !offlineSongIds.includes(song.id) ? openNoConnectionModal("This song") : setPendingWarningSongId(song.id)}
                         className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-colors flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_music</span>
@@ -934,15 +995,16 @@ export default function SongsListPage() {
                     <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
                       {canEditThisSong && (
                         <button 
-                          onClick={() => router.push(`/songs/${song.id}/edit`)}
-                          className="h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold active:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm flex items-center justify-center gap-1 shrink-0"
+                          onClick={() => editSong(song.id)}
+                          aria-disabled={!isOnline}
+                          className={`h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold active:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm flex items-center justify-center gap-1 shrink-0 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                         >
                           <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>edit</span>
                           <span className="hidden sm:inline">Edit</span>
                         </button>
                       )}
                       <button 
-                        onClick={() => router.push(`/songs/${song.id}`)}
+                        onClick={() => openSong(song.id)}
                         className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-transform flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_music</span>
@@ -999,7 +1061,7 @@ export default function SongsListPage() {
             </button>
             <button 
               type="button" 
-              onClick={() => router.push(`/songs/${pendingWarningSongId}`)} 
+              onClick={() => pendingWarningSongId && openSong(pendingWarningSongId)}
               className="py-3 bg-primary hover:bg-primary/90 text-on-primary text-[11px] font-black uppercase tracking-wider rounded-xl shadow-md transition-all active:scale-95 cursor-pointer border border-primary/20"
             >
               Proceed
@@ -1064,8 +1126,9 @@ export default function SongsListPage() {
                 <button
                   type="button"
                   onClick={handleSearchYouTube}
-                  disabled={isSearchingYt || !ytSearchQuery.trim()}
-                  className="bg-surface-container-high hover:bg-surface-bright disabled:opacity-50 text-on-surface px-4 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-sm transition-colors shrink-0 border border-outline-variant/30 cursor-pointer"
+                  disabled={isOnline && (isSearchingYt || !ytSearchQuery.trim())}
+                  aria-disabled={!isOnline || isSearchingYt || !ytSearchQuery.trim()}
+                  className={`bg-surface-container-high hover:bg-surface-bright disabled:opacity-50 text-on-surface px-4 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-sm transition-colors shrink-0 border border-outline-variant/30 cursor-pointer ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                 >
                   {isSearchingYt ? "..." : "Search"}
                 </button>
@@ -1134,8 +1197,9 @@ export default function SongsListPage() {
 
               <button
                 type="submit"
-                disabled={!ytUrlInput.trim() || ytLoading}
-                className="w-full mt-2 bg-primary hover:bg-primary/90 disabled:bg-surface-container-highest disabled:text-on-surface-variant text-on-primary px-4 py-3.5 rounded-xl text-[12px] font-black uppercase tracking-widest shadow-md transition-colors active:scale-[0.98] cursor-pointer border border-primary/20 flex items-center justify-center gap-2"
+                disabled={isOnline && (!ytUrlInput.trim() || ytLoading)}
+                aria-disabled={!isOnline || !ytUrlInput.trim() || ytLoading}
+                className={`w-full mt-2 bg-primary hover:bg-primary/90 disabled:bg-surface-container-highest disabled:text-on-surface-variant text-on-primary px-4 py-3.5 rounded-xl text-[12px] font-black uppercase tracking-widest shadow-md transition-colors active:scale-[0.98] cursor-pointer border border-primary/20 flex items-center justify-center gap-2 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 <span className="material-symbols-outlined !text-[18px]">{ytLoading ? "hourglass_empty" : "auto_awesome"}</span>
                 {ytLoading ? "CHECKING VIDEO..." : "REVIEW VIDEO"}
@@ -1153,11 +1217,13 @@ export default function SongsListPage() {
             <button 
               type="button" 
               onClick={() => {
+                if (!isOnline) { openNoConnectionModal("Creating a song"); return; }
                 sessionStorage.removeItem("onpraise_song_import_lyrics");
                 setIsAddModalOpen(false);
                 router.push("/songs/new/edit");
               }}
-              className="w-full py-4 bg-surface-container-high border border-outline-variant/30 hover:bg-surface-bright hover:border-outline-variant/50 rounded-2xl text-on-surface text-[14px] font-bold shadow-sm transition-all flex items-center justify-between px-6 cursor-pointer active:scale-[0.99]"
+              aria-disabled={!isOnline}
+              className={`w-full py-4 bg-surface-container-high border border-outline-variant/30 hover:bg-surface-bright hover:border-outline-variant/50 rounded-2xl text-on-surface text-[14px] font-bold shadow-sm transition-all flex items-center justify-between px-6 cursor-pointer active:scale-[0.99] ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <div className="flex flex-col items-start gap-0.5">
                 <span className="font-extrabold tracking-tight">Manual Entry</span>
@@ -1227,7 +1293,7 @@ export default function SongsListPage() {
                   </div>
                   <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
                     <button type="button" onClick={() => setImportStep("url")} className="rounded-xl border border-outline-variant/40 px-4 py-3 text-sm font-bold text-on-surface">Back</button>
-                    <button type="button" onClick={continueToSongEditor} className="rounded-xl bg-primary px-5 py-3 text-sm font-black text-on-primary disabled:opacity-50" disabled={!importTitle.trim() || !importArtist.trim()}>
+                    <button type="button" onClick={continueToSongEditor} aria-disabled={!isOnline || !importTitle.trim() || !importArtist.trim()} className={`rounded-xl bg-primary px-5 py-3 text-sm font-black text-on-primary disabled:opacity-50 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`} disabled={isOnline && (!importTitle.trim() || !importArtist.trim())}>
                       Continue to song editor
                     </button>
                   </div>

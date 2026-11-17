@@ -6,6 +6,7 @@ import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
 import { extractYouTubeVideoId } from "../../../../lib/youtube-import";
 import { useEngine } from "../../../context/EngineContext";
+import { useOnlineStatus } from "../../../context/NetworkContext";
 import { getSongChordChart } from "../../../../utils/supabase/actions";
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
 import { getYoutubeTimeForTimeline } from "../../../setlists/[id]/live/utils/timeline";
@@ -339,6 +340,25 @@ const ChordWheelOverlay = ({ config, deck, onSelect, onCancel }: { config: any, 
 
 
 export default function SongEditPage() {
+  const { isOnline, isNetworkReady, openNoConnectionModal } = useOnlineStatus();
+  const params = useParams();
+  useEffect(() => {
+    if (isNetworkReady && !isOnline) openNoConnectionModal("Editing an arrangement");
+  }, [isNetworkReady, isOnline, openNoConnectionModal]);
+  if (!isNetworkReady) return <div className="flex h-full items-center justify-center">Checking connection...</div>;
+  if (!isOnline) {
+    const id = typeof params.id === "string" && params.id !== "new" ? params.id : null;
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+        <p>Editing requires an internet connection.</p>
+        <button type="button" className="rounded-xl bg-primary px-4 py-3 font-bold text-on-primary" onClick={() => window.location.assign(id ? `/songs/${encodeURIComponent(id)}` : "/songs")}>Back to songs</button>
+      </div>
+    );
+  }
+  return <SongEditContent />;
+}
+
+function SongEditContent() {
   const supabase = createClient();
   const router = useRouter();
   const params = useParams();
@@ -2182,11 +2202,12 @@ function formatTimeWithMs(seconds: number) {
     return null;
   };
 
-  const handlePlayFromSyncPoint = () => {
+  const handlePlayFromSyncPoint = (overrideOffsetMs?: number) => {
     initAudioContext();
+    const targetOffsetMs = typeof overrideOffsetMs === "number" ? overrideOffsetMs : formYoutubeSyncOffset;
     if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
       ytPlayerRef.current.seekTo(
-        getYoutubeTimeForTimeline(0, 0, parseInt(formTempo, 10) || 75, formYoutubeSyncOffset),
+        getYoutubeTimeForTimeline(0, 0, parseInt(formTempo, 10) || 75, targetOffsetMs),
         true
       );
       ytPlayerRef.current.playVideo();
@@ -4128,7 +4149,7 @@ function formatTimeWithMs(seconds: number) {
 
       {/* FULL-BLEED WORKSPACE CANVAS */}
       <div 
-        className={`flex-1 min-w-0 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full pb-[64px] ${youtubeVideoId ? 'pb-[80px]' : ''}`}
+        className={`flex-1 min-w-0 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full pb-[64px] ${youtubeVideoId ? 'md:pb-[56px]' : ''}`}
         onScroll={handleCanvasScroll}
       >
         {editorActiveTab === "details" && (
@@ -6345,64 +6366,117 @@ function formatTimeWithMs(seconds: number) {
           {/* DESKTOP FIXED BOTTOM BAR                  */}
           {/* ========================================= */}
           {!isMobile && (
-            <div className="fixed bottom-0 left-0 right-0 h-[80px] bg-[#18181A] border-t border-zinc-800/80 z-[200000] flex items-center justify-between px-6 gap-6 shadow-[0_-8px_30px_rgba(0,0,0,0.5)] animate-in slide-in-from-bottom-full duration-300 select-none">
+            <div className="fixed bottom-0 left-0 right-0 h-[52px] bg-[#16181d] border-t border-white/10 z-[200000] flex items-center justify-between pl-4 pr-16 gap-4 shadow-[0_-6px_24px_rgba(0,0,0,0.45)] animate-in slide-in-from-bottom-full duration-200 select-none">
               
-              {/* LEFT: Thumbnail & Info */}
-              <div className="flex items-center gap-4 w-1/3 min-w-[200px]">
-                <div className="w-12 h-12 rounded-md bg-surface-container flex items-center justify-center shrink-0 overflow-hidden shadow-sm border border-outline-variant/20">
+              {/* LEFT: Compact Track Pill & Utility Icons */}
+              <div className="flex items-center gap-2.5 w-1/3 min-w-[180px]">
+                <div className="w-8 h-8 rounded bg-surface-container flex items-center justify-center shrink-0 overflow-hidden border border-white/10">
                   <img src={`https://img.youtube.com/vi/${youtubeVideoId}/default.jpg`} alt="thumbnail" className="w-full h-full object-cover opacity-90" />
                 </div>
-                <div className="flex flex-col min-w-0 pr-2">
-                  <h2 className="font-extrabold text-[14px] text-white truncate tracking-tight leading-tight">
+                <div className="flex flex-col min-w-0">
+                  <h2 className="font-extrabold text-[12px] text-zinc-100 truncate tracking-tight leading-none">
                     {formTitle || "Unknown Track"}
                   </h2>
-                  <span className="text-[11px] font-semibold text-zinc-400 truncate mt-0.5">
+                  <span className="text-[10px] font-medium text-zinc-400 truncate mt-0.5 leading-none">
                     {formArtist || "Unknown Artist"}
                   </span>
                 </div>
-                <button type="button" aria-label="Song chapters" onClick={() => setIsTimelineChaptersOpen(true)} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-zinc-300 hover:bg-white/10">
-                  <span className="material-symbols-outlined">format_list_numbered</span>
+                <div className="h-5 w-px bg-white/10 mx-1 shrink-0" />
+                <button
+                  type="button"
+                  aria-label="Song chapters"
+                  title="Song chapters"
+                  onClick={() => setIsTimelineChaptersOpen(true)}
+                  className="flex flex-col items-center justify-center h-9 px-2 rounded-md text-zinc-300 hover:bg-white/10 hover:text-white transition-colors shrink-0 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined !text-[17px] leading-none">format_list_numbered</span>
+                  <span className="text-[7px] font-black uppercase tracking-widest text-zinc-400 mt-0.5 leading-none">Sections</span>
                 </button>
               </div>
 
-              {/* CENTER: Playback Controls */}
-              <div className="flex items-center justify-center gap-4 sm:gap-6 w-1/3 min-w-[300px]">
-                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
-                  <span className="material-symbols-outlined text-[24px]">replay_10</span>
+              {/* CENTER: FL Studio Mobile–Style DAW Transport */}
+              <div className="flex items-center justify-center gap-3 w-1/3 min-w-[260px]">
+                <button
+                  type="button"
+                  title="Rewind to start"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setYtCurrentTime(0);
+                    ytPlayerRef.current?.seekTo?.(0, true);
+                  }}
+                  className="flex flex-col items-center justify-center h-9 px-2 rounded-md text-zinc-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer active:scale-90"
+                >
+                  <span className="material-symbols-outlined !text-[18px] leading-none">skip_previous</span>
+                  <span className="text-[7px] font-black uppercase tracking-widest text-zinc-400 mt-0.5 leading-none">Rewind</span>
                 </button>
-                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.max(0, ytCurrentTime - 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
-                  <span className="material-symbols-outlined text-[24px]">replay_5</span>
+
+                <button
+                  type="button"
+                  title="Back 5s"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (ytPlayerRef.current) {
+                      const t = Math.max(0, ytCurrentTime - 5);
+                      setYtCurrentTime(t);
+                      ytPlayerRef.current.seekTo(t, true);
+                    }
+                  }}
+                  className="flex items-center justify-center h-8 w-8 rounded-md text-zinc-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer active:scale-90"
+                >
+                  <span className="material-symbols-outlined !text-[19px]">replay_5</span>
                 </button>
 
                 <button 
                   type="button"
-                  className="w-12 h-12 bg-white text-[#ffffff] rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.15)] active:scale-95 transition-transform cursor-pointer outline-none shrink-0"
+                  aria-label={ytPlaying ? "Pause" : "Play"}
+                  className={`w-9 h-9 rounded-full border flex items-center justify-center transition-all active:scale-95 cursor-pointer outline-none shrink-0 ${
+                    ytPlaying
+                      ? "border-sky-400 bg-sky-500/20 text-sky-300 shadow-[0_0_14px_rgba(56,189,248,0.28)]"
+                      : "border-white/75 bg-white/10 text-white hover:bg-white/20"
+                  }`}
                   onClick={(e) => {
                     e.stopPropagation();
                     handleTogglePlayback();
-                    initAudioContext();
-                    if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-                    if (ytPlaying) ytPlayerRef.current.pauseVideo();
-                    else ytPlayerRef.current.playVideo();
                   }}
                 >
                   {ytPlaying ? (
-                    <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+                    <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
                   ) : (
-                    <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white ml-1"><path d="M8 5v14l11-7z" /></svg>
+                    <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current ml-0.5"><path d="M8 5v14l11-7z" /></svg>
                   )}
                 </button>
 
-                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 5); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
-                  <span className="material-symbols-outlined text-[24px]">forward_5</span>
+                <button
+                  type="button"
+                  title="Forward 5s"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (ytPlayerRef.current) {
+                      const t = Math.min(ytDuration, ytCurrentTime + 5);
+                      setYtCurrentTime(t);
+                      ytPlayerRef.current.seekTo(t, true);
+                    }
+                  }}
+                  className="flex items-center justify-center h-8 w-8 rounded-md text-zinc-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer active:scale-90"
+                >
+                  <span className="material-symbols-outlined !text-[19px]">forward_5</span>
                 </button>
-                <button type="button" onClick={(e) => { e.stopPropagation(); if (ytPlayerRef.current) { const t = Math.min(ytDuration, ytCurrentTime + 10); setYtCurrentTime(t); ytPlayerRef.current.seekTo(t, true); } }} className="text-zinc-400 hover:text-white transition-colors cursor-pointer active:scale-90">
-                  <span className="material-symbols-outlined text-[24px]">forward_10</span>
+
+                <div className="h-5 w-px bg-white/10 mx-0.5 shrink-0" />
+
+                <button
+                  type="button"
+                  title="Tap Tempo"
+                  onClick={() => { setTapTimestamps([]); setIsTapBpmModalOpen(true); }}
+                  className="flex flex-col items-center justify-center h-9 px-2 rounded-md text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <span className="font-mono text-[12px] font-black leading-none">{formTempo || "75"}</span>
+                  <span className="text-[7px] font-black uppercase tracking-widest text-zinc-400 mt-0.5 leading-none">BPM</span>
                 </button>
               </div>
 
-              {/* RIGHT: Scrubber & Time */}
-              <div className="flex items-center gap-3 w-1/3 justify-end min-w-[200px]">
+              {/* RIGHT: Compact Scrubber & Time */}
+              <div className="flex items-center gap-2.5 w-1/3 justify-end min-w-[190px]">
                 <span className="text-[10px] font-mono font-bold text-zinc-400 shrink-0 w-8 text-right">{formatTime(ytCurrentTime)}</span>
                 <input 
                   type="range" 
@@ -6413,10 +6487,10 @@ function formatTimeWithMs(seconds: number) {
                     setYtCurrentTime(t);
                     if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === 'function') ytPlayerRef.current.seekTo(t, true);
                   }}
-                  className="w-full max-w-[250px] h-1.5 bg-zinc-700 rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all"
+                  className="w-full max-w-[200px] h-1 bg-zinc-700 rounded-full appearance-none outline-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:scale-125 transition-all"
                   style={{ background: `linear-gradient(to right, #38BDF8 ${ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0}%, #333336 ${ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0}%)` }}
                 />
-                <span className="text-[10px] font-mono font-bold text-zinc-400 shrink-0 w-8">-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
+                <span className="text-[10px] font-mono font-bold text-zinc-400 shrink-0 w-9">-{formatTime(Math.max(0, ytDuration - ytCurrentTime))}</span>
               </div>
             </div>
           )}

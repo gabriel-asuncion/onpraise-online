@@ -1,10 +1,14 @@
 import React from "react";
 import { AppRouterInstance } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import { SongRecord } from "../types/setlist";
+import { useOnlineStatus } from "../../../../context/NetworkContext";
 
 // ✅ Import the Mixer Component
 import { VolumeMixerModal } from "./VolumeMixerModal";
 import { MidiSetupModal, MidiSetupModalProps } from "./MidiSetupModal";
+import type { useMultitrackEngine } from "../../../../../hooks/useMultitrackEngine";
+import type { ControlActionId, MidiControlMapping } from "../hooks/useKeyboardMidiControls";
+import type { StoredAudioStem } from "../../../../../lib/offline-audio";
 
 interface LivePresenceUser {
   id: string;
@@ -13,6 +17,22 @@ interface LivePresenceUser {
 }
 
 interface SettingsModalProps {
+  audioSource?: "youtube" | "local";
+  onAudioSourceChange?: (next: "youtube" | "local") => void;
+  isOnline?: boolean;
+  openNoConnectionModal?: (featureName?: string) => void;
+  multitrack?: ReturnType<typeof useMultitrackEngine>;
+  songId?: string;
+  songTitle?: string;
+  userId?: string | null;
+  midiBindings?: Partial<Record<ControlActionId, MidiControlMapping>>;
+  learningActionId?: ControlActionId | null;
+  onStartMidiLearn?: (actionId: ControlActionId) => void;
+  onClearMidiBinding?: (actionId: ControlActionId) => void;
+  onApplySmcStemPreset?: () => void;
+  onStemsChanged?: (stems: StoredAudioStem[]) => void;
+  isStemsLoading?: boolean;
+  midiError?: string | null;
   isSettingsModalOpen: boolean;
   setIsSettingsModalOpen: (val: boolean) => void;
   localPresenceUser: LivePresenceUser | null;
@@ -73,6 +93,9 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal(props: SettingsModalProps) {
+  const network = useOnlineStatus();
+  const isOnline = props.isOnline ?? network.isOnline;
+  const openNoConnectionModal = props.openNoConnectionModal ?? network.openNoConnectionModal;
   const [elapsedStr, setElapsedStr] = React.useState("00:00:00");
   const [isMixerOpen, setIsMixerOpen] = React.useState(false);
   const [isMidiSetupOpen, setIsMidiSetupOpen] = React.useState(false);
@@ -243,6 +266,13 @@ export function SettingsModal(props: SettingsModalProps) {
                 </div>
                 <span className="material-symbols-outlined text-[18px] text-on-surface-variant">chevron_right</span>
               </button>
+              {props.onAudioSourceChange && <div className="grid grid-cols-2 gap-1 rounded-lg border border-outline-variant/20 bg-surface-container p-1" role="group" aria-label="Audio source">
+                <button type="button" aria-pressed={(props.audioSource ?? "youtube") === "youtube"} aria-disabled={!isOnline}
+                  className={`rounded-md py-2 text-xs ${props.audioSource !== "local" ? btnActive : btnInactive} ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
+                  onClick={() => isOnline ? props.onAudioSourceChange?.("youtube") : openNoConnectionModal("YouTube playback")}>YouTube</button>
+                <button type="button" aria-pressed={props.audioSource === "local"} className={`rounded-md py-2 text-xs ${props.audioSource === "local" ? btnActive : btnInactive}`}
+                  onClick={() => props.onAudioSourceChange?.("local")}>Local / Stems</button>
+              </div>}
             </div>
           </div>
 
@@ -354,8 +384,9 @@ export function SettingsModal(props: SettingsModalProps) {
                     </div>
                   </div>
                   <button 
-                    disabled={!isMDActive}
-                    onClick={() => setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled)} 
+                    disabled={isOnline && !isMDActive}
+                    aria-disabled={!isOnline || !isMDActive}
+                    onClick={() => !isOnline ? openNoConnectionModal("YouTube sync") : setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled)}
                     className={`relative inline-flex h-7 w-12 items-center rounded-full p-0.5 transition-colors focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isYoutubeSyncEnabled ? 'bg-[#2563eb]' : 'bg-surface-container-highest'}`} 
                     type="button"
                   >
@@ -421,7 +452,7 @@ export function SettingsModal(props: SettingsModalProps) {
             <div className="bg-surface-container border border-outline-variant/20 rounded-xl overflow-hidden shadow-sm divide-y divide-outline-variant/10">
               
               {canEditSong && activeSong && (
-                <button type="button" disabled={isPlayingFlow} onClick={() => { triggerClose(); router.push(`/songs/${activeSong.id}/edit`); }} className="w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer">
+                <button type="button" disabled={isOnline && isPlayingFlow} aria-disabled={!isOnline || isPlayingFlow} onClick={() => { if (!isOnline) { openNoConnectionModal("Editing an arrangement"); return; } triggerClose(); router.push(`/songs/${activeSong.id}/edit`); }} className={`w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}>
                   <div className="flex items-center gap-3">
                     <span className="material-symbols-outlined text-[20px] text-primary">edit_document</span>
                     <span className="text-[13px] font-bold text-on-surface">Edit Song</span>
@@ -436,7 +467,7 @@ export function SettingsModal(props: SettingsModalProps) {
                 </div>
                 <span className="material-symbols-outlined text-[18px] text-outline">chevron_right</span>
               </button>
-              <button id="open-structure-editor" disabled={isPlayingFlow} onClick={() => { triggerClose(); setIsStructureModalOpen(true); }} className="w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer">
+              <button id="open-structure-editor" disabled={isOnline && isPlayingFlow} aria-disabled={!isOnline || isPlayingFlow} onClick={() => { if (!isOnline) { openNoConnectionModal("Editing a setlist arrangement"); return; } triggerClose(); setIsStructureModalOpen(true); }} className={`w-full py-4 px-4 flex justify-between items-center hover:bg-surface-container-high transition-colors disabled:opacity-40 cursor-pointer ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}>
                 <div className="flex items-center gap-3">
                   <span className="material-symbols-outlined text-[20px] text-primary">view_stream</span>
                   <span className="text-[13px] font-bold text-on-surface">Edit Structure</span>
@@ -459,6 +490,19 @@ export function SettingsModal(props: SettingsModalProps) {
 
       <VolumeMixerModal
         isOpen={isMixerOpen} 
+        audioSource={props.audioSource}
+        multitrack={props.multitrack}
+        songId={props.songId}
+        songTitle={props.songTitle}
+        userId={props.userId}
+        midiBindings={props.midiBindings}
+        learningActionId={props.learningActionId}
+        onStartMidiLearn={props.onStartMidiLearn}
+        onClearMidiBinding={props.onClearMidiBinding}
+        onApplySmcStemPreset={props.onApplySmcStemPreset}
+        onStemsChanged={props.onStemsChanged}
+        isStemsLoading={props.isStemsLoading}
+        midiError={props.midiError}
         onClose={() => setIsMixerOpen(false)}
         localClickVolume={localClickVolume} 
         setLocalClickVolume={setLocalClickVolume}

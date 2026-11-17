@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
-export function useLivePresence(supabase: any, simulatedUserId: string, simulatedRole: string) {
+export function useLivePresence(supabase: any, simulatedUserId: string, simulatedRole: string, localMode = false) {
   const [onlineUsers, setOnlineUsers] = useState<any[]>([]);
   const [localPresenceUser, setLocalPresenceUser] = useState<any | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -17,6 +17,24 @@ export function useLivePresence(supabase: any, simulatedUserId: string, simulate
   useEffect(() => {
     async function fetchCurrentPresenceIdentity() {
       let targetUserId = null;
+      if (localMode) {
+        if (!simulatedUserId || simulatedUserId === "00000000-0000-0000-0000-000000000000") return;
+        const identity = {
+          id: simulatedUserId,
+          connectionId: `local-${simulatedUserId}`,
+          authoritySessionId: crypto.randomUUID(),
+          name: "You",
+          initials: "Y",
+          bg: "bg-blue-600",
+          avatar: null,
+          isMD: true,
+        };
+        localPresenceUserRef.current = identity;
+        setLocalPresenceUser(identity);
+        setOnlineUsers([]);
+        setIsAdmin(false);
+        return;
+      }
       const { data: { user } } = await supabase.auth.getUser();
       
       if (user) {
@@ -58,7 +76,7 @@ export function useLivePresence(supabase: any, simulatedUserId: string, simulate
       }
     }
     fetchCurrentPresenceIdentity();
-  }, [simulatedUserId, simulatedRole, supabase]);
+  }, [simulatedUserId, simulatedRole, supabase, localMode]);
 
   useEffect(() => {
     const killPresence = () => {

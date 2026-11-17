@@ -1,4 +1,6 @@
 import { createClient } from "./client";
+import { clearOfflineData } from "../../lib/offline-db";
+import { clearAuthSnapshot } from "../../lib/offline-auth";
 
 // ==========================================
 // --- USER & AUTH PROFILE ACTIONS ---
@@ -88,6 +90,8 @@ export async function updateUserAvailability(id: string, unavailableDates: strin
  */
 export async function logOutUser() {
   const supabase = createClient();
+  clearAuthSnapshot();
+  await clearOfflineData();
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
 }

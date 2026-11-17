@@ -11,10 +11,17 @@ export function matchesPairedMidiMapping(
 }
 
 export function isMidiActionAllowedInEq(eqActive: boolean, actionId: string): boolean {
-  return !eqActive || [
+  return !eqActive || /^STEM_(DRUMS|BASS|KEYS|OTHER|GUITAR|VOCALS)_(VOL|MUTE|SOLO)$/.test(actionId) || [
     "toggleEqMode", "cycleLightShowPreset", "jogScrub", "clickOffset",
     "clickVolume", "guideVolume", "youtubeVolume", "transpose", "timelineZoom", "clickSound",
   ].includes(actionId);
+}
+
+export function getMidiFaderValue(messageType: string, data: Uint8Array): number | null {
+  if (data.length < 3) return null;
+  if (messageType === "pitchbend") return (((data[2] & 127) << 7) | (data[1] & 127)) / 16383;
+  if (messageType === "cc" || messageType === "note") return (data[2] & 127) / 127;
+  return null;
 }
 
 export function adjustLocalClickOffset(currentMs: number, delta: number): number {

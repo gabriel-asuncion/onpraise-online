@@ -1,7 +1,9 @@
 import { EngineProvider } from "./context/EngineContext";
+import { NetworkProvider } from "./context/NetworkContext";
 import ClientLayoutWrapper from "../components/ClientLayoutWrapper"; 
 import { SetlistInviteProvider } from "../components/SetlistInviteProvider";
 import "./globals.css";
+import "material-symbols/outlined.css";
 import type { Metadata, Viewport } from "next";
 import Script from 'next/script';
 import { Analytics } from "@vercel/analytics/next";
@@ -28,7 +30,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className="dark" suppressHydrationWarning>
       <head>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
-        <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet" />
 
         <Script
           id="pwa-install-prompt-capture"
@@ -89,6 +90,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }} 
         />
 
+        <NetworkProvider>
         <EngineProvider>
           <SetlistInviteProvider>
             <ClientLayoutWrapper>
@@ -98,6 +100,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </ClientLayoutWrapper>
           </SetlistInviteProvider>
         </EngineProvider>
+        </NetworkProvider>
       </body>
     </html>
   );

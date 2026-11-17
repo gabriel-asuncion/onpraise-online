@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
+import { useOnlineStatus } from "../../context/NetworkContext";
 import PageSkeleton from "../../../components/PageSkeleton";
 import { getSongContentType, SongContentType } from "../../setlists/[id]/live/utils/setlist-helpers";
 
@@ -49,6 +50,7 @@ export default function ApprovalsDashboardPage() {
   const supabase = createClient();
   const router = useRouter();
   const { activeRole } = useEngine();
+  const { isOnline, openNoConnectionModal } = useOnlineStatus();
 
   const [loading, setLoading] = useState(true);
   const [pendingSongs, setPendingSongs] = useState<PendingSong[]>([]);
@@ -89,6 +91,7 @@ export default function ApprovalsDashboardPage() {
 
   // ✅ The Approval Engine
   const handleApprove = async (id: string) => {
+    if (!isOnline) { openNoConnectionModal("Approving a song"); return; }
     setProcessingId(id);
     
     // Optimistic UI Update: Remove from list instantly
@@ -109,6 +112,7 @@ export default function ApprovalsDashboardPage() {
   // ✅ SURGICAL FIX: The Rejection & Feedback Engine (Replaces the old Delete engine)
   const handleRejectSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isOnline) { openNoConnectionModal("Rejecting a song"); return; }
     const { songId, feedback } = feedbackModal;
     
     if (!feedback.trim()) {
@@ -248,8 +252,8 @@ export default function ApprovalsDashboardPage() {
                     
                     {/* ✅ SURGICAL FIX: Left: Reject & Feedback Action */}
                     <button 
-                      onClick={() => setFeedbackModal({ isOpen: true, songId: song.id, songTitle: song.title, feedback: "" })} 
-                      className="h-7 px-2.5 rounded-md bg-rose-500/10 text-rose-500 text-[10px] font-bold hover:bg-rose-500/20 flex items-center justify-center gap-1 cursor-pointer border border-rose-500/30 shadow-sm shrink-0 transition-colors active:scale-95"
+                      onClick={() => isOnline ? setFeedbackModal({ isOpen: true, songId: song.id, songTitle: song.title, feedback: "" }) : openNoConnectionModal("Rejecting a song")} aria-disabled={!isOnline}
+                      className={`h-7 px-2.5 rounded-md bg-rose-500/10 text-rose-500 text-[10px] font-bold hover:bg-rose-500/20 flex items-center justify-center gap-1 cursor-pointer border border-rose-500/30 shadow-sm shrink-0 transition-colors active:scale-95 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                       title="Return with Feedback"
                     >
                       <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>rate_review</span>
@@ -259,8 +263,8 @@ export default function ApprovalsDashboardPage() {
                     {/* Right: Operational Actions */}
                     <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
                       <button 
-                        onClick={() => router.push(`/songs/${song.id}/edit`)} 
-                        className="h-7 px-2.5 rounded-md bg-[#202022] text-zinc-300 hover:bg-[#2C2C2E] text-[10px] font-bold transition-colors cursor-pointer border border-zinc-700 shadow-sm flex items-center justify-center gap-1 shrink-0 active:scale-95"
+                        onClick={() => isOnline ? router.push(`/songs/${song.id}/edit`) : openNoConnectionModal("Editing a song")} aria-disabled={!isOnline}
+                        className={`h-7 px-2.5 rounded-md bg-[#202022] text-zinc-300 hover:bg-[#2C2C2E] text-[10px] font-bold transition-colors cursor-pointer border border-zinc-700 shadow-sm flex items-center justify-center gap-1 shrink-0 active:scale-95 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                         title="Edit Song"
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>edit</span>
@@ -275,8 +279,8 @@ export default function ApprovalsDashboardPage() {
                         <span className="hidden lg:inline">View</span>
                       </button>
                       <button 
-                        onClick={() => handleApprove(song.id)} 
-                        className="h-7 px-2.5 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold shadow-sm active:scale-95 transition-all flex items-center justify-center gap-1 cursor-pointer shrink-0"
+                        onClick={() => handleApprove(song.id)} aria-disabled={!isOnline}
+                        className={`h-7 px-2.5 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold shadow-sm active:scale-95 transition-all flex items-center justify-center gap-1 cursor-pointer shrink-0 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>check_circle</span>
                         <span>Approve</span>
@@ -335,7 +339,9 @@ export default function ApprovalsDashboardPage() {
               </button>
               <button 
                 type="submit"
-                className="flex-1 py-3 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 rounded-xl font-black text-[11px] uppercase tracking-widest shadow-sm border border-rose-500/30 cursor-pointer transition-colors"
+                aria-disabled={!isOnline}
+                onClick={(event) => { if (!isOnline) { event.preventDefault(); openNoConnectionModal("Rejecting a song"); } }}
+                className={`flex-1 py-3 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 rounded-xl font-black text-[11px] uppercase tracking-widest shadow-sm border border-rose-500/30 cursor-pointer transition-colors ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 Send Feedback
               </button>

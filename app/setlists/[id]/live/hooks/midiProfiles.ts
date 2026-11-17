@@ -1,3 +1,32 @@
+export const STEM_MIDI_ACTION_GROUPS = [
+  { slot: "drums", label: "Drums", vol: "STEM_DRUMS_VOL", mute: "STEM_DRUMS_MUTE", solo: "STEM_DRUMS_SOLO" },
+  { slot: "bass", label: "Bass", vol: "STEM_BASS_VOL", mute: "STEM_BASS_MUTE", solo: "STEM_BASS_SOLO" },
+  { slot: "keys", label: "Keys", vol: "STEM_KEYS_VOL", mute: "STEM_KEYS_MUTE", solo: "STEM_KEYS_SOLO" },
+  { slot: "other", label: "Other", vol: "STEM_OTHER_VOL", mute: "STEM_OTHER_MUTE", solo: "STEM_OTHER_SOLO" },
+  { slot: "guitars", label: "Guitar", vol: "STEM_GUITAR_VOL", mute: "STEM_GUITAR_MUTE", solo: "STEM_GUITAR_SOLO" },
+  { slot: "vocals", label: "Vocals", vol: "STEM_VOCALS_VOL", mute: "STEM_VOCALS_MUTE", solo: "STEM_VOCALS_SOLO" },
+] as const;
+
+export type StemMidiActionId = typeof STEM_MIDI_ACTION_GROUPS[number]["vol" | "mute" | "solo"];
+
+export interface StemMidiBindingTemplate {
+  messageType: "pitchbend" | "note";
+  channel: number;
+  number: number;
+}
+
+// Attach the paired device ID and name before adding these templates to a profile.
+export function buildSmcStrips3To8StemBindings(): Partial<Record<StemMidiActionId, StemMidiBindingTemplate>> {
+  const bindings: Partial<Record<StemMidiActionId, StemMidiBindingTemplate>> = {};
+  STEM_MIDI_ACTION_GROUPS.forEach((group, index) => {
+    const channel = index + 2;
+    bindings[group.vol] = { messageType: "pitchbend", channel, number: channel };
+    bindings[group.mute] = { messageType: "note", channel: 0, number: index + 18 };
+    bindings[group.solo] = { messageType: "note", channel: 0, number: index + 10 };
+  });
+  return bindings;
+}
+
 export interface MidiControllerProfile {
   id: string;
   name: string;

@@ -7,7 +7,9 @@ import { createClient } from "../../utils/supabase/client";
 import { useEngine } from "../context/EngineContext";
 import PageSkeleton from '../../components/PageSkeleton';
 import { resolveAccountLandingDecision } from "../../lib/account-routing";
-import { normalizeJoinCode } from "../../lib/invitations";
+import { getInvitationPath, normalizeJoinCode } from "../../lib/invitations";
+import { getOfflineAuthSnapshot, isNetworkFailure } from "../../lib/offline-auth";
+import { useOnlineStatus } from "../context/NetworkContext";
 
 // Helper to extract YouTube ID
 function extractYouTubeID(url: string) {
@@ -84,10 +86,12 @@ const FALLBACK_VERSES = [
 export default function DashboardPage() {
   const supabase = createClient();
   const router = useRouter();
+  const { reportConnectionFailure } = useOnlineStatus();
   
   const { simulatedRole, simulatedUserId, userTeamId } = useEngine();
 
   const [loading, setLoading] = useState(true);
+  const [accountError, setAccountError] = useState("");
   const hasRedirectedRef = useRef(false);
   const [eventsList, setEventsList] = useState<EventItem[]>([]);
   const [allocationsList, setAllocationsList] = useState<TeamMemberAllocation[]>([]);
@@ -244,15 +248,40 @@ export default function DashboardPage() {
   };
 
   async function loadDashboardMetrics() {
+    let accountVerified = false;
     try {
+      if (!navigator.onLine) {
+        const snapshot = await getOfflineAuthSnapshot(supabase);
+        hasRedirectedRef.current = true;
+        router.replace(snapshot?.setupComplete ? "/songs" : "/login");
+        return;
+      }
       const { data: authData, error: authError } = await supabase.auth.getUser();
 
-      if (authError) throw authError;
+      if (authError && authError.name !== "AuthSessionMissingError") throw authError;
       if (!authData?.user) {
         if (!hasRedirectedRef.current) {
           hasRedirectedRef.current = true;
-          router.replace("/");
+          const loginUrl = new URL("/login", window.location.origin);
+          const invite = new URLSearchParams(window.location.search).get("invite") ||
+            localStorage.getItem("onpraise_pending_invite");
+          if (invite) loginUrl.searchParams.set("invite", invite);
+          router.replace(`${loginUrl.pathname}${loginUrl.search}`);
         }
+        return;
+      }
+
+      const rawInvite = new URLSearchParams(window.location.search).get("invite");
+      const invite = rawInvite ? normalizeJoinCode(rawInvite) : normalizeJoinCode(localStorage.getItem("onpraise_pending_invite"));
+      if (rawInvite && !invite) {
+        hasRedirectedRef.current = true;
+        router.replace(`/login?invite=${encodeURIComponent(rawInvite)}`);
+        return;
+      }
+      if (invite) {
+        localStorage.setItem("onpraise_pending_invite", invite);
+        hasRedirectedRef.current = true;
+        router.replace(getInvitationPath(invite));
         return;
       }
 
@@ -285,6 +314,8 @@ export default function DashboardPage() {
         return; 
       }
 
+      accountVerified = true;
+      setAccountError("");
       const profile = accountDecision.profile;
       const activeProfileData = profile;
 
@@ -415,8 +446,18 @@ export default function DashboardPage() {
 
     } catch (err) {
       console.error("Dashboard metrics pipeline fault:", err);
+      if (!accountVerified && isNetworkFailure(err)) {
+        reportConnectionFailure();
+        const snapshot = await getOfflineAuthSnapshot(supabase);
+        hasRedirectedRef.current = true;
+        router.replace(snapshot?.setupComplete ? "/songs" : "/login");
+        return;
+      }
+      if (!accountVerified) {
+        setAccountError("We couldn't verify your account. Check your connection and try again.");
+      }
     } finally {
-      setLoading(false);
+      if (!hasRedirectedRef.current) setLoading(false);
     }
   }
 
@@ -574,6 +615,14 @@ export default function DashboardPage() {
   const seekPercentage = ytDuration > 0 ? (ytCurrentTime / ytDuration) * 100 : 0;
 
   if (loading) return <PageSkeleton message="LOADING DASHBOARD..." variant="dashboard" />;
+  if (accountError) return (
+    <div role="alert" className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+      <p className="text-sm font-bold text-on-surface">{accountError}</p>
+      <button onClick={() => { setAccountError(""); setLoading(true); void loadDashboardMetrics(); }} className="rounded-xl bg-primary px-5 py-3 text-sm font-bold text-on-primary">
+        Try again
+      </button>
+    </div>
+  );
 
   return (
     <div className="bg-surface text-on-surface font-body-lead text-body-lead flex flex-col h-full w-full overflow-hidden">

@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import { SongRecord, SetlistTrackItem, ArrangementSection } from "../types/setlist";
 import { createClient } from "../../../../../utils/supabase/client";
 import { loadSongSectionsBySongId } from "../utils/load-song-sections";
+import { getOfflineSetlist } from "../../../../../lib/offline-db";
+import { useEngine } from "../../../../context/EngineContext";
 
 type SetlistSongRow = {
   id: string;
@@ -14,7 +16,8 @@ type SetlistSongRow = {
 
 type SetlistLoadState = "loading" | "ready" | "empty" | "error";
 
-export function useSetlistData(setlistId: string, supabase: ReturnType<typeof createClient>) {
+export function useSetlistData(setlistId: string, supabase: ReturnType<typeof createClient>, localMode = false) {
+  const { realUserId } = useEngine();
   const [loadState, setLoadState] = useState<SetlistLoadState>("loading");
   const [retryCount, setRetryCount] = useState(0);
   const [loadedSetlistId, setLoadedSetlistId] = useState<string | null>(null);
@@ -70,6 +73,31 @@ export function useSetlistData(setlistId: string, supabase: ReturnType<typeof cr
       }
 
       try {
+        if (!realUserId) return;
+        if (localMode) {
+          const cached = await getOfflineSetlist(setlistId, realUserId);
+          if (!isCurrentActiveMount) return;
+          setLoadedSetlistId(setlistId);
+          if (!cached || !cached.tracks.length) {
+            setLoadingStatus("This setlist has not been downloaded for offline use.");
+            setLoadState("error");
+            return;
+          }
+          const first = cached.tracks[0];
+          setNewSetlistName(cached.name);
+          setSetlistEventName(cached.eventName);
+          setSetlistTeamId(cached.teamId);
+          setSetlistTrackTitles(cached.tracks.flatMap((track) => track.songs?.title ? [track.songs.title] : []));
+          setTracksList(cached.tracks);
+          tracksListRef.current = cached.tracks;
+          setActiveSong(first.songs);
+          activeSongRef.current = first.songs;
+          setActiveDisplayKey(first.custom_key || first.songs?.original_key || "G");
+          setSections(first.custom_structure || []);
+          sectionsRef.current = first.custom_structure || [];
+          setLoadState("ready");
+          return;
+        }
         const { data: setlistRow } = await supabase.from("setlists").select("name, event_id").eq("id", setlistId).maybeSingle();
         if (!isCurrentActiveMount) return;
         if (setlistRow?.name) setNewSetlistName(setlistRow.name);
@@ -205,7 +233,7 @@ export function useSetlistData(setlistId: string, supabase: ReturnType<typeof cr
 
     initializeEnvironment();
     return () => { isCurrentActiveMount = false; };
-  }, [setlistId, retryCount, supabase]);
+  }, [setlistId, retryCount, supabase, realUserId, localMode]);
 
   // ✅ SURGICAL FIX: Return the newly mounted sections directly so the caller doesn't have to wait for React state!
   const mountTargetSetlistTrackIndex = (trackIndex: number) => {

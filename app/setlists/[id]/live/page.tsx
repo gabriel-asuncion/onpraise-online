@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import PageSkeleton from '../../../../components/PageSkeleton';
+import OfflineSetlistButton from "../../../../components/OfflineSetlistButton";
+import { useOnlineStatus } from "../../../context/NetworkContext";
 import { useTimesync } from '../../../../hooks/useTimesync';
 
 import { CompiledSectionToken, CompiledBeatMap, ArrangementSection, SongRecord, ParsedLineToken, ParsedWordToken } from "./types/setlist";
@@ -28,6 +30,11 @@ import { useLocalPreferences } from "./hooks/useLocalPreferences";
 import { useSetlistData } from "./hooks/useSetlistData";
 import { useLivePresence } from "./hooks/useLivePresence";
 import { useYouTubeSync } from "./hooks/useYouTubeSync";
+import { getSavedAudioSource, refreshSavedAudioSource, resolveEffectiveAudioSource, saveAudioSourcePreference, type AudioSourceMode } from "../../../../lib/audio-source-preference";
+import { useMultitrackEngine } from "../../../../hooks/useMultitrackEngine";
+import { getSongAudioStems, type StoredAudioStem } from "../../../../lib/offline-audio";
+import { groupStemSlots, type StemSlot } from "../../../../lib/stem-slots";
+import { STEM_MIDI_ACTION_GROUPS } from "./hooks/midiProfiles";
 import { useHardwareClock } from "./hooks/useHardwareClock";
 import { useKeyboardMidiControls } from "./hooks/useKeyboardMidiControls";
 import { useLocalClickOffset } from "./hooks/useLocalClickOffset";
@@ -150,11 +157,17 @@ export default function SetlistPerformanceRoomPage() {
   const router = useRouter();
   const params = useParams();
   const setlistId = params?.id as string;
+  const { isOnline, openNoConnectionModal } = useOnlineStatus();
+  const [retainedLocalMode, setRetainedLocalMode] = useState(false);
+  const localMode = !isOnline || retainedLocalMode;
+  useEffect(() => {
+    if (!isOnline) setRetainedLocalMode(true);
+  }, [isOnline]);
 
   const { simulatedUserId, simulatedRole, activeRole, userTeamId } = useEngine(); // ✅ Added activeRole
   const { isSynced, getGlobalTime } = useTimesync();
   const isSyncedRef = useRef(isSynced);
-  isSyncedRef.current = isSynced;
+  isSyncedRef.current = isSynced || localMode;
 
 
   // ✅ SURGICAL FIX: Calculates if the current user hierarchy can edit the song
@@ -164,6 +177,40 @@ export default function SetlistPerformanceRoomPage() {
 
   // ✅ SURGICAL FIX: Bring back fetchAndDecodeAudio
   const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
+  const getLocalAudioContext = useCallback(() => {
+    initAudioContext();
+    return getAudioContext();
+  }, [getAudioContext, initAudioContext]);
+
+  const multitrack = useMultitrackEngine(getLocalAudioContext);
+  const [audioSource, setAudioSource] = useState<"youtube" | "local">("youtube");
+  const [storedStems, setStoredStems] = useState<StoredAudioStem[]>([]);
+  const [isStemsLoading, setIsStemsLoading] = useState(false);
+  const localStemsAvailable = multitrack.durationSeconds > 0;
+  const savedAudioSourceRef = useRef<AudioSourceMode>("youtube");
+  const audioSourceRef = useRef<"youtube" | "local">("youtube");
+  const localClockRef = useRef<{
+    audioTime: number; globalTime: number;
+    sourceStartAt?: number; sourceOffset?: number; sourceGlobalTime?: number;
+  } | null>(null);
+
+  const getPlaybackTime = useCallback(() => {
+    const anchor = localClockRef.current;
+    const context = getAudioContext();
+    if (!anchor || !context || audioSourceRef.current !== "local") return getGlobalTime();
+    if (
+      anchor.sourceStartAt !== undefined &&
+      anchor.sourceOffset !== undefined &&
+      anchor.sourceGlobalTime !== undefined &&
+      context.currentTime >= anchor.sourceStartAt
+    ) {
+      const engine = multitrack.getEngine();
+      if (engine.isPlaying) {
+        return anchor.sourceGlobalTime + (engine.currentTimeSeconds - anchor.sourceOffset) * 1000;
+      }
+    }
+    return anchor.globalTime + (context.currentTime - anchor.audioTime) * 1000;
+  }, [getAudioContext, getGlobalTime, multitrack]);
 
   const {
     lyricsFontSize, setLyricsFontSize, showChords, setShowChords, chordFormat, setChordFormat,
@@ -193,7 +240,7 @@ export default function SetlistPerformanceRoomPage() {
     sections, setSections, sectionsRef,
     activeDisplayKey, setActiveDisplayKey,
     mountTargetSetlistTrackIndex
-  } = useSetlistData(setlistId, supabase);
+  } = useSetlistData(setlistId, supabase, localMode);
 
   // ============================================================================
   // ✅ SURGICAL FIX: RESTORED AUDIO PRELOADERS
@@ -226,7 +273,84 @@ export default function SetlistPerformanceRoomPage() {
   const {
     onlineUsers, setOnlineUsers, localPresenceUser, setLocalPresenceUser, localPresenceUserRef,
     isAdmin, isChannelSubscribedRef, realtimeChannelRef, handleToggleMusicDirectorMode
-  } = useLivePresence(supabase, simulatedUserId, simulatedRole);
+  } = useLivePresence(supabase, simulatedUserId, simulatedRole, localMode);
+
+  useEffect(() => {
+    if (localMode) {
+      setIsYoutubeSyncEnabled(false);
+      if (isPlayingRef.current) executeLocalResetSequence();
+    }
+  }, [localMode, setIsYoutubeSyncEnabled]);
+
+  function changeAudioSource(source: "youtube" | "local") {
+    if (source === audioSourceRef.current) return;
+    const song = activeSongRef.current;
+    const beat = song && isPlayingRef.current
+      ? (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
+        (getGlobalTime() - (mdSectionStartTimeRef.current || getGlobalTime())) / (60000 / (song.tempo || 75))
+      : stoppedBeatRef.current ?? (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0);
+    if (isPlayingRef.current || pendingYoutubeStartRef.current) executeLocalResetSequence();
+    else playbackCommandRevisionRef.current++;
+    if (source === "local") ytPlayerRef.current?.pauseVideo?.();
+    audioSourceRef.current = source;
+    setAudioSource(source);
+    if (song) setStoppedLivePosition(beat);
+  }
+
+  useEffect(() => {
+    let active = true;
+    try {
+      savedAudioSourceRef.current = getSavedAudioSource(simulatedUserId);
+      changeAudioSource(resolveEffectiveAudioSource(savedAudioSourceRef.current, !localMode));
+    } catch (error) {
+      console.error("Could not read audio source preference.", error);
+    }
+    if (simulatedUserId && !localMode) {
+      void refreshSavedAudioSource(simulatedUserId).then((source) => {
+        if (!active || !source) return;
+        savedAudioSourceRef.current = source;
+        changeAudioSource(resolveEffectiveAudioSource(source, true));
+      }).catch((e) => console.error("Could not sync audio source preference.", e));
+    }
+    return () => { active = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simulatedUserId, localMode]);
+
+  const { clear: clearStems, loadWhilePaused } = multitrack;
+  useEffect(() => {
+    const controller = new AbortController();
+    executeLocalResetSequence();
+    clearStems();
+    setStoredStems([]);
+    if (!simulatedUserId || !activeSong?.id) {
+      setIsStemsLoading(false);
+      return () => controller.abort();
+    }
+    setIsStemsLoading(true);
+    void getSongAudioStems(simulatedUserId, activeSong.id).then(async (stems) => {
+      if (controller.signal.aborted) return;
+      setStoredStems(stems);
+      if (stems.length && !await loadWhilePaused(stems.map((stem) => ({
+        id: stem.stemId, blob: stem.blob, sourceVersion: stem.updatedAt,
+      })), controller.signal) && !controller.signal.aborted) {
+        throw new Error("Local audio loading was interrupted.");
+      }
+    }).catch((e) => {
+      if (!controller.signal.aborted) console.error("Could not load local stems.", e);
+    }).finally(() => { if (!controller.signal.aborted) setIsStemsLoading(false); });
+    return () => { controller.abort(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simulatedUserId, activeSong?.id, clearStems, loadWhilePaused]);
+
+  function selectAudioSource(source: AudioSourceMode) {
+    if (source === "youtube" && localMode) {
+      openNoConnectionModal("YouTube playback");
+      return;
+    }
+    savedAudioSourceRef.current = source;
+    changeAudioSource(resolveEffectiveAudioSource(source, !localMode));
+    if (simulatedUserId) void saveAudioSourcePreference(simulatedUserId, source).catch(console.error);
+  }
 
   const [audioLatencyOffsetMs, setAudioLatencyOffsetMs] = useState<number>(0);
   const localClickOffset = useLocalClickOffset();
@@ -721,6 +845,7 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   async function startPlaybackTelemetry() {
+    if (localMode) return;
     if (!localPresenceUserRef.current?.isMD || playbackTelemetrySessionRef.current) return;
 
     const startedAt = getGlobalTime();
@@ -791,7 +916,7 @@ export default function SetlistPerformanceRoomPage() {
 
   // ✅ SURGICAL ADDITION: Dedicated Postgres Listener for Telemetry
   useEffect(() => {
-    if (!setlistId) return;
+    if (!setlistId || localMode) return;
     let isCurrent = true;
 
     setIsRecording(false);
@@ -847,7 +972,7 @@ export default function SetlistPerformanceRoomPage() {
       if (playbackTelemetrySessionRef.current?.setlistId === setlistId) void stopPlaybackTelemetryRef.current();
       void supabase.removeChannel(telemetryChannel);
     };
-  }, [setlistId]);
+  }, [setlistId, localMode]);
 
   const updateMetronomeUI = (activeBeat: number, isPlaying: boolean, measureLength: number = 4, absoluteBeat?: number) => {
     // ✅ SURGICAL FIX: Directly calculate negative sub-beats to perfectly glide through pre-rolls without snapping to 0
@@ -908,6 +1033,7 @@ export default function SetlistPerformanceRoomPage() {
 
   const hasCurrentPlaybackAuthority = () => {
     const user = localPresenceUserRef.current;
+    if (localMode) return Boolean(user?.isMD);
     const authority = playbackAuthorityRef.current;
     return Boolean(
       user?.isMD &&
@@ -1460,12 +1586,17 @@ export default function SetlistPerformanceRoomPage() {
 
     void audioReady.then(() => {
       if (playbackCommandRevisionRef.current !== commandRevision) return;
+      if (audioSourceRef.current === "local") {
+        const context = getAudioContext();
+        if (context) localClockRef.current = { audioTime: context.currentTime, globalTime: getGlobalTime() };
+      }
+      const localLeadMs = audioSourceRef.current === "local" ? 30 : 0;
       if (exactScrubBeat !== null && activeSongRef.current) {
         const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
         const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
-        startTimestamp = getGlobalTime() - ((exactScrubBeat - sectionStartBeat) * beatDurationMs);
+        startTimestamp = getGlobalTime() + localLeadMs - ((exactScrubBeat - sectionStartBeat) * beatDurationMs);
       } else {
-        startTimestamp = getGlobalTime();
+        startTimestamp = getGlobalTime() + localLeadMs;
       }
       completeLiveStart(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, false, exactScrubBeat);
     }).catch((error) => {
@@ -1690,7 +1821,7 @@ export default function SetlistPerformanceRoomPage() {
   } = useYouTubeSync({
     activeSong,
     youtubeVolumeRef,
-    isYoutubeSyncEnabled,
+    isYoutubeSyncEnabled: isYoutubeSyncEnabled && audioSource === "youtube" && !localMode,
     onPlaybackStarted: (currentTimeSeconds, videoId) =>
       youtubePlaybackStartedHandlerRef.current(currentTimeSeconds, videoId),
     onPlaybackError: () => youtubePlaybackErrorHandlerRef.current()
@@ -1787,7 +1918,7 @@ export default function SetlistPerformanceRoomPage() {
     queuedSectionIndexRef, queuedTrackIndexRef,
     isDoubleMetronomeEnabledRef, metronomeSpeedRef: clickSpeedRef, metronomePatternRef: clickPatternRef,
     onMidiBeat: setMidiBeatLight, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
-    pendingQuantizedJumpRef, getGlobalTime,
+    pendingQuantizedJumpRef, getGlobalTime: getPlaybackTime,
     playGuideCue, getAudioContext, audioContextStartTimeRef,
     pendingAudioClockCorrectionRef,
 
@@ -1836,7 +1967,7 @@ export default function SetlistPerformanceRoomPage() {
   }, [loading, roomChannelGeneration, localPresenceUser?.connectionId, localPresenceUser?.isMD]);
 
   useEffect(() => {
-    if (!setlistId || !localPresenceUser?.connectionId) return;
+    if (localMode || !setlistId || !localPresenceUser?.connectionId) return;
     isChannelSubscribedRef.current = false;
 
     const lobbyChannel = supabase.channel(`setlist_lobby_${setlistId}`, {
@@ -1979,7 +2110,7 @@ export default function SetlistPerformanceRoomPage() {
       isChannelSubscribedRef.current = false;
       if (lobbyChannel) supabase.removeChannel(lobbyChannel);
     };
-  }, [setlistId, localPresenceUser?.connectionId]);
+  }, [setlistId, localPresenceUser?.connectionId, localMode]);
 
   function executeJumpNow(
     targetTrackIdx: number,
@@ -2017,6 +2148,26 @@ export default function SetlistPerformanceRoomPage() {
           const absoluteHardwareTimeAtJump = audioCtx.currentTime + (timeUntilJumpMs / 1000);
           const targetAbsoluteBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
           audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - (targetAbsoluteBeat * beatSpeedSecs);
+        }
+        if (audioSourceRef.current === "local" && localStemsAvailable && isPlayingRef.current && activeSongRef.current) {
+          cancelFutureAudio?.();
+          const song = activeSongRef.current;
+          const now = getGlobalTime();
+          const startAt = Math.max(audioCtx.currentTime + 0.03, audioCtx.currentTime + (jumpTime - now) / 1000);
+          const sectionStartBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
+          const elapsedMs = now + (startAt - audioCtx.currentTime) * 1000 - jumpTime;
+          const rawTime = (sectionStartBeat * beatSpeedSecs * 1000 + elapsedMs + (song.youtube_sync_offset_ms || 0)) / 1000;
+          try {
+            const sourceStartAt = startAt + Math.max(0, -rawTime);
+            const sourceOffset = Math.max(0, rawTime);
+            const sourceGlobalTime = now + (sourceStartAt - audioCtx.currentTime) * 1000;
+            multitrack.getEngine().play(sourceOffset, sourceStartAt);
+            localClockRef.current = { audioTime: audioCtx.currentTime, globalTime: now, sourceStartAt, sourceOffset, sourceGlobalTime };
+          } catch (e) {
+            console.error("Could not start local stems.", e);
+            isPlayingRef.current = false; setIsPlayingFlow(false); localClockRef.current = null;
+            return;
+          }
         }
       }
       if (youtubeSyncMode) {
@@ -2076,6 +2227,8 @@ export default function SetlistPerformanceRoomPage() {
       clearTimeout(autoAdvanceTimeoutRef.current);
       autoAdvanceTimeoutRef.current = null;
     }
+    if (audioSourceRef.current === "local" && localStemsAvailable) multitrack.getEngine().stop();
+    localClockRef.current = null;
     if (cancelFutureAudio) cancelFutureAudio();
     pendingAudioClockCorrectionRef.current = null;
     if (youtubeStartTimeoutRef.current) {
@@ -2112,6 +2265,10 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   async function persistStructure(workingBlocks: ArrangementSection[]) {
+    if (!isOnline) {
+      openNoConnectionModal("Saving a setlist arrangement");
+      return;
+    }
     const track = tracksListRef.current[currentTrackIndexRef.current];
     if (!track?.id) {
       setStructureSaveError("Could not save this structure because the setlist track is unavailable.");
@@ -2217,7 +2374,7 @@ export default function SetlistPerformanceRoomPage() {
       if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP", exactBeat: beat, trackIndex });
     } else {
       if (sections.length === 0 || !activeSong) return;
-      executeStartSequence(localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
+      executeStartSequence(audioSourceRef.current === "youtube" && !localMode && localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
     }
   }
 
@@ -2705,7 +2862,31 @@ export default function SetlistPerformanceRoomPage() {
     if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP", exactBeat: beat, trackIndex });
   }
 
+  function updateStemMidi(slot: StemSlot, action: "vol" | "mute" | "solo", value?: number) {
+    if (audioSourceRef.current !== "local") return;
+    const candidates = groupStemSlots(storedStems)[slot];
+    if (candidates.length !== 1) return;
+    try {
+      const engine = multitrack.getEngine();
+      const stem = candidates[0];
+      const mix = engine.getStemMixes().find((item) => item.id === stem.stemId && item.sourceVersion === stem.updatedAt);
+      if (!mix) return;
+      if (action === "vol") {
+        if (typeof value === "number") engine.setStemMix(stem.stemId, { volume: Math.max(0, Math.min(1, value)) });
+      } else if (action === "mute") engine.setStemMix(stem.stemId, { muted: !mix.muted });
+      else engine.setStemMix(stem.stemId, { solo: !mix.solo });
+    } catch (e) { console.error("Could not apply stem MIDI control.", e); }
+  }
+
+  const stemMidiActions: Record<string, (val?: number) => void> = {};
+  for (const group of STEM_MIDI_ACTION_GROUPS) {
+    stemMidiActions[group.vol] = (value) => updateStemMidi(group.slot, "vol", value);
+    stemMidiActions[group.mute] = () => updateStemMidi(group.slot, "mute");
+    stemMidiActions[group.solo] = () => updateStemMidi(group.slot, "solo");
+  }
+
   const keyboardMidiControls = useKeyboardMidiControls(supabase, {
+    ...stemMidiActions as any,
     playStop: handleToggleFlowPlaybackState,
     stopAndReturn: stopLiveAtYoutubeStart,
     previousSong: () => navigateLiveTrack(-1),
@@ -2770,13 +2951,30 @@ export default function SetlistPerformanceRoomPage() {
     youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
   }, isPlayingFlow ? midiBeatLight : null, "live", {
     isPlaying: isPlayingFlow, beat: tracksPlayheadBeat, tempo: activeSong?.tempo || 75,
-    ...getTimelineMeter(activeSong?.section_timings),
+    quarterBeatsPerMeasure: getTimelineMeter(activeSong?.section_timings).quarterBeatsPerMeasure,
+    unitQuarterBeats: getTimelineMeter(activeSong?.section_timings).unitQuarterBeats,
+    getFrequencyBands: () => {
+      try { return audioSourceRef.current === "local" && localStemsAvailable && multitrack.getEngine().isPlaying ? multitrack.getEngine().getFrequencyBands() : null; }
+      catch { return null; }
+    }
   });
 
   if (loading) return <PageSkeleton message="LOADING SETLIST..." variant="live" />;
+  if (loadState === "error" || loadState === "empty") return (
+    <div role="alert" className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+      <p>{loadingStatus}</p>
+      <button type="button" onClick={retryLoad} className="rounded-xl bg-primary px-4 py-3 text-on-primary">Try again</button>
+      <button type="button" onClick={() => window.location.assign("/songs")} className="rounded-xl bg-surface-container-high px-4 py-3">Back to songs</button>
+    </div>
+  );
 
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
+      <div className="relative z-50 flex items-center justify-center gap-2 bg-zinc-900 p-2 text-white">
+        <OfflineSetlistButton id={setlistId} name={setlistName} eventName={setlistEventName} teamId={setlistTeamId} tracks={tracksList} />
+        {localMode && <span role="status" className="text-xs font-bold">Local playback · Live sync unavailable{isOnline ? " — reload to reconnect" : ""}</span>}
+        {!isOnline && <button type="button" onClick={() => openNoConnectionModal("YouTube")} className="rounded-lg bg-zinc-700 px-3 py-2 text-xs font-bold">YouTube unavailable</button>}
+      </div>
 
       {/* ========================================================================= */}
       {/* ✅ HEADER: Outside the swipe canvas so it remains perfectly fixed */}
@@ -2937,6 +3135,12 @@ export default function SetlistPerformanceRoomPage() {
       )}
 
       <SettingsModal
+        audioSource={audioSource} onAudioSourceChange={selectAudioSource} isOnline={!localMode} openNoConnectionModal={openNoConnectionModal}
+        multitrack={multitrack} songId={activeSong?.id} songTitle={activeSong?.title} userId={simulatedUserId}
+        onStemsChanged={setStoredStems} isStemsLoading={isStemsLoading}
+        midiBindings={keyboardMidiControls.preferences.mappings} learningActionId={keyboardMidiControls.learningAction}
+        onStartMidiLearn={keyboardMidiControls.learnMidiAction} onClearMidiBinding={keyboardMidiControls.clearMidiMapping}
+        onApplySmcStemPreset={keyboardMidiControls.applySmcStemPreset} midiError={keyboardMidiControls.midiError}
         isSettingsModalOpen={isSettingsModalOpen} setIsSettingsModalOpen={setIsSettingsModalOpen} localPresenceUser={localPresenceUser} onlineUsers={onlineUsers} handleToggleMusicDirectorMode={handleTogglePlaybackAuthority}
         showChords={showChords} setShowChords={setShowChords} chordFormat={chordFormat} setChordFormat={setChordFormat} isSimplifiedMode={isSimplifiedMode} setIsSimplifiedMode={setIsSimplifiedMode} isTracksMode={isTracksMode} setIsTracksMode={setIsTracksMode}
         isZenMode={isZenMode} setIsZenMode={setIsZenMode}
@@ -3016,6 +3220,7 @@ export default function SetlistPerformanceRoomPage() {
         setIsAddBlockModalOpen={setIsAddBlockModalOpen}
         availableSectionNames={availableSongSections}
         handleModalAppendNewSectionItem={async (name) => {
+          if (!isOnline) { openNoConnectionModal("Saving a setlist arrangement"); return; }
           if (!activeSong || isSavingStructure) return;
           let sectionContent = sections.find((section) => section.section_name === name)?.content;
           if (!sectionContent?.trim()) {
@@ -3063,6 +3268,7 @@ export default function SetlistPerformanceRoomPage() {
           setTracksList(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, custom_key: formatted } : t));
           handleResetFlowTrigger();
 
+          if (!isOnline) return;
           // 2. ✅ SURGICAL FIX: Find the junction row using match()
           // activeSong.id is the UUID from the `songs` table.
           if (activeSong.id && setlistId) {
@@ -3091,6 +3297,7 @@ export default function SetlistPerformanceRoomPage() {
         saveError={telemetrySaveError}
         getGlobalTime={getGlobalTime}
         onStartRecording={async () => {
+          if (!isOnline) { openNoConnectionModal("Recording rehearsal history"); return; }
           if (!localPresenceUser?.isMD) return;
           const now = getGlobalTime(); setIsRecording(true); setIsPaused(false); setRecordingStartTime(now);
           isRecordingRef.current = true;
@@ -3113,6 +3320,7 @@ export default function SetlistPerformanceRoomPage() {
           });
         }}
         onPauseRecording={async () => {
+          if (!isOnline) { openNoConnectionModal("Recording rehearsal history"); return; }
           if (!localPresenceUser?.isMD || !recordingStartTime) return;
           const now = getGlobalTime(); const newAccumulated = recordingAccumulatedMs + (now - recordingStartTime);
           setIsPaused(true); setRecordingAccumulatedMs(newAccumulated);
@@ -3128,6 +3336,7 @@ export default function SetlistPerformanceRoomPage() {
           });
         }}
         onStopRecording={async () => {
+          if (!isOnline) { openNoConnectionModal("Recording rehearsal history"); return; }
           if (!localPresenceUser?.isMD) return;
           const now = getGlobalTime(); setIsRecording(false); setIsPaused(false); setRecordingStartTime(null); setRecordingAccumulatedMs(0);
           isRecordingRef.current = false;
@@ -3276,7 +3485,7 @@ export default function SetlistPerformanceRoomPage() {
                                   // ✅ SURGICAL FIX: "Play Now" while stopped actually STARTS the playback from this chapter!
                                   currentSectionIndexRef.current = seg.sectionIndex;
                                   setCurrentSectionIndex(seg.sectionIndex);
-                                  executeStartSequence(localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
+                                  executeStartSequence(audioSourceRef.current === "youtube" && !localMode && localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId);
                                 } else {
                                   let jumpTime = getGlobalTime() + 150;
                                   if (mdSectionStartTimeRef.current && activeSongRef.current && isPlayingRef.current) {

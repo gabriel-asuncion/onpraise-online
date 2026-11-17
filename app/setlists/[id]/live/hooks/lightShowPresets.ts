@@ -89,3 +89,13 @@ export function createLightShowScene(preset: LightShowPreset, step: number, phas
   }));
   return scene;
 }
+
+export function createFrequencyScene(bands: readonly number[]): FeedbackScene {
+  const scene: FeedbackScene = new Map();
+  SMC_MATRIX_NOTES.forEach((notes, row) => notes.forEach((note, col) => {
+    const level = Math.max(0, Math.min(1, Number.isFinite(bands[col]) ? bands[col] : 0));
+    const control = { type: "note" as const, channel: 0, noteOrCcNumber: note };
+    scene.set(`note:0:${note}`, { control, active: 3 - row < Math.ceil(level * 4) });
+  }));
+  return scene;
+}

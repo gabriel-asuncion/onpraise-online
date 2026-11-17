@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
+import { useOnlineStatus } from "../../context/NetworkContext";
 import PageSkeleton from '../../../components/PageSkeleton';
 
 import { getSongContentType, SongContentType } from "../../setlists/[id]/live/utils/setlist-helpers";
@@ -50,6 +51,11 @@ export default function SongDashboardPage() {
   const router = useRouter();
   const supabase = createClient();
   const { simulatedUserId } = useEngine();
+  const { isOnline, openNoConnectionModal } = useOnlineStatus();
+  const editSong = (id = "new") => {
+    if (!isOnline) { openNoConnectionModal(id === "new" ? "Creating a song" : "Editing a song"); return; }
+    router.push(`/songs/${id}/edit`);
+  };
 
   const [loading, setLoading] = useState(true);
   const [mySongs, setMySongs] = useState<MySongRecord[]>([]);
@@ -82,6 +88,7 @@ export default function SongDashboardPage() {
 
   const handleDelete = async (e: React.MouseEvent, id: string, title: string) => {
     e.stopPropagation();
+    if (!isOnline) { openNoConnectionModal("Deleting a song"); return; }
     if (!window.confirm(`Are you sure you want to permanently delete your submission for "${title}"?`)) return;
     
     setIsDeleting(id);
@@ -131,8 +138,8 @@ export default function SongDashboardPage() {
           </div>
           
           <button 
-            onClick={() => router.push("/songs/new/edit")}
-            className="hidden sm:flex items-center gap-2 px-4 py-2 bg-primary text-on-primary rounded-xl font-black text-[11px] uppercase tracking-widest shadow-md hover:bg-primary/90 transition-colors cursor-pointer border border-primary/20"
+            onClick={() => editSong()} aria-disabled={!isOnline}
+            className={`hidden sm:flex items-center gap-2 px-4 py-2 bg-primary text-on-primary rounded-xl font-black text-[11px] uppercase tracking-widest shadow-md hover:bg-primary/90 transition-colors cursor-pointer border border-primary/20 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
           >
             <span className="material-symbols-outlined !text-[16px]">add</span> Add New Song
           </button>
@@ -172,8 +179,8 @@ export default function SongDashboardPage() {
               </p>
               {activeFilter === "all" && (
                 <button 
-                  onClick={() => router.push("/songs/new/edit")}
-                  className="mt-6 px-6 py-3 bg-primary text-on-primary rounded-xl font-black text-[12px] uppercase tracking-widest shadow-md hover:bg-primary/90 transition-colors cursor-pointer border border-primary/20"
+                  onClick={() => editSong()} aria-disabled={!isOnline}
+                  className={`mt-6 px-6 py-3 bg-primary text-on-primary rounded-xl font-black text-[12px] uppercase tracking-widest shadow-md hover:bg-primary/90 transition-colors cursor-pointer border border-primary/20 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                 >
                   + Add New Song
                 </button>
@@ -265,8 +272,8 @@ export default function SongDashboardPage() {
                       {/* Left: Delete */}
                       <button 
                         onClick={(e) => handleDelete(e, song.id, song.title)}
-                        disabled={isDeleting === song.id}
-                        className="h-7 px-2.5 rounded-md bg-rose-500/10 text-rose-500 text-[10px] font-bold hover:bg-rose-500/20 flex items-center justify-center gap-1 cursor-pointer border border-rose-500/30 shadow-sm shrink-0 transition-colors active:scale-95 disabled:opacity-50"
+                        disabled={isOnline && isDeleting === song.id} aria-disabled={!isOnline || isDeleting === song.id}
+                        className={`h-7 px-2.5 rounded-md bg-rose-500/10 text-rose-500 text-[10px] font-bold hover:bg-rose-500/20 flex items-center justify-center gap-1 cursor-pointer border border-rose-500/30 shadow-sm shrink-0 transition-colors active:scale-95 disabled:opacity-50 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                         title="Delete Submission"
                       >
                         {isDeleting === song.id ? (
@@ -292,8 +299,8 @@ export default function SongDashboardPage() {
                         )}
 
                         <button 
-                          onClick={() => router.push(`/songs/${song.id}/edit`)} 
-                          className="h-7 px-2.5 rounded-md bg-[#202022] text-zinc-300 hover:bg-[#2C2C2E] text-[10px] font-bold transition-colors cursor-pointer border border-zinc-700 shadow-sm flex items-center justify-center gap-1 shrink-0 active:scale-95"
+                          onClick={() => editSong(song.id)} aria-disabled={!isOnline}
+                          className={`h-7 px-2.5 rounded-md bg-[#202022] text-zinc-300 hover:bg-[#2C2C2E] text-[10px] font-bold transition-colors cursor-pointer border border-zinc-700 shadow-sm flex items-center justify-center gap-1 shrink-0 active:scale-95 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                           title="Edit Song"
                         >
                           <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>edit</span>
@@ -361,8 +368,8 @@ export default function SongDashboardPage() {
 
       {/* MOBILE ADD BUTTON */}
       <button 
-        onClick={() => router.push("/songs/new/edit")}
-        className="fixed bottom-6 right-6 w-14 h-14 bg-primary text-on-primary rounded-full shadow-[0_8px_24px_rgba(37,99,235,0.4)] flex sm:hidden items-center justify-center z-50 cursor-pointer active:scale-95 transition-transform"
+        onClick={() => editSong()} aria-disabled={!isOnline}
+        className={`fixed bottom-6 right-6 w-14 h-14 bg-primary text-on-primary rounded-full shadow-[0_8px_24px_rgba(37,99,235,0.4)] flex sm:hidden items-center justify-center z-50 cursor-pointer active:scale-95 transition-transform ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
       >
         <span className="material-symbols-outlined text-[28px]">add</span>
       </button>

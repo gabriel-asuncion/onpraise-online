@@ -1,6 +1,7 @@
 import React from "react";
 import { ArrangementSection } from "../types/setlist";
 import { getSectionAbbreviation, getSectionColorClass } from "../utils/setlist-helpers";
+import { useOnlineStatus } from "../../../../context/NetworkContext";
 
 interface StructureEditorModalProps {
   isStructureModalOpen: boolean;
@@ -25,6 +26,7 @@ export function StructureEditorModal({
   draggedSectionIndex, setDraggedSectionIndex, dragOverIndex, setDragOverIndex,
   handleModalSectionDrop, handleModalSectionRemoveItem, setIsAddBlockModalOpen, saveError
 }: StructureEditorModalProps) {
+  const { isOnline, openNoConnectionModal } = useOnlineStatus();
   const dialogRef = React.useRef<HTMLDivElement>(null);
   const closeButtonRef = React.useRef<HTMLButtonElement>(null);
   const wasOpenRef = React.useRef(false);
@@ -95,7 +97,7 @@ export function StructureEditorModal({
                 onDragOver={(e) => { e.preventDefault(); if (dragOverIndex !== sIdx) setDragOverIndex(sIdx); }}
                 onDragLeave={() => { if (dragOverIndex === sIdx) setDragOverIndex(null); }}
                 onDragEnd={() => { setDraggedSectionIndex(null); setDragOverIndex(null); }}
-                onDrop={() => handleModalSectionDrop(sIdx)}
+                onDrop={() => isOnline ? handleModalSectionDrop(sIdx) : openNoConnectionModal("Editing a setlist arrangement")}
                 className={`flex items-center justify-between p-3.5 bg-white rounded-xl transition-all duration-150 ${
                   isBeingDragged ? "opacity-30 shadow-none border border-dashed border-zinc-400" : isHoveredTarget ? "border border-blue-500 scale-[1.02] shadow-md z-10" : "border border-transparent hover:border-zinc-200 shadow-sm"
                 }`}
@@ -109,20 +111,21 @@ export function StructureEditorModal({
                   </div>
                   <span className="text-[15px] font-bold text-zinc-800">{sec.section_name}</span>
                 </div>
-                <button type="button" onClick={() => handleModalSectionRemoveItem(sIdx)} className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-red-500 transition-colors rounded-full hover:bg-red-50 cursor-pointer">✕</button>
+                <button type="button" aria-disabled={!isOnline} onClick={() => isOnline ? handleModalSectionRemoveItem(sIdx) : openNoConnectionModal("Editing a setlist arrangement")} className={`w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-red-500 transition-colors rounded-full hover:bg-red-50 cursor-pointer ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}>✕</button>
               </div>
             );
           })}
           <button
             type="button"
-            onClick={onReset}
-            disabled={isSavingStructure || !canReset}
-            className="w-full flex items-center gap-3 p-4 mt-2 text-zinc-600 hover:text-zinc-900 font-bold hover:bg-zinc-100 rounded-xl transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={() => isOnline ? onReset() : openNoConnectionModal("Editing a setlist arrangement")}
+            disabled={isOnline && (isSavingStructure || !canReset)}
+            aria-disabled={!isOnline || isSavingStructure || !canReset}
+            className={`w-full flex items-center gap-3 p-4 mt-2 text-zinc-600 hover:text-zinc-900 font-bold hover:bg-zinc-100 rounded-xl transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
           >
             <span className="material-symbols-outlined text-xl">restart_alt</span>
             <span className="text-[15px]">Reset to Original Structure</span>
           </button>
-          <button type="button" onClick={() => setIsAddBlockModalOpen(true)} className="w-full flex items-center gap-3 p-4 mt-2 text-blue-500 hover:text-blue-600 font-bold hover:bg-blue-50/50 rounded-xl transition-colors cursor-pointer">
+          <button type="button" aria-disabled={!isOnline} onClick={() => isOnline ? setIsAddBlockModalOpen(true) : openNoConnectionModal("Editing a setlist arrangement")} className={`w-full flex items-center gap-3 p-4 mt-2 text-blue-500 hover:text-blue-600 font-bold hover:bg-blue-50/50 rounded-xl transition-colors cursor-pointer ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}>
             <span className="text-2xl leading-none font-light mb-1">+</span> 
             <span className="text-[15px]">Add New Structures</span>
           </button>

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "../../../../../utils/supabase/client";
-import { decodeMcuVpot, parsePitchBend, createMcuBeatControls } from "../../../../songs/[id]/edit/mcuProtocol";
+import { useEngine } from "../../../../context/EngineContext";
+import { useOnlineStatus } from "../../../../context/NetworkContext";
+import { decodeMcuVpot, createMcuBeatControls } from "../../../../songs/[id]/edit/mcuProtocol";
 import { buildFeedbackScene, createBeatControls, getConfiguredBeatControls, getMidiOutputs, parseBeatLightSettings, syncFeedbackOutputs, type FeedbackScene } from "../../../../songs/[id]/edit/midiFeedback";
-import { isMidiActionAllowedInEq, matchesPairedMidiMapping, shouldTriggerMidiButton } from "./midiInput";
+import { getMidiFaderValue, isMidiActionAllowedInEq, matchesPairedMidiMapping, shouldTriggerMidiButton } from "./midiInput";
 import { clearEqualizerOutputs, clearQueuedMidiOutputs } from "./equalizer";
 import { useLightShow, type LightShowPlayback } from "./useLightShow";
 import { useControlFeedback } from "./useControlFeedback";
@@ -16,8 +18,11 @@ import {
   removePageProfileSelections,
   readLocalPageProfile,
   saveLocalPageProfile,
+  STEM_MIDI_ACTION_GROUPS,
+  buildSmcStrips3To8StemBindings,
   type MidiProfilePage,
   type MidiProfilesDocument,
+  type StemMidiActionId,
 } from "./midiProfiles";
 
 export type ControlActionId =
@@ -48,7 +53,7 @@ export type ControlActionId =
   | "clickVolume"
   | "clickSpeed" | "clickPattern" | "jogScrub" | "clickOffset"
   | "guideVolume"
-  | "youtubeVolume" | "beatLightFirst";
+  | "youtubeVolume" | "beatLightFirst" | StemMidiActionId;
 
 export type ControlCategory = "Playback" | "Audio" | "Display" | "Visuals / Hardware";
 export type MidiMessageType = "note" | "cc" | "pitchbend";
@@ -113,6 +118,11 @@ export const CONTROL_ACTIONS: ControlActionDefinition[] = [
   { id: "clickVolume", label: "Click Level", category: "Audio", shortcut: "MIDI fader", isFader: true },
   { id: "guideVolume", label: "Guide Level", category: "Audio", shortcut: "MIDI fader", isFader: true },
   { id: "youtubeVolume", label: "YouTube Level", category: "Audio", shortcut: "MIDI fader", isFader: true },
+  ...STEM_MIDI_ACTION_GROUPS.flatMap((group): ControlActionDefinition[] => [
+    { id: group.vol, label: `${group.label} Stem Level`, category: "Audio", shortcut: "MIDI fader", isFader: true },
+    { id: group.mute, label: `${group.label} Stem Mute`, category: "Audio", shortcut: "MIDI learn" },
+    { id: group.solo, label: `${group.label} Stem Solo`, category: "Audio", shortcut: "MIDI learn" },
+  ]),
   { id: "viewMode", label: "View Mode", category: "Display", shortcut: "V" },
   { id: "chordNotation", label: "Chord Notation", category: "Display", shortcut: "C" },
   { id: "chordFormat", label: "Chord Format", category: "Display", shortcut: "F" },
@@ -223,7 +233,9 @@ function keyboardActionForEvent(event: KeyboardEvent): ControlActionId | null {
   return keys[event.code] ?? null;
 }
 
-export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient>, actions: ControlActions, beat: number | null = null, page: Extract<MidiProfilePage, "live" | "solo"> = "live", playback: LightShowPlayback = { isPlaying: false, beat: 0, tempo: 75, quarterBeatsPerMeasure: 4, unitQuarterBeats: 1 }) {
+export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient>, actions: ControlActions, beat: number | null = null, page: Extract<MidiProfilePage, "live" | "solo"> = "live", playback: LightShowPlayback = { isPlaying: false, beat: 0, tempo: 75, quarterBeatsPerMeasure: 4, unitQuarterBeats: 1 }, audioSource: "youtube" | "local" = "youtube") {
+  const { realUserId } = useEngine();
+  const { isOnline } = useOnlineStatus();
   const [preferences, setPreferences] = useState(EMPTY_CONTROL_PREFERENCES);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -245,6 +257,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
   const previousEqModeRef = useRef(false);
 
   const actionsRef = useRef(actions);
+  const audioSourceRef = useRef(audioSource);
   const preferencesRef = useRef(preferences);
   const accessRef = useRef<MidiAccessLike | null>(null);
   const learningActionRef = useRef<ControlActionId | null>(null);
@@ -298,36 +311,53 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
 
   useEffect(() => {
     actionsRef.current = actions;
+    audioSourceRef.current = audioSource;
     preferencesRef.current = preferences;
     learningActionRef.current = learningAction;
     profileDocumentRef.current = profileDocument;
     activeProfileIdRef.current = activeProfileId;
     setupOpenRef.current = isSetupOpen;
-  }, [actions, activeProfileId, isSetupOpen, learningAction, preferences, profileDocument]);
+  }, [actions, activeProfileId, audioSource, isSetupOpen, learningAction, preferences, profileDocument]);
 
   useEffect(() => {
     let active = true;
+    loadedUserIdRef.current = null;
     void (async () => {
-      const { data: authData, error: authError } = await supabase.auth.getUser();
-      if (!active) return;
-      if (authError || !authData.user) {
-        setPreferenceError(authError?.message || "Sign in to save MIDI preferences to your account.");
-        setIsLoading(false);
-        return;
+      if (!realUserId) return;
+      const authenticatedUserId = realUserId;
+      let data: { settings?: unknown; midi_profiles?: unknown } | null = null;
+      if (isOnline) {
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (!active) return;
+        if (authError || authData.user?.id !== authenticatedUserId) {
+          setPreferenceError(authError?.message || "Sign in to save MIDI preferences to your account.");
+          setIsLoading(false);
+          return;
+        }
+        const result = await supabase.from("user_control_preferences")
+          .select("settings, midi_profiles")
+          .eq("user_id", authenticatedUserId)
+          .maybeSingle();
+        if (result.error) {
+          setPreferenceError(`Could not load controller preferences: ${result.error.message}`);
+          setIsLoading(false);
+          return;
+        }
+        data = result.data;
+      } else {
+        const raw = localStorage.getItem("onpraise_offline_midi");
+        if (raw) {
+          try {
+            const cached = JSON.parse(raw) as { userId?: string; settings?: unknown; midi_profiles?: unknown };
+            if (cached.userId === authenticatedUserId) data = cached;
+          } catch (error) {
+            console.error("Could not read the offline MIDI profile.", error);
+            setPreferenceError("Could not read your offline MIDI profile.");
+          }
+        }
+        if (!data) setPreferenceError("No saved MIDI profile is available offline.");
       }
-
-      const authenticatedUserId = authData.user.id;
-      const { data, error } = await supabase
-        .from("user_control_preferences")
-        .select("settings, midi_profiles")
-        .eq("user_id", authenticatedUserId)
-        .maybeSingle();
       if (!active) return;
-      if (error) {
-        setPreferenceError(`Could not load controller preferences: ${error.message}`);
-        setIsLoading(false);
-        return;
-      }
       let document = parseMidiProfiles(data?.midi_profiles);
       if (document.profiles.length === 0) {
         const profile = createMidiControllerProfile("Default");
@@ -359,10 +389,25 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
     })();
 
     return () => { active = false; };
-  }, [supabase, page]);
+  }, [supabase, page, realUserId, isOnline]);
 
   useEffect(() => {
     if (isLoading || !userId || loadedUserIdRef.current !== userId) return;
+    let active = true;
+    try {
+      localStorage.setItem("onpraise_offline_midi", JSON.stringify({ userId, settings: preferences, midi_profiles: profileDocument }));
+    } catch (error) {
+      console.error("Could not cache the MIDI profile.", error);
+      queueMicrotask(() => {
+        if (!active) return;
+        setPreferenceError("Could not save your MIDI profile for offline use.");
+      });
+    }
+    return () => { active = false; };
+  }, [isLoading, preferences, profileDocument, userId]);
+
+  useEffect(() => {
+    if (!isOnline || isLoading || !userId || loadedUserIdRef.current !== userId) return;
     const timeout = window.setTimeout(() => {
       setIsSaving(true);
       void supabase
@@ -383,7 +428,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
         })
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [isLoading, preferences, profileDocument, supabase, userId]);
+  }, [isLoading, preferences, profileDocument, supabase, userId, isOnline]);
 
   useEffect(() => {
     if (isLoading || !userId || loadedUserIdRef.current !== userId || !activeProfileId) return;
@@ -523,11 +568,23 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
 
         const currentPreferences = preferencesRef.current;
         if (input.id !== currentPreferences.pairedDeviceId) return;
-        const mapping = Object.entries(currentPreferences.mappings).find(([actionId, candidate]) =>
-          isMidiActionAllowedInEq(eqModeRef.current, actionId) &&
-          candidate && matchesPairedMidiMapping(currentPreferences.pairedDeviceId, input.id, candidate,
-            messageType, channel, messageType === "pitchbend" ? channel : number)
-        );
+        const isLocalAudio = audioSourceRef.current === "local";
+        const candidateEntries = Object.entries(currentPreferences.mappings).filter(([actionId, candidate]) => {
+          if (!isMidiActionAllowedInEq(eqModeRef.current, actionId)) return false;
+          if (isLocalAudio && (actionId === "youtubeVolume" || actionId === "youtubeMute" || actionId === "youtubeSolo")) return false;
+          if (!isLocalAudio && actionId.startsWith("STEM_")) return false;
+          return Boolean(candidate && matchesPairedMidiMapping(
+            currentPreferences.pairedDeviceId,
+            input.id,
+            candidate,
+            messageType,
+            channel,
+            messageType === "pitchbend" ? channel : number,
+          ));
+        });
+        const mapping = isLocalAudio
+          ? candidateEntries.find(([id]) => id.startsWith("STEM_")) ?? candidateEntries[0]
+          : candidateEntries[0];
         if (!mapping) {
           if ((messageType === "note" && (command === 0x80 || velocity === 0)) ||
               (messageType === "cc" && velocity < 64)) pressedMidiInputsRef.current.delete(`${input.id}:${channel}:${messageType}:${number}`);
@@ -553,9 +610,9 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
           pressedMidiInputsRef.current.add(pressKey);
           if (actionId === "cycleLightShowPreset") shuffleLightShow();
           else actionsRef.current[actionId]?.();
-        } else if (actionId === "clickVolume" || actionId === "guideVolume" || actionId === "youtubeVolume") {
-          const value = messageType === "pitchbend" ? parsePitchBend(event.data)?.value : velocity;
-          if (value !== undefined) actionsRef.current[actionId]?.(value / 127);
+        } else if (CONTROL_ACTIONS.some((action) => action.id === actionId && action.isFader)) {
+          const value = getMidiFaderValue(messageType, event.data);
+          if (value !== null) actionsRef.current[actionId]?.(value);
         } else if (["jogScrub", "clickOffset", "cycleLightShowPreset", "transpose", "timelineZoom", "clickSound"].includes(actionId) && messageType === "cc") {
           const delta = decodeMcuVpot(velocity);
           if (delta) {
@@ -686,6 +743,35 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
     setLearningAction(null);
   }, []);
 
+  const applySmcStemPreset = useCallback(() => {
+    const { pairedDeviceId, pairedDeviceName } = preferencesRef.current;
+    if (!pairedDeviceId || !pairedDeviceName) {
+      setMidiError("Scan and pair a MIDI controller before applying the stem preset.");
+      return;
+    }
+    const templates = buildSmcStrips3To8StemBindings();
+    setPreferences((current) => {
+      const mappings = { ...current.mappings };
+      for (const [action, mapping] of Object.entries(mappings)) {
+        if (action.startsWith("STEM_") && mapping && Object.values(templates).some((template) =>
+          mapping.deviceId === pairedDeviceId && mapping.messageType === template.messageType &&
+          mapping.channel === template.channel && mapping.number === template.number)) {
+          delete mappings[action as ControlActionId];
+        }
+      }
+      for (const group of STEM_MIDI_ACTION_GROUPS) {
+        for (const action of [group.vol, group.mute, group.solo]) {
+          const template = templates[action];
+          if (template) mappings[action] = { ...template, deviceId: pairedDeviceId, deviceName: pairedDeviceName };
+        }
+      }
+      return { ...current, mappings };
+    });
+    setMidiError(null);
+    learningActionRef.current = null;
+    setLearningAction(null);
+  }, []);
+
   const clearAllMidiMappings = useCallback(() => {
     setPreferences((current) => ({ ...current, mappings: {} }));
     setLearningAction(null);
@@ -791,6 +877,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
     pairDevice,
     learnMidiAction,
     clearMidiMapping,
+    applySmcStemPreset,
     clearAllMidiMappings,
     cancelMidiLearn: () => { learningActionRef.current = null; setLearningAction(null); },
   };

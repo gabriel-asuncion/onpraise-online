@@ -13,6 +13,14 @@ export interface AccountLandingDecision {
   destination: "/dashboard" | "/onboarding";
 }
 
+export function getEntryPath(searchParams: URLSearchParams): string {
+  const destination = ["invite", "switch_account", "auth_error"].some((key) => searchParams.has(key))
+    ? "/login"
+    : "/dashboard";
+  const query = searchParams.toString();
+  return query ? `${destination}?${query}` : destination;
+}
+
 export function hasProfileMembership(profile: AccountProfileSummary | null): boolean {
   if (!profile) return false;
   return Boolean(

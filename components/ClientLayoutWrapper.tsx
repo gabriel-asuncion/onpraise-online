@@ -6,12 +6,13 @@ import Sidebar from "./Sidebar";
 import DevFab from "./DevFab";
 import { useEngine } from "../app/context/EngineContext";
 import PositionRequestsFab from "./PositionRequestsFab";
+import PwaInstallPrompt from "./PwaInstallPrompt";
 
 export default function ClientLayoutWrapper({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { isSuperAdmin } = useEngine();
 
-  const isFullscreenRoute = pathname === "/" || pathname === "/onboarding";
+  const isFullscreenRoute = pathname === "/" || pathname === "/login" || pathname === "/onboarding";
 
   if (isFullscreenRoute) {
     return (
@@ -32,6 +33,7 @@ export default function ClientLayoutWrapper({ children }: { children: React.Reac
         The child pages now control their own internal scrolling perfectly.
       */}
       <main className="flex-1 flex flex-col relative min-w-0 h-full overflow-hidden">
+        <div className="absolute right-4 top-4 z-[150000]"><PwaInstallPrompt installedOnly /></div>
         {children}
       </main>
       

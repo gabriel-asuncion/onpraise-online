@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext";
+import { useOnlineStatus } from "../../context/NetworkContext";
 import PageSkeleton from '../../../components/PageSkeleton';
 import { 
   getAllSongs 
@@ -80,6 +81,7 @@ export default function EventCockpitPage() {
   const params = useParams();
   const eventId = params?.id as string; 
   const { activeRole, userTeamId } = useEngine();
+  const { isOnline, openNoConnectionModal } = useOnlineStatus();
 
   // ✅ SURGICAL FIX: Allow both Admins and Moderators to edit the event layout!
   const canEditEvent = ["admin", "moderator"].includes(activeRole);
@@ -360,6 +362,7 @@ export default function EventCockpitPage() {
 
   async function handleDeleteSetlistBlock(e: React.MouseEvent, slId: string) {
     e.stopPropagation();
+    if (!isOnline) { openNoConnectionModal("Deleting a setlist"); return; }
     if (!canEditEvent) return;
     if (!confirm("Are you sure you want to delete this Setlist Block? All tracks inside will be permanently unlinked.")) return;
     
@@ -376,6 +379,7 @@ export default function EventCockpitPage() {
   }
   
   async function handleDeleteEvent() {
+    if (!isOnline) { openNoConnectionModal("Deleting an event and its setlists"); return; }
     if (!canEditEvent) return;
     setIsDeleting(true);
     try {
@@ -458,6 +462,7 @@ export default function EventCockpitPage() {
 
   async function handleCreateSetlistBlockSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!isOnline) { openNoConnectionModal("Creating a setlist"); return; }
     if (!newSetlistName.trim()) return;
 
     try {
@@ -479,6 +484,7 @@ export default function EventCockpitPage() {
   }
 
   async function handleAddSongSubmit() {
+    if (!isOnline) { openNoConnectionModal("Editing a setlist"); return; }
     if (!canEditEvent || !selectedNewSongId) return;
     const songToAdd = allDatabaseSongs.find(s => s.id === selectedNewSongId);
     if (!songToAdd) return;
@@ -530,6 +536,7 @@ export default function EventCockpitPage() {
   // ✅ SURGICAL FIX: Perform the array swap and DB save ONLY when dropped!
   async function handleDrop(e: React.DragEvent, targetIndex: number) {
     e.preventDefault();
+    if (!isOnline) { setDraggedSongIndex(null); setDragOverSongIndex(null); openNoConnectionModal("Editing a setlist"); return; }
     if (draggedSongIndex === null || !canEditEvent) return;
 
     const startIndex = draggedSongIndex;
@@ -596,6 +603,7 @@ export default function EventCockpitPage() {
   // ✅ SURGICAL FIX: New function to break/ungroup a bundle
   async function handleUngroup(e: React.MouseEvent, groupName: string) {
     e.stopPropagation();
+    if (!isOnline) { openNoConnectionModal("Editing a setlist"); return; }
     if (!canEditEvent) return;
     if (!confirm(`Remove the "${groupName}" grouping?`)) return;
     
@@ -632,6 +640,7 @@ export default function EventCockpitPage() {
   function handleToggleCheckboxSelect(id: string) { setSelectedForGroup(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); }
 
   async function applyGroupTransformation() {
+    if (!isOnline) { openNoConnectionModal("Editing a setlist"); return; }
     if (selectedForGroup.length === 0 || !canEditEvent) return;
     const finalGroupName = customGroupName.trim() || null;
     const selectedIds = [...selectedForGroup];
@@ -781,7 +790,8 @@ export default function EventCockpitPage() {
                 {canEditEvent && group.groupName && (
                   <button 
                     onClick={(e) => handleUngroup(e, group.groupName)}
-                    className="w-6 h-6 rounded-md flex items-center justify-center bg-error/10 text-error hover:bg-error hover:text-white transition-colors border border-error/20 cursor-pointer shadow-sm"
+                    aria-disabled={!isOnline}
+                    className={`w-6 h-6 rounded-md flex items-center justify-center bg-error/10 text-error hover:bg-error hover:text-white transition-colors border border-error/20 cursor-pointer shadow-sm ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                     title="Remove Grouping"
                   >
                     <span className="material-symbols-outlined text-[14px]">close</span>
@@ -833,6 +843,7 @@ export default function EventCockpitPage() {
               <button 
                 onClick={async (e) => {
                   e.stopPropagation(); 
+                  if (!isOnline) { openNoConnectionModal("Editing a setlist"); return; }
                   const previousSongs = stagedSetlistSongsRef.current;
                   setStagedSetlistSongs(prev => prev.filter(s => s.id !== item.id));
                   setSetlistSongs(prev => prev.filter(s => s.id !== item.id)); 
@@ -861,7 +872,8 @@ export default function EventCockpitPage() {
                     }
                   }
                 }}
-                className="w-8 h-8 rounded-full bg-error/10 text-error hover:bg-error/20 flex items-center justify-center transition-colors border border-error/20 cursor-pointer"
+                aria-disabled={!isOnline}
+                className={`w-8 h-8 rounded-full bg-error/10 text-error hover:bg-error/20 flex items-center justify-center transition-colors border border-error/20 cursor-pointer ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 <span className="material-symbols-outlined !text-[16px]">close</span>
               </button> 
@@ -1049,7 +1061,8 @@ export default function EventCockpitPage() {
                           {canEditEvent && (
                             <button 
                               onClick={(e) => handleDeleteSetlistBlock(e, sl.id)}
-                              className="w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer border bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error/10 hover:border-error/30 border-outline-variant/30"
+                              aria-disabled={!isOnline}
+                              className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer border bg-surface-container-highest text-on-surface-variant hover:text-error hover:bg-error/10 hover:border-error/30 border-outline-variant/30 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                               title="Delete Block"
                             >
                               <span className="material-symbols-outlined !text-[16px]">delete</span>
@@ -1098,12 +1111,13 @@ export default function EventCockpitPage() {
                 })}
                 
                 {canEditEvent && (
-                  <div 
-                    onClick={() => setIsCreateSetlistOpen(true)}
-                    className="p-4 rounded-xl border-2 border-dashed border-outline-variant/30 hover:border-primary hover:bg-primary-container/5 text-primary font-extrabold text-[12px] uppercase tracking-widest flex items-center justify-center min-h-[120px] transition-all cursor-pointer shadow-sm select-none"
+                  <button type="button"
+                    onClick={() => isOnline ? setIsCreateSetlistOpen(true) : openNoConnectionModal("Creating a setlist")}
+                    aria-disabled={!isOnline}
+                    className={`p-4 rounded-xl border-2 border-dashed border-outline-variant/30 hover:border-primary hover:bg-primary-container/5 text-primary font-extrabold text-[12px] uppercase tracking-widest flex items-center justify-center min-h-[120px] transition-all cursor-pointer shadow-sm select-none ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                   >
                     ＋ Add Setlist Block
-                  </div>
+                  </button>
                 )}
               </div>
             </div>
@@ -1169,8 +1183,9 @@ export default function EventCockpitPage() {
                   <button 
                     type="button" 
                     onClick={handleAddSongSubmit} 
-                    disabled={!selectedNewSongId} 
-                    className="flex items-center gap-1.5 px-4 rounded-xl bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-on-primary font-bold text-[12px] shadow-sm active:scale-95 transition-all cursor-pointer border border-primary/20 shrink-0"
+                    disabled={isOnline && !selectedNewSongId}
+                    aria-disabled={!isOnline || !selectedNewSongId}
+                    className={`flex items-center gap-1.5 px-4 rounded-xl bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-on-primary font-bold text-[12px] shadow-sm active:scale-95 transition-all cursor-pointer border border-primary/20 shrink-0 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                   >
                     <span className="material-symbols-outlined text-[18px]">add</span>
                     <span className="hidden sm:block">Add</span>
@@ -1200,7 +1215,7 @@ export default function EventCockpitPage() {
                     >
                       {COLOR_PALETTES.map(p => <option key={p.id} value={p.id}>{p.id.toUpperCase()}</option>)}
                     </select>
-                    <button type="button" onClick={applyGroupTransformation} className="px-4 py-2 bg-primary text-on-primary font-bold text-[12px] rounded-lg shadow-sm cursor-pointer hover:bg-primary/90">Bundle</button>
+                    <button type="button" onClick={applyGroupTransformation} aria-disabled={!isOnline} className={`px-4 py-2 bg-primary text-on-primary font-bold text-[12px] rounded-lg shadow-sm cursor-pointer hover:bg-primary/90 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}>Bundle</button>
                   </div>
                 </div>
               )}
@@ -1503,7 +1518,7 @@ export default function EventCockpitPage() {
             <p className="text-[12px] text-on-surface-variant font-medium mb-6">This will permanently delete the event, its setlists, and all scheduled lineups. This action cannot be undone.</p>
             <div className="flex gap-3">
               <button onClick={() => setShowDeleteConfirm(false)} disabled={isDeleting} className="flex-1 py-2.5 bg-surface-container-high hover:bg-surface-bright text-on-surface font-bold text-[12px] rounded-xl transition-colors border border-outline-variant/30 cursor-pointer">Cancel</button>
-              <button onClick={handleDeleteEvent} disabled={isDeleting} className="flex-1 py-2.5 bg-error hover:bg-error/90 text-on-error font-bold text-[12px] rounded-xl shadow-sm transition-colors cursor-pointer border border-error/20">{isDeleting ? "Deleting..." : "Yes, Delete"}</button>
+              <button onClick={handleDeleteEvent} disabled={isOnline && isDeleting} aria-disabled={!isOnline || isDeleting} className={`flex-1 py-2.5 bg-error hover:bg-error/90 text-on-error font-bold text-[12px] rounded-xl shadow-sm transition-colors cursor-pointer border border-error/20 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}>{isDeleting ? "Deleting..." : "Yes, Delete"}</button>
             </div>
           </div>
         </div>
@@ -1520,7 +1535,7 @@ export default function EventCockpitPage() {
             </div>
             <div className="flex gap-2 pt-2">
               <button type="button" onClick={() => setIsCreateSetlistOpen(false)} className="flex-1 py-2.5 bg-surface-container-high hover:bg-surface-bright border border-outline-variant/30 rounded-xl text-[12px] font-bold text-on-surface cursor-pointer transition-colors">Cancel</button>
-              <button type="submit" className="flex-1 py-2.5 bg-primary hover:bg-primary/90 text-on-primary border border-primary/20 rounded-xl text-[12px] font-black shadow-md uppercase tracking-wider cursor-pointer transition-colors">Build Block</button>
+              <button type="submit" aria-disabled={!isOnline} onClick={(event) => { if (!isOnline) { event.preventDefault(); openNoConnectionModal("Creating a setlist"); } }} className={`flex-1 py-2.5 bg-primary hover:bg-primary/90 text-on-primary border border-primary/20 rounded-xl text-[12px] font-black shadow-md uppercase tracking-wider cursor-pointer transition-colors ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}>Build Block</button>
             </div>
           </form>
         </div>
