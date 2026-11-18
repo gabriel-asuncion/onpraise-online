@@ -3,8 +3,10 @@
 import React, { useCallback, useState, useRef, useEffect } from "react";
 import type { useMultitrackEngine } from "../../../../../hooks/useMultitrackEngine";
 import {
-  findSongAudioFiles, getSavedAudioFolderHandle, getSongAudioStems, inferStemRole,
-  pickAndSaveRootAudioFolder, removeSongAudioStem, saveSongAudioStem, verifyFolderPermission,
+  findSongAudioFiles, findSongAudioFilesFromFileList, getSavedAudioFolderHandle,
+  getSongAudioStems, inferStemRole, isDirectoryHandlePickerSupported,
+  pickAndSaveRootAudioFolder, removeSongAudioStem, resolveSongAudioStems,
+  saveFilesToDeviceDownloads, saveSongAudioStem, verifyFolderPermission,
   type AudioDirectoryHandle, type StoredAudioStem,
 } from "../../../../../lib/offline-audio";
 import { expandAndFilterStemFiles } from "../../../../../lib/zip-audio";
@@ -198,6 +200,8 @@ export function VolumeMixerModal({
   const [assignMode, setAssignMode] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [loadedKey, setLoadedKey] = useState("");
+  const [linkedFolderName, setLinkedFolderName] = useState<string | null>(null);
+  const [folderNeedsPermission, setFolderNeedsPermission] = useState(false);
   const [isDriveOpen, setIsDriveOpen] = useState(false);
   const [driveFiles, setDriveFiles] = useState<DriveStemFile[]>([]);
   const [driveLoading, setDriveLoading] = useState(false);
@@ -212,6 +216,7 @@ export function VolumeMixerModal({
   const hasGoogleDrive = isGoogleDriveConfigured();
   const batchInput = useRef<HTMLInputElement>(null);
   const slotInput = useRef<HTMLInputElement>(null);
+  const folderFallbackInput = useRef<HTMLInputElement>(null);
   const folderRef = useRef<AudioDirectoryHandle | null>(null);
   const selectedSlot = useRef<StemSlot | null>(null);
   const revision = useRef(0);
@@ -231,13 +236,23 @@ export function VolumeMixerModal({
     abortRef.current = controller;
     const start = async () => {
       try {
-        const [saved, folder] = await Promise.all([getSongAudioStems(userId, songId), getSavedAudioFolderHandle(userId)]);
+        const [saved, folder] = await Promise.all([
+          resolveSongAudioStems(userId, songId, songTitle ?? "", controller.signal),
+          getSavedAudioFolderHandle(userId),
+        ]);
         if (current !== revision.current) return;
         setStems(saved);
         onStemsChanged?.(saved);
         setLoadedKey(`${userId}:${songId}`);
         setHasFolder(Boolean(folder));
+        setLinkedFolderName(folder?.folderName ?? null);
         folderRef.current = folder?.handle ?? null;
+        if (folder?.handle) {
+          const perm = await folder.handle.queryPermission({ mode: "read" });
+          if (current === revision.current) setFolderNeedsPermission(perm !== "granted");
+        } else {
+          setFolderNeedsPermission(false);
+        }
         if (onStemsChanged || !getEngine || !loadWhilePaused || saved.length === 0) return;
         const engine = getEngine();
         if (engine.getStemMixes().length === 0 && !engine.isPlaying) {
@@ -272,7 +287,7 @@ export function VolumeMixerModal({
     return () => { active = false; window.clearInterval(interval); };
   }, [isOpen, audioSource, getEngine, reportError]);
 
-  const run = async (action: (signal: AbortSignal) => Promise<void>) => {
+  const run = async (action: (signal: AbortSignal) => Promise<unknown>) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
@@ -318,10 +333,10 @@ export function VolumeMixerModal({
     setMixes(multitrack.getEngine().getStemMixes());
   };
 
-  const importFiles = async (files: File[], signal: AbortSignal, slot?: StemSlot) => {
+  const importFiles = async (files: File[], signal: AbortSignal, slot?: StemSlot): Promise<File[]> => {
     if (!userId || !songId) throw new Error("Select a song and sign in before importing audio.");
     const resolvedFiles = slot ? files : await expandAndFilterStemFiles(files, signal);
-    if (signal.aborted) return;
+    if (signal.aborted) return [];
     if (!resolvedFiles.length) {
       throw new Error("No valid stem audio files were found (instrumental tracks are ignored).");
     }
@@ -329,7 +344,7 @@ export function VolumeMixerModal({
     const groups = groupStemSlots(existing);
     const used = new Set<StemSlot>();
     for (const file of resolvedFiles) {
-      if (signal.aborted) return;
+      if (signal.aborted) return [];
       const role = slot ?? getStemSlot(inferStemRole(file.name));
       if (used.has(role) || groups[role].length > 1) {
         throw new Error(`Multiple files match ${role.toUpperCase()}. Resolve the conflict before importing.`);
@@ -337,13 +352,14 @@ export function VolumeMixerModal({
       used.add(role);
     }
     for (const file of resolvedFiles) {
-      if (signal.aborted) return;
+      if (signal.aborted) return [];
       const role = slot ?? getStemSlot(inferStemRole(file.name));
       const stemId = groups[role][0]?.stemId ?? crypto.randomUUID();
       await saveSongAudioStem({ key: `${userId}:${songId}:${stemId}`, ownerId: userId, songId, stemId,
         label: file.name, role, fileName: file.name, mimeType: file.type, blob: file, updatedAt: new Date().toISOString() });
     }
     await reload(signal);
+    return resolvedFiles;
   };
 
   const loadDriveLibrary = useCallback(async (forceRefresh = false) => {
@@ -397,14 +413,17 @@ export function VolumeMixerModal({
           downloaded.push(file);
         }
 
-        setDriveStatus("Extracting & caching stems offline...");
+        setDriveStatus("Extracting & saving stems to Downloads...");
         setDriveProgress({
           percent: 100,
           loadedBytes: completedBytes,
           totalBytes: completedBytes || null,
           phase: "extracting",
         });
-        await importFiles(downloaded, signal);
+        const importedStems = await importFiles(downloaded, signal);
+        if (!signal.aborted && importedStems.length > 0) {
+          await saveFilesToDeviceDownloads(importedStems, songTitle);
+        }
         setIsDriveOpen(false);
       } finally {
         setDriveStatus(null);
@@ -482,6 +501,34 @@ export function VolumeMixerModal({
             const file = event.currentTarget.files?.[0]; const slot = selectedSlot.current; event.currentTarget.value = "";
             if (file && slot) void run((signal) => importFiles([file], signal, slot));
           }} />
+          <input
+            ref={(el) => {
+              folderFallbackInput.current = el;
+              if (el) {
+                el.setAttribute("webkitdirectory", "");
+                el.setAttribute("directory", "");
+              }
+            }}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(event) => {
+              const files = Array.from(event.currentTarget.files ?? []);
+              event.currentTarget.value = "";
+              if (!files.length) return;
+              const pickedFolderName = files[0]?.webkitRelativePath?.split(/[\\/]/)[0] || "Selected Folder";
+              void run(async (signal) => {
+                if (!userId || !songId) throw new Error("Select a song and sign in first.");
+                const matched = await findSongAudioFilesFromFileList(files, songId, songTitle ?? "");
+                if (signal.aborted) return;
+                if (!matched.length) {
+                  throw new Error(`No matching stem files for "${songTitle || songId}" were found in "${pickedFolderName}".`);
+                }
+                setLinkedFolderName(pickedFolderName);
+                await importFiles(matched, signal);
+              });
+            }}
+          />
           <button
             type="button"
             aria-pressed={multitrack?.eqEnabled ?? true}
@@ -514,7 +561,7 @@ export function VolumeMixerModal({
                   <div>
                     <h4 className="text-sm font-black uppercase tracking-wider text-zinc-100">Google Drive Stems</h4>
                     <p className="text-[11px] font-medium text-zinc-400">
-                      Select a song ZIP or stem audio file to cache offline for {songTitle || "this song"}.
+                      Select a song ZIP or stem audio file to download to your device Downloads folder for {songTitle || "this song"}.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -663,19 +710,60 @@ export function VolumeMixerModal({
               </div>
             </div>
           )}
-          <button type="button" className="rounded-lg bg-[#38383d] hover:bg-[#44444a] border border-white/10 px-3 py-1.5 transition-colors disabled:opacity-40" disabled={busy || playing || !userId || !songId || !multitrack} onClick={() => void run(async (signal) => {
-            if (!userId || !songId) throw new Error("Select a song and sign in first.");
-            const saved = folderRef.current ? null : await pickAndSaveRootAudioFolder(userId);
-            const handle = saved?.handle ?? folderRef.current;
-            if (!handle || !await verifyFolderPermission(handle)) throw new Error("Folder permission was not granted.");
-            if (signal.aborted) return;
-            folderRef.current = handle; setHasFolder(true);
-            const files = await findSongAudioFiles(handle, songId, songTitle ?? "");
-            if (!files.length) throw new Error("No matching audio files were found in the linked folder.");
-            const existing = await getSongAudioStems(userId, songId);
-            const fresh = files.filter((file) => !existing.some((stem) => stem.fileName === file.name));
-            if (fresh.length) await importFiles(fresh, signal);
-          })}>{hasFolder ? "Reconnect Folder" : "Link Folder"}</button>
+          {hasFolder && folderRef.current && (
+            <button
+              type="button"
+              className="rounded-lg border border-amber-400/35 bg-amber-500/15 px-3 py-1.5 text-amber-200 transition-colors hover:bg-amber-500/25 disabled:opacity-40"
+              disabled={busy || playing || !userId || !songId || !multitrack}
+              onClick={() => void run(async (signal) => {
+                if (!userId || !songId || !folderRef.current) return;
+                if (!await verifyFolderPermission(folderRef.current)) {
+                  throw new Error("Folder permission was not granted.");
+                }
+                if (signal.aborted) return;
+                setFolderNeedsPermission(false);
+                const files = await findSongAudioFiles(folderRef.current, songId, songTitle ?? "");
+                if (!files.length) {
+                  throw new Error(`No matching stem files for "${songTitle || songId}" were found in ${linkedFolderName || "the linked folder"}.`);
+                }
+                await importFiles(files, signal);
+              })}
+            >
+              {folderNeedsPermission ? "Authorize Folder" : "Scan Folder"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="rounded-lg bg-[#38383d] hover:bg-[#44444a] border border-white/10 px-3 py-1.5 transition-colors disabled:opacity-40"
+            disabled={busy || playing || !userId || !songId || !multitrack}
+            title={linkedFolderName ? `Linked folder: ${linkedFolderName} (click to assign a different folder)` : "Assign a local folder on this device to check first for stem files"}
+            onClick={() => {
+              if (!userId || !songId) {
+                reportError(new Error("Select a song and sign in first."));
+                return;
+              }
+              if (!isDirectoryHandlePickerSupported()) {
+                folderFallbackInput.current?.click();
+                return;
+              }
+              void run(async (signal) => {
+                const saved = await pickAndSaveRootAudioFolder(userId);
+                const handle = saved.handle;
+                if (!await verifyFolderPermission(handle)) throw new Error("Folder permission was not granted.");
+                if (signal.aborted) return;
+                folderRef.current = handle;
+                setHasFolder(true);
+                setLinkedFolderName(saved.folderName);
+                setFolderNeedsPermission(false);
+                const files = await findSongAudioFiles(handle, songId, songTitle ?? "");
+                if (files.length) {
+                  await importFiles(files, signal);
+                }
+              });
+            }}
+          >
+            {hasFolder ? `Folder: ${linkedFolderName || "Linked"}` : "Link Folder"}
+          </button>
           <div className="ml-auto flex items-center gap-2">
             {assignMode && <button type="button" disabled={!onApplySmcStemPreset} className="rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-400/30 hover:bg-cyan-500/25 px-3 py-1.5 transition-colors disabled:opacity-40" onClick={onApplySmcStemPreset}>Auto-Map Strips 3–8</button>}
             <button type="button" disabled={!onStartMidiLearn} aria-pressed={assignMode} className={`rounded-lg px-3 py-1.5 border transition-colors disabled:opacity-40 ${assignMode ? "bg-blue-600 border-blue-400 text-white" : "bg-[#38383d] hover:bg-[#44444a] border-white/10 text-zinc-200"}`} onClick={() => setAssignMode(!assignMode)}>MIDI Assign</button>

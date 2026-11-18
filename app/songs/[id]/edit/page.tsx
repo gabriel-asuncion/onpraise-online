@@ -369,6 +369,9 @@ function SongEditContent() {
   const editorContentContainerRef = useRef<HTMLDivElement | null>(null);
   const { activeRole, simulatedUserId, userTeamId, primaryTeamId } = useEngine();
   const canSaveSong = ["admin", "moderator", "musician"].includes(activeRole);
+  const canApproveSongs = ["admin", "moderator"].includes(activeRole);
+  const [songApprovalStatus, setSongApprovalStatus] = useState<string | null>(null);
+  const [isApprovingSong, setIsApprovingSong] = useState(false);
 
   useEffect(() => {
     if (activeRole === "member") {
@@ -1034,8 +1037,30 @@ function SongEditContent() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  const { initAudioContext, playZeroLatencyAudio, fetchAndDecodeAudio } = useWebAudioEngine();
+  const { initAudioContext, playZeroLatencyAudio, fetchAndDecodeAudio, getAudioContext, cancelFutureAudio } = useWebAudioEngine();
   const lastTickedBeatRef = useRef<number>(-1);
+  const ytAudioAnchorRef = useRef<{
+    audioTime: number;
+    youtubeTime: number;
+    lastObservedYtTime: number;
+  } | null>(null);
+  const nextClickIndexRef = useRef<number | null>(null);
+
+  const resetMetronomeAnchorForSeek = useCallback((seekTime: number) => {
+    cancelFutureAudio();
+    nextClickIndexRef.current = null;
+    lastTickedBeatRef.current = -1;
+    const ctx = getAudioContext();
+    if (ctx && ytAudioAnchorRef.current) {
+      ytAudioAnchorRef.current = {
+        audioTime: ctx.currentTime,
+        youtubeTime: seekTime,
+        lastObservedYtTime: -1,
+      };
+    } else {
+      ytAudioAnchorRef.current = null;
+    }
+  }, [cancelFutureAudio, getAudioContext]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1312,12 +1337,22 @@ function formatTimeWithMs(seconds: number) {
   const [sectionModalSearch, setSectionModalSearch] = useState("");
   const [sectionModalSelected, setSectionModalSelected] = useState<string | null>(null);
   const sectionCatalogListRef = useRef<HTMLDivElement>(null);
+  const [isExistingSectionModalOpen, setIsExistingSectionModalOpen] = useState(false);
+  const [existingSectionModalSearch, setExistingSectionModalSearch] = useState("");
+  const [existingSectionModalSelected, setExistingSectionModalSelected] = useState<string | null>(null);
+  const existingSectionListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!sectionModalConfig.isOpen || !sectionModalSelected) return;
     const selected = sectionCatalogListRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]');
     selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [sectionModalConfig.isOpen, sectionModalSelected]);
+
+  useEffect(() => {
+    if (!isExistingSectionModalOpen || !existingSectionModalSelected) return;
+    const selected = existingSectionListRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]');
+    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [isExistingSectionModalOpen, existingSectionModalSelected]);
 
   const [chordTargetCoordinate, setChordTargetCoordinate] = useState<{ sectionType: string; lineIdx: number; wordIdx: number } | null>(null);
   const [notesTargetCoordinate, setNotesTargetCoordinate] = useState<{ sectionType: string; lineIdx: number } | null>(null); 
@@ -1606,6 +1641,29 @@ function formatTimeWithMs(seconds: number) {
     });
   }, [formSections]);
 
+  const existingSectionOptions = useMemo(() => {
+    const seenTypes = new Set<string>();
+    return formSections.flatMap((section) => {
+      if (section.type.toLowerCase().startsWith("spacer") || seenTypes.has(section.type)) return [];
+      seenTypes.add(section.type);
+      const catalogBase =
+        SECTION_BASE_CATALOG.find((item) => section.type.toLowerCase().startsWith(item.display.toLowerCase())) ||
+        SECTION_BASE_CATALOG[0];
+      const previewLine = section.content
+        .split("\n")
+        .map((line) => line.replace(/\[[^\]]+\]/g, "").replace(/\{[^\}]+\}/g, "").trim())
+        .find((line) => line.length > 0) || "";
+      return [{
+        id: section.id,
+        type: section.type,
+        label: section.label,
+        abbr: catalogBase.abbr,
+        color: catalogBase.color,
+        previewLine,
+      }];
+    });
+  }, [formSections]);
+
   const cycleChordMode = () => {
     if (chordMode === "Off") setChordMode("Chords");
     else if (chordMode === "Chords") setChordMode("Keyboard");
@@ -1651,6 +1709,24 @@ function formatTimeWithMs(seconds: number) {
     setPendingTimelineInsertionIndex(null);
     setPendingTimelineAnchorSectionId(null);
     setSectionModalConfig({ isOpen: false, mode: "add" });
+  };
+
+  const handleExistingSectionModalSubmit = () => {
+    if (!existingSectionModalSelected) return;
+    const selectedExisting = existingSectionOptions.find((item) => item.id === existingSectionModalSelected);
+    if (!selectedExisting) return;
+
+    if (pendingTimelineAnchorSectionId !== null) {
+      setPendingTimelineSourceSectionId(selectedExisting.id);
+      setPendingTimelineSectionType(selectedExisting.type);
+    } else if (pendingTimelineInsertionIndex !== null) {
+      handleDuplicateTimelineSection(selectedExisting.id, pendingTimelineInsertionIndex);
+      setPendingTimelineInsertionIndex(null);
+    } else {
+      setPendingTimelineSourceSectionId(selectedExisting.id);
+      setPendingTimelineSectionType(selectedExisting.type);
+    }
+    setIsExistingSectionModalOpen(false);
   };
 
   useEffect(() => {
@@ -1760,6 +1836,7 @@ function formatTimeWithMs(seconds: number) {
         setFormTitle(song.title || "");
         setFormTempo(song.tempo || "");
         setFormKey(song.key_signature || song.original_key || "");
+        setSongApprovalStatus(song.approval_status || null);
         setFormVisibilityScope(song.visibility_scope === "workspace" ? "workspace" : "global");
         setSelectedWorkspaceIds(assignedWorkspaceIds.length ? assignedWorkspaceIds : song.team_id ? [song.team_id] : []);
         setSongCreatorId(song.created_by || null);
@@ -1982,6 +2059,9 @@ function formatTimeWithMs(seconds: number) {
       : -1;
     
     if (ytPlaying || playerState === 1 || playerState === 3) {
+      ytAudioAnchorRef.current = null;
+      nextClickIndexRef.current = null;
+      cancelFutureAudio();
       if (typeof ytPlayerRef.current.pauseVideo === "function") {
         ytPlayerRef.current.pauseVideo();
       }
@@ -2015,6 +2095,7 @@ function formatTimeWithMs(seconds: number) {
         isImportDiscoveryModalOpen ||
         isTimelineChaptersOpen ||
         sectionModalConfig.isOpen ||
+        isExistingSectionModalOpen ||
         sectionAdjustmentsConfig.isOpen ||
         chordPickerConfig.isOpen ||
         pendingTimelineSectionType !== null
@@ -2098,6 +2179,7 @@ function formatTimeWithMs(seconds: number) {
     sectionModalConfig.isOpen,
     sectionAdjustmentsConfig.isOpen,
     chordPickerConfig.isOpen,
+    isExistingSectionModalOpen,
     pendingTimelineSectionType,
   ]);
 
@@ -2143,9 +2225,30 @@ function formatTimeWithMs(seconds: number) {
             // Only set playing to true when video is actually decoding frames (state 1)
             if (event.data === 1) { 
               setYtPlaying(true);
-              try { setYtDuration(event.target.getDuration() || 0); } catch(e){}
-            } else if (event.data === 2 || event.data === 0) { 
-              setYtPlaying(false);
+              try {
+                setYtDuration(event.target.getDuration() || 0);
+                initAudioContext();
+                const ctx = getAudioContext();
+                const ytTime = typeof event.target.getCurrentTime === "function"
+                  ? event.target.getCurrentTime()
+                  : 0;
+                if (ctx && Number.isFinite(ytTime)) {
+                  ytAudioAnchorRef.current = {
+                    audioTime: ctx.currentTime,
+                    youtubeTime: ytTime,
+                    lastObservedYtTime: ytTime,
+                  };
+                  cancelFutureAudio();
+                  nextClickIndexRef.current = null;
+                }
+              } catch(e){}
+            } else if (event.data === 2 || event.data === 0 || event.data === 3) { 
+              ytAudioAnchorRef.current = null;
+              nextClickIndexRef.current = null;
+              cancelFutureAudio();
+              if (event.data === 2 || event.data === 0) {
+                setYtPlaying(false);
+              }
             }
           },
           'onError': (error: any) => console.error("YT Error:", error.data)
@@ -2175,6 +2278,7 @@ function formatTimeWithMs(seconds: number) {
       chordPickerConfig.isOpen || 
       sectionAdjustmentsConfig.isOpen || 
       sectionModalConfig.isOpen ||
+      isExistingSectionModalOpen ||
       pendingTimelineSectionType !== null ||
       isSongMetadataModalOpen ||
       isImportDiscoveryModalOpen;
@@ -2188,7 +2292,7 @@ function formatTimeWithMs(seconds: number) {
         window.dispatchEvent(new CustomEvent("onpraise-ui-focus", { detail: false }));
       }
     };
-  }, [chordMode, chordPickerConfig.isOpen, isImportDiscoveryModalOpen, isSongMetadataModalOpen, pendingTimelineSectionType, sectionAdjustmentsConfig.isOpen, sectionModalConfig.isOpen]);
+  }, [chordMode, chordPickerConfig.isOpen, isExistingSectionModalOpen, isImportDiscoveryModalOpen, isSongMetadataModalOpen, pendingTimelineSectionType, sectionAdjustmentsConfig.isOpen, sectionModalConfig.isOpen]);
 
 
   const handleCaptureSyncPoint = () => {
@@ -3228,6 +3332,7 @@ function formatTimeWithMs(seconds: number) {
       }
       finalSongId = savedSongId;
 
+      setSongApprovalStatus("pending");
       setHasUnsavedChanges(false);
       setSaveStatus("success");
       
@@ -3312,49 +3417,120 @@ function formatTimeWithMs(seconds: number) {
     timelineMeterDenominator,
   ]);
   useEffect(() => {
+    cancelFutureAudio();
+    nextClickIndexRef.current = null;
+  }, [cancelFutureAudio, formTempo, formYoutubeSyncOffset, metronomePattern, metronomeSpeed, timelineMeterDenominator, timelineMeterNumerator]);
+
+  useEffect(() => {
     const updateScrubber = () => {
       if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function" && !isTimelineScrubbingRef.current) {
         const playerState = typeof ytPlayerRef.current.getPlayerState === "function"
           ? ytPlayerRef.current.getPlayerState()
           : -1;
         if (playerState === 1) {
-          const currentTime = ytPlayerRef.current.getCurrentTime();
+          const rawYtTime = ytPlayerRef.current.getCurrentTime();
           const pendingSeek = midiScrubSeekRef.current;
-          if (pendingSeek && performance.now() - pendingSeek.timestamp < 350 && Math.abs(currentTime - pendingSeek.time) > 0.1) {
+          if (pendingSeek && performance.now() - pendingSeek.timestamp < 350 && Math.abs(rawYtTime - pendingSeek.time) > 0.1) {
             ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
             return;
           }
+
+          const audioCtx = getAudioContext();
+          let currentTime = rawYtTime;
+
+          if (audioCtx && audioCtx.state === "running") {
+            let anchor = ytAudioAnchorRef.current;
+            if (!anchor) {
+              anchor = {
+                audioTime: audioCtx.currentTime,
+                youtubeTime: rawYtTime,
+                lastObservedYtTime: rawYtTime,
+              };
+              ytAudioAnchorRef.current = anchor;
+              nextClickIndexRef.current = null;
+            } else if (Math.abs(rawYtTime - anchor.lastObservedYtTime) > 0.0005) {
+              anchor.lastObservedYtTime = rawYtTime;
+              const predictedYtTime = anchor.youtubeTime + (audioCtx.currentTime - anchor.audioTime);
+              const drift = rawYtTime - predictedYtTime;
+              if (Math.abs(drift) > 0.12) {
+                anchor.youtubeTime = rawYtTime;
+                anchor.audioTime = audioCtx.currentTime;
+                cancelFutureAudio();
+                nextClickIndexRef.current = null;
+              } else {
+                anchor.youtubeTime += drift * 0.15;
+              }
+            }
+            currentTime = Math.max(0, anchor.youtubeTime + (audioCtx.currentTime - anchor.audioTime));
+          }
+
           setYtCurrentTime(currentTime);
           const loopChapter = timelineChapters.find((chapter) => chapter.id === midiLoopSectionId);
           if (loopChapter && currentTime >= loopChapter.end) {
             ytPlayerRef.current.seekTo(loopChapter.start, true);
             setYtCurrentTime(loopChapter.start);
-            lastTickedBeatRef.current = -1;
+            resetMetronomeAnchorForSeek(loopChapter.start);
             ytTimeTrackerRef.current = requestAnimationFrame(updateScrubber);
             return;
           }
 
           const tempo = parseInt(formTempo, 10) || 0;
           if (tempo > 0) {
-            const elapsedMs = currentTime * 1000 - formYoutubeSyncOffset;
-            if (elapsedMs >= 0) {
-              const currentBeat = Math.floor(elapsedMs / ((60000 / tempo) * (4 / timelineMeterDenominator) * getMetronomeStep(metronomeSpeed)));
+            const beatStepSecs = (60 / tempo) * (4 / timelineMeterDenominator) * getMetronomeStep(metronomeSpeed);
+            const offsetSecs = formYoutubeSyncOffset / 1000;
+            const elapsedSecs = currentTime - offsetSecs;
+
+            if (elapsedSecs >= 0) {
+              const currentBeat = Math.floor(elapsedSecs / beatStepSecs);
               if (currentBeat !== lastTickedBeatRef.current) {
                 setMidiBeatLight(currentBeat % 4);
-                if (currentBeat > lastTickedBeatRef.current && !isMetronomeMutedRef.current) {
-                  const pulse = getMetronomePulse(currentBeat, metronomeSpeed, metronomePattern, timelineMeterNumerator);
-                  if (pulse !== null) playZeroLatencyAudio(`metronome_blip_${pulse}`, midiClickVolume / 100);
-                }
                 lastTickedBeatRef.current = currentBeat;
               }
             } else {
               setMidiBeatLight(null);
               lastTickedBeatRef.current = -1;
             }
+
+            const anchor = ytAudioAnchorRef.current;
+            if (audioCtx && audioCtx.state === "running" && anchor) {
+              const lookaheadSecs = 0.200;
+              const currentAudioTime = audioCtx.currentTime;
+              if (nextClickIndexRef.current === null) {
+                const startFloat = (currentTime - offsetSecs) / beatStepSecs;
+                nextClickIndexRef.current = Math.max(0, Math.ceil(startFloat - 0.0001));
+              }
+
+              let scheduledSteps = 0;
+              while (scheduledSteps < 64) {
+                scheduledSteps++;
+                const clickIndex: number = nextClickIndexRef.current ?? 0;
+                const targetYtTime = offsetSecs + clickIndex * beatStepSecs;
+                const targetAudioTime = anchor.audioTime + (targetYtTime - anchor.youtubeTime);
+
+                if (targetAudioTime >= currentAudioTime + lookaheadSecs) {
+                  break;
+                }
+
+                if (targetAudioTime >= currentAudioTime - 0.005 && !isMetronomeMutedRef.current) {
+                  const pulse = getMetronomePulse(clickIndex, metronomeSpeed, metronomePattern, timelineMeterNumerator);
+                  if (pulse !== null) {
+                    playZeroLatencyAudio(
+                      `metronome_blip_${pulse}`,
+                      midiClickVolume / 100,
+                      Math.max(currentAudioTime, targetAudioTime),
+                    );
+                  }
+                }
+
+                nextClickIndexRef.current = clickIndex + 1;
+              }
+            }
           } else {
             setMidiBeatLight(null);
           }
         } else {
+          ytAudioAnchorRef.current = null;
+          nextClickIndexRef.current = null;
           setMidiBeatLight(null);
           lastTickedBeatRef.current = -1;
         }
@@ -3368,7 +3544,7 @@ function formatTimeWithMs(seconds: number) {
     return () => {
       if (ytTimeTrackerRef.current) cancelAnimationFrame(ytTimeTrackerRef.current);
     };
-  }, [formTempo, formYoutubeSyncOffset, metronomePattern, metronomeSpeed, midiClickVolume, midiLoopSectionId, playZeroLatencyAudio, timelineChapters, timelineMeterDenominator, timelineMeterNumerator]);
+  }, [cancelFutureAudio, formTempo, formYoutubeSyncOffset, getAudioContext, metronomePattern, metronomeSpeed, midiClickVolume, midiLoopSectionId, playZeroLatencyAudio, resetMetronomeAnchorForSeek, timelineChapters, timelineMeterDenominator, timelineMeterNumerator]);
   const currentTimelineChapter = timelineChapters.find(
     (chapter) => ytCurrentTime >= chapter.start && ytCurrentTime < chapter.end,
   );
@@ -3451,6 +3627,7 @@ function formatTimeWithMs(seconds: number) {
   const seekToTimelineChapter = useCallback((time: number) => {
     const seekTime = Math.max(0, Math.min(ytDuration || time, time));
     setYtCurrentTime(seekTime);
+    resetMetronomeAnchorForSeek(seekTime);
     initAudioContext();
     
     if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
@@ -3634,6 +3811,7 @@ function formatTimeWithMs(seconds: number) {
       const maxTime = ytDuration > 0 ? ytDuration : Number.POSITIVE_INFINITY;
       const nextTime = Math.max(0, Math.min(maxTime, time));
       setYtCurrentTime(nextTime);
+      resetMetronomeAnchorForSeek(nextTime);
       if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
         ytPlayerRef.current.seekTo(nextTime, true);
       }
@@ -3647,13 +3825,16 @@ function formatTimeWithMs(seconds: number) {
     switch (actionId) {
       case "PLAY_PAUSE":
         if (sectionModalConfig.isOpen) handleSectionModalSubmit();
+        else if (isExistingSectionModalOpen) handleExistingSectionModalSubmit();
         else if (!pendingTimelineSectionType) handleTogglePlayback();
         break;
       case "MODAL_CONFIRM":
         if (sectionModalConfig.isOpen) handleSectionModalSubmit();
+        else if (isExistingSectionModalOpen) handleExistingSectionModalSubmit();
         break;
       case "OPEN_ADD_SECTION": {
         const anotherModalIsOpen = isMidiMappingModalOpen || sectionModalConfig.isOpen ||
+          isExistingSectionModalOpen ||
           pendingTimelineSectionType !== null || sectionAdjustmentsConfig.isOpen ||
           chordPickerConfig.isOpen || chordMode === "Keyboard" && chordTargetCoordinate !== null ||
           isImportModalOpen || isSongMetadataModalOpen || isTimelineChaptersOpen ||
@@ -3678,7 +3859,7 @@ function formatTimeWithMs(seconds: number) {
       case "MODAL_OPEN_ADD_SECTION":
         if (
           editorActiveTab === "timeline" &&
-          !isMidiMappingModalOpen && !sectionModalConfig.isOpen && !pendingTimelineSectionType &&
+          !isMidiMappingModalOpen && !sectionModalConfig.isOpen && !isExistingSectionModalOpen && !pendingTimelineSectionType &&
           !sectionAdjustmentsConfig.isOpen && !chordPickerConfig.isOpen &&
           !(chordMode === "Keyboard" && chordTargetCoordinate !== null) &&
           !isImportModalOpen && !isSongMetadataModalOpen && !isTimelineChaptersOpen &&
@@ -3713,11 +3894,13 @@ function formatTimeWithMs(seconds: number) {
         setPendingTimelineSourceSectionId(null);
         setPendingTimelineInsertionIndex(null);
         setSectionModalConfig({ isOpen: false, mode: "add" });
+        setIsExistingSectionModalOpen(false);
         break;
       case "MODAL_ADD_NEW_OR_CYCLE":
-        if (pendingTimelineSectionType) {
+        if (pendingTimelineSectionType || isExistingSectionModalOpen) {
           setPendingTimelineSectionType(null);
           setPendingTimelineSourceSectionId(null);
+          setIsExistingSectionModalOpen(false);
           setSectionModalSearch("");
           setSectionModalSelected(dynamicCatalogOptions[0]?.computedId ?? null);
           setSectionModalConfig({ isOpen: true, mode: "add" });
@@ -3728,6 +3911,28 @@ function formatTimeWithMs(seconds: number) {
           const currentIndex = visibleOptions.findIndex((option) => option.computedId === sectionModalSelected);
           const nextIndex = (currentIndex + 1) % visibleOptions.length;
           setSectionModalSelected(visibleOptions[nextIndex].computedId);
+        }
+        break;
+      case "MODAL_ADD_EXISTING_OR_CYCLE":
+        if (pendingTimelineSectionType || sectionModalConfig.isOpen) {
+          if (existingSectionOptions.length === 0) {
+            showMidiControlFeedback("Existing Section", "None in song");
+            break;
+          }
+          setPendingTimelineSectionType(null);
+          setPendingTimelineSourceSectionId(null);
+          setSectionModalConfig({ isOpen: false, mode: "add" });
+          setExistingSectionModalSearch("");
+          setExistingSectionModalSelected(existingSectionOptions[0].id);
+          setIsExistingSectionModalOpen(true);
+        } else if (isExistingSectionModalOpen) {
+          const visibleOptions = existingSectionOptions.filter((option) =>
+            option.label.toLowerCase().includes(existingSectionModalSearch.toLowerCase()) ||
+            option.previewLine.toLowerCase().includes(existingSectionModalSearch.toLowerCase()));
+          if (!visibleOptions.length) break;
+          const currentIndex = visibleOptions.findIndex((option) => option.id === existingSectionModalSelected);
+          const nextIndex = (currentIndex + 1) % visibleOptions.length;
+          setExistingSectionModalSelected(visibleOptions[nextIndex].id);
         }
         break;
       case "STOP_RETURN":
@@ -3759,6 +3964,7 @@ function formatTimeWithMs(seconds: number) {
         setMidiSelectedLine(null);
         setPendingTimelineFocusSectionId(null);
         setYtCurrentTime(nextTime);
+        resetMetronomeAnchorForSeek(nextTime);
         if (ytPlayerRef.current && isYtPlayerReadyRef.current && typeof ytPlayerRef.current.seekTo === "function") {
           ytPlayerRef.current.seekTo(nextTime, true);
         }
@@ -3952,9 +4158,9 @@ function formatTimeWithMs(seconds: number) {
   useEffect(() => {
     midiLearn.sendFeedbackScene(
       pendingTimelineSectionType !== null,
-      sectionModalConfig.isOpen,
+      sectionModalConfig.isOpen || isExistingSectionModalOpen,
       midiBeatLight,
-      editorActiveTab === "timeline" && !isMidiMappingModalOpen && !duplicateDurationPrompt,
+      editorActiveTab === "timeline" && !duplicateDurationPrompt,
     );
   }, [
     midiLearn.sendFeedbackScene,
@@ -3963,11 +4169,11 @@ function formatTimeWithMs(seconds: number) {
     midiLearn.profileDocument,
     midiLearn.outputRevision,
     editorActiveTab,
-    isMidiMappingModalOpen,
     duplicateDurationPrompt,
     midiBeatLight,
     pendingTimelineSectionType,
     sectionModalConfig.isOpen,
+    isExistingSectionModalOpen,
   ]);
 
   if (loading) {
@@ -3999,6 +4205,32 @@ function formatTimeWithMs(seconds: number) {
       </div>
     );
   }
+
+  const canApproveCurrentSong =
+    canApproveSongs &&
+    editingSongId !== "new" &&
+    !hasUnsavedChanges &&
+    songApprovalStatus !== "approved";
+
+  const handleApproveSong = async () => {
+    if (!canApproveCurrentSong || isApprovingSong) return;
+    setIsApprovingSong(true);
+    try {
+      const { error } = await supabase
+        .from("songs")
+        .update({ approval_status: "approved" })
+        .eq("id", editingSongId);
+      if (error) throw error;
+      setSongApprovalStatus("approved");
+      router.refresh();
+    } catch (error) {
+      console.error("Could not approve the song.", error);
+      const message = error instanceof Error ? error.message : "An unexpected error occurred.";
+      window.alert(`Could not approve this song: ${message}`);
+    } finally {
+      setIsApprovingSong(false);
+    }
+  };
 
   const handleDeleteSong = async () => {
     if (!canDeleteSong || isDeletingSong) return;
@@ -4047,10 +4279,10 @@ function formatTimeWithMs(seconds: number) {
                type="button"
                disabled={isDeletingSong}
                onClick={() => void handleDeleteSong()}
-               className="px-3 py-1.5 rounded-lg border border-error/30 bg-error/10 text-error hover:bg-error/20 disabled:opacity-50 font-black text-[11px] uppercase tracking-wider transition-colors flex items-center"
+               className="h-8 px-3 rounded-lg border border-error/30 bg-error/10 text-error hover:bg-error/20 disabled:opacity-50 font-black text-[11px] uppercase tracking-wider transition-colors flex items-center justify-center cursor-pointer"
                title="Delete song"
              >
-               <span className="material-symbols-outlined !text-[14px] mr-1">delete</span>
+               <span className="material-symbols-outlined !text-[15px] mr-1">delete</span>
                {isDeletingSong ? "Deleting…" : "Delete"}
              </button>
            )}
@@ -4077,13 +4309,35 @@ function formatTimeWithMs(seconds: number) {
 
             <div className="w-px h-6 bg-outline-variant/30 mx-1" />
             {canSaveSong && (
-              <button 
-                type="button" 
-                disabled={isSaveDisabled} 
-                className={`px-4 py-1.5 rounded-lg font-black text-[11px] uppercase tracking-wider transition-all flex items-center ${isSaveDisabled ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed opacity-80" : "bg-primary hover:bg-primary/90 text-on-primary shadow-md cursor-pointer"}`} 
-                onClick={handleCommitSongChangesToDB}
+              <button
+                type="button"
+                disabled={isMismatched ? true : canApproveCurrentSong ? (isApprovingSong || isDeletingSong) : isSaveDisabled}
+                className={`h-8 px-4 rounded-lg font-black text-[11px] uppercase tracking-wider transition-all flex items-center justify-center ${
+                  isMismatched
+                    ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed opacity-80"
+                    : canApproveCurrentSong
+                      ? "bg-emerald-500 hover:bg-emerald-600 text-white shadow-md cursor-pointer disabled:opacity-50"
+                      : isSaveDisabled
+                        ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed opacity-80"
+                        : "bg-primary hover:bg-primary/90 text-on-primary shadow-md cursor-pointer"
+                }`}
+                onClick={() => {
+                  if (canApproveCurrentSong) {
+                    void handleApproveSong();
+                  } else {
+                    void handleCommitSongChangesToDB();
+                  }
+                }}
               >
-                {isMismatched ? <><span className="material-symbols-outlined !text-[14px] mr-1">lock</span> Mismatch</> : (!hasUnsavedChanges ? "No Changes" : "Save Arrangement")}
+                {isMismatched ? (
+                  <><span className="material-symbols-outlined !text-[14px] mr-1">lock</span> Mismatch</>
+                ) : canApproveCurrentSong ? (
+                  <><span className="material-symbols-outlined !text-[15px] mr-1">check_circle</span> {isApprovingSong ? "Approving…" : "Approve"}</>
+                ) : !hasUnsavedChanges ? (
+                  "Saved"
+                ) : (
+                  "Save"
+                )}
               </button>
             )}
           </div>
@@ -4097,27 +4351,52 @@ function formatTimeWithMs(seconds: number) {
               ))}
             </div>
 
-            <div className="md:hidden flex items-center py-1.5">
+            <div className="md:hidden flex items-center gap-1.5 py-1.5">
               {canDeleteSong && (
                 <button
                   type="button"
                   disabled={isDeletingSong}
                   onClick={() => void handleDeleteSong()}
-                  className="mr-2 rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-error disabled:opacity-50"
+                  className="h-8 w-8 rounded-md border border-error/30 bg-error/10 text-error disabled:opacity-50 flex items-center justify-center shrink-0"
                   title="Delete song"
                   aria-label="Delete song"
                 >
-                  <span className="material-symbols-outlined !text-[16px]">delete</span>
+                  <span className="material-symbols-outlined !text-[16px] leading-none">delete</span>
                 </button>
               )}
               {canSaveSong && (
-                <button 
-                  type="button" 
-                  disabled={isSaveDisabled} 
-                  className={`px-3 py-1.5 rounded-md font-black text-[9px] uppercase tracking-wider transition-all shadow-sm flex items-center ${isSaveDisabled ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed" : "bg-primary hover:bg-primary/90 text-on-primary"}`} 
-                  onClick={handleCommitSongChangesToDB}
+                <button
+                  type="button"
+                  disabled={isMismatched ? true : canApproveCurrentSong ? (isApprovingSong || isDeletingSong) : isSaveDisabled}
+                  className={`h-8 px-3 rounded-md font-black text-[9px] uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1 shrink-0 ${
+                    isMismatched
+                      ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed"
+                      : canApproveCurrentSong
+                        ? "bg-emerald-500 hover:bg-emerald-600 text-white cursor-pointer disabled:opacity-50"
+                        : isSaveDisabled
+                          ? "bg-surface-container-high text-on-surface-variant border border-outline-variant/30 cursor-not-allowed"
+                          : "bg-primary hover:bg-primary/90 text-on-primary cursor-pointer"
+                  }`}
+                  onClick={() => {
+                    if (canApproveCurrentSong) {
+                      void handleApproveSong();
+                    } else {
+                      void handleCommitSongChangesToDB();
+                    }
+                  }}
                 >
-                  {isMismatched ? "Error" : (!hasUnsavedChanges ? "Saved" : "Save")}
+                  {isMismatched ? (
+                    "Error"
+                  ) : canApproveCurrentSong ? (
+                    <>
+                      <span className="material-symbols-outlined !text-[13px] leading-none">check_circle</span>
+                      {isApprovingSong ? "…" : "Approve"}
+                    </>
+                  ) : !hasUnsavedChanges ? (
+                    "Saved"
+                  ) : (
+                    "Save"
+                  )}
                 </button>
               )}
             </div>
@@ -4147,7 +4426,7 @@ function formatTimeWithMs(seconds: number) {
 
       {/* FULL-BLEED WORKSPACE CANVAS */}
       <div 
-        className={`flex-1 min-w-0 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full pb-[64px] ${youtubeVideoId ? 'md:pb-[56px]' : ''}`}
+        className={`flex-1 min-w-0 overflow-y-auto p-4 md:p-8 custom-scrollbar space-y-3 w-full ${youtubeVideoId ? 'pb-40 md:pb-24' : 'pb-24 md:pb-12'}`}
         onScroll={handleCanvasScroll}
       >
         {editorActiveTab === "details" && (
@@ -5489,6 +5768,20 @@ function formatTimeWithMs(seconds: number) {
               >
                 Add a new section instead
               </button>
+              <button
+                type="button"
+                disabled={existingSectionOptions.length === 0}
+                onClick={() => {
+                  setPendingTimelineSourceSectionId(null);
+                  setPendingTimelineSectionType(null);
+                  setExistingSectionModalSearch("");
+                  setExistingSectionModalSelected(existingSectionOptions[0]?.id ?? null);
+                  setIsExistingSectionModalOpen(true);
+                }}
+                className="col-span-2 w-full rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-xs font-bold text-on-surface hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Add an existing section instead
+              </button>
               <button type="button" onClick={() => { setPendingTimelineSectionType(null); setPendingTimelineAnchorSectionId(null); setPendingTimelineSourceSectionId(null); setPendingTimelineInsertionIndex(null); }} className="col-span-2 w-full rounded-xl px-4 py-2 text-xs font-bold text-on-surface-variant hover:bg-surface-container-high">
                 Cancel
               </button>
@@ -5496,6 +5789,44 @@ function formatTimeWithMs(seconds: number) {
           </div>
             );
           })()}
+        </div>
+      )}
+
+      {isExistingSectionModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[250000] flex items-end md:items-center justify-center md:p-4 animate-in fade-in duration-200">
+          <div role="dialog" aria-modal="true" aria-labelledby="existing-section-modal-title" className="w-full bg-surface-container-low rounded-t-3xl md:rounded-3xl h-[85vh] md:h-[600px] max-w-lg flex flex-col shadow-2xl animate-in slide-in-from-bottom-full duration-200 overflow-hidden border border-outline-variant/20">
+            <div className="relative flex items-center justify-center p-4 md:p-5 border-b border-outline-variant/30 bg-surface-container shrink-0">
+              <button type="button" onClick={() => { setPendingTimelineInsertionIndex(null); setPendingTimelineAnchorSectionId(null); setPendingTimelineSourceSectionId(null); setIsExistingSectionModalOpen(false); }} className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright transition-colors cursor-pointer">
+                <span className="material-symbols-outlined !text-[16px]">close</span>
+              </button>
+              <h3 id="existing-section-modal-title" className="text-base font-black text-on-surface tracking-tight">Add Existing Section</h3>
+            </div>
+            <div className="p-4 bg-surface-container shrink-0">
+              <input type="text" placeholder="Search existing sections" value={existingSectionModalSearch} onChange={e => setExistingSectionModalSearch(e.target.value)} className="w-full bg-surface-container-highest rounded-xl py-2.5 px-4 text-[13px] font-bold text-on-surface placeholder:text-on-surface-variant outline-none border border-outline-variant/30 focus:border-primary transition-colors" />
+            </div>
+            <div ref={existingSectionListRef} className="flex-1 overflow-y-auto px-4 pb-4 space-y-2.5 custom-scrollbar bg-surface-container-low pt-2">
+              {existingSectionOptions.filter(opt => opt.label.toLowerCase().includes(existingSectionModalSearch.toLowerCase()) || opt.previewLine.toLowerCase().includes(existingSectionModalSearch.toLowerCase())).map(opt => {
+                const isSelected = existingSectionModalSelected === opt.id;
+                return (
+                  <button key={opt.id} type="button" aria-pressed={isSelected} onClick={() => setExistingSectionModalSelected(opt.id)} className={`w-full flex items-center justify-between gap-3 p-3 rounded-2xl text-left transition-all cursor-pointer ${isSelected ? "bg-surface-container ring-2 ring-primary/50 shadow-sm" : "bg-surface-container border border-outline-variant/30 shadow-sm hover:bg-surface-container-high"}`}>
+                    <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                      <div className={`w-8 h-8 shrink-0 rounded-full border flex items-center justify-center text-[10px] font-black ${opt.color}`}>{opt.abbr}</div>
+                      <div className="min-w-0 flex-1">
+                        <span className="block text-[14px] font-bold text-on-surface tracking-tight truncate">{opt.label}</span>
+                        {opt.previewLine && (
+                          <span className="block text-[11px] font-medium text-on-surface-variant truncate">{opt.previewLine}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className={`w-5 h-5 shrink-0 rounded-full border-[2.5px] flex items-center justify-center ${isSelected ? "border-primary" : "border-outline-variant/40"}`}>{isSelected && <div className="w-2.5 h-2.5 rounded-full bg-primary" />}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="p-4 bg-surface-container border-t border-outline-variant/30 shrink-0 pb-safe">
+              <button type="button" disabled={!existingSectionModalSelected} onClick={handleExistingSectionModalSubmit} className={`w-full py-3.5 rounded-xl text-[14px] font-black tracking-wide transition-colors ${existingSectionModalSelected ? "bg-primary text-on-primary hover:bg-primary/90 cursor-pointer shadow-md" : "bg-surface-container-highest text-on-surface-variant cursor-not-allowed"}`}>Select</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -6242,7 +6573,7 @@ function formatTimeWithMs(seconds: number) {
               onClick={() => setIsPlayerExpanded(true)}
               // ✅ SURGICAL FIX: Added dynamic translate-y-full based on modal visibility
               className={`flex items-center justify-between w-full h-[64px] px-4 cursor-pointer bg-[#18181A] rounded-t-2xl shadow-[0_-4px_20px_rgba(0,0,0,0.4)] transition-transform duration-300 ease-in-out border-t border-outline-variant/10 ${
-                (chordPickerConfig.isOpen || sectionAdjustmentsConfig.isOpen || sectionModalConfig.isOpen || pendingTimelineSectionType !== null || isKeyPopupOpen || isTapBpmModalOpen || isSongMetadataModalOpen || isImportModalOpen)
+                (chordPickerConfig.isOpen || sectionAdjustmentsConfig.isOpen || sectionModalConfig.isOpen || isExistingSectionModalOpen || pendingTimelineSectionType !== null || isKeyPopupOpen || isTapBpmModalOpen || isSongMetadataModalOpen || isImportModalOpen)
                   ? "translate-y-full pointer-events-none" 
                   : "translate-y-0 active:scale-[0.99]"
               }`}
@@ -6272,11 +6603,7 @@ function formatTimeWithMs(seconds: number) {
                 <button 
                   onClick={(e) => {
                     e.stopPropagation(); 
-                    handleTogglePlayback()
-                    initAudioContext();
-                    if (!ytPlayerRef.current || typeof ytPlayerRef.current.playVideo !== 'function') return;
-                    if (ytPlaying) ytPlayerRef.current.pauseVideo();
-                    else ytPlayerRef.current.playVideo();
+                    handleTogglePlayback();
                   }}
                   className={`w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 ${ytPlaying ? "text-primary" : "text-white"}`}
                 >

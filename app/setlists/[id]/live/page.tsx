@@ -32,7 +32,7 @@ import { useLivePresence } from "./hooks/useLivePresence";
 import { useYouTubeSync } from "./hooks/useYouTubeSync";
 import { getSavedAudioSource, refreshSavedAudioSource, resolveEffectiveAudioSource, saveAudioSourcePreference, type AudioSourceMode } from "../../../../lib/audio-source-preference";
 import { useMultitrackEngine } from "../../../../hooks/useMultitrackEngine";
-import { getSongAudioStems, type StoredAudioStem } from "../../../../lib/offline-audio";
+import { resolveSongAudioStems, type StoredAudioStem } from "../../../../lib/offline-audio";
 import { groupStemSlots, type StemSlot } from "../../../../lib/stem-slots";
 import { STEM_MIDI_ACTION_GROUPS } from "./hooks/midiProfiles";
 import { useHardwareClock } from "./hooks/useHardwareClock";
@@ -334,7 +334,7 @@ export default function SetlistPerformanceRoomPage() {
       return () => controller.abort();
     }
     setIsStemsLoading(true);
-    void getSongAudioStems(stemUserId, activeSong.id).then(async (stems) => {
+    void resolveSongAudioStems(stemUserId, activeSong.id, activeSong.title ?? "", controller.signal).then(async (stems) => {
       if (controller.signal.aborted) return;
       setStoredStems(stems);
       if (stems.length && !await loadWhilePaused(stems.map((stem) => ({

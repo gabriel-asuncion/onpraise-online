@@ -57,6 +57,11 @@ function assertOwner(ownerId: string): AudioGeneration {
   return generation;
 }
 
+export function isDirectoryHandlePickerSupported(): boolean {
+  return typeof window !== "undefined" &&
+    typeof (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker === "function";
+}
+
 export async function pickAndSaveRootAudioFolder(ownerId: string): Promise<SavedDirectory> {
   const generation = assertOwner(ownerId);
   const picker = (window as Window & { showDirectoryPicker?: (options: { mode: "read" }) => Promise<AudioDirectoryHandle> }).showDirectoryPicker;
@@ -123,6 +128,135 @@ export async function findSongAudioFiles(handle: AudioDirectoryHandle, songId: s
     }
   }
   return files.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function findSongAudioFilesFromFileList(files: File[], songId: string, title: string): Promise<File[]> {
+  const id = normalizeAudioName(songId);
+  const normalizedTitle = normalizeAudioName(title);
+  const matched: File[] = [];
+
+  for (const file of files) {
+    const relativeSegments = (file.webkitRelativePath || file.name).split(/[\\/]/).filter(Boolean);
+    const folderSegments = relativeSegments.length > 2 ? relativeSegments.slice(1, -1) : [];
+    const candidateNames = [file.name, ...folderSegments];
+    const isMatch = candidateNames.some((candidate) => {
+      const normalized = normalizeAudioName(candidate);
+      return Boolean((id && normalized.startsWith(id)) || (normalizedTitle && normalized.startsWith(normalizedTitle)));
+    });
+    if (!isMatch) continue;
+
+    if (isZipFile(file)) {
+      matched.push(...(await extractAudioFilesFromZip(file)));
+    } else if (
+      !isInstrumentalAudioFile(file.name) &&
+      (file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac|aiff?|opus)$/i.test(file.name))
+    ) {
+      matched.push(file);
+    }
+  }
+
+  return matched.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function formatStemDownloadFileName(fileName: string, songTitle?: string): string {
+  const cleanTitle = (songTitle ?? "").trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "").trim();
+  if (!cleanTitle) return fileName;
+  const normTitle = normalizeAudioName(cleanTitle);
+  const normFile = normalizeAudioName(fileName);
+  if (normTitle && normFile.startsWith(normTitle)) return fileName;
+  return `${cleanTitle} - ${fileName}`;
+}
+
+export async function saveFilesToDeviceDownloads(files: File[], songTitle?: string): Promise<void> {
+  if (typeof document === "undefined" || files.length === 0) return;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const downloadName = formatStemDownloadFileName(file.name, songTitle);
+    const url = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = downloadName;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    if (i < files.length - 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 180));
+    }
+  }
+}
+
+export async function syncFolderFilesToSongStems(
+  ownerId: string,
+  songId: string,
+  files: File[],
+  signal?: AbortSignal,
+): Promise<StoredAudioStem[]> {
+  const generation = assertOwner(ownerId);
+  const existing = await getSongAudioStems(ownerId, songId);
+  if (signal?.aborted) return existing;
+
+  const byRole = new Map<StemRole, StoredAudioStem>();
+  for (const stem of existing) {
+    if (!byRole.has(stem.role)) byRole.set(stem.role, stem);
+  }
+
+  const usedRoles = new Set<StemRole>();
+  for (const file of files) {
+    if (signal?.aborted) return existing;
+    const role = inferStemRole(file.name);
+    if (usedRoles.has(role)) continue;
+    usedRoles.add(role);
+
+    const current = byRole.get(role);
+    if (current && current.fileName === file.name && current.blob.size === file.size) {
+      continue;
+    }
+    const stemId = current?.stemId ?? crypto.randomUUID();
+    await saveSongAudioStem(
+      {
+        key: `${ownerId}:${songId}:${stemId}`,
+        ownerId,
+        songId,
+        stemId,
+        label: file.name,
+        role,
+        fileName: file.name,
+        mimeType: file.type,
+        blob: file,
+        updatedAt: new Date().toISOString(),
+      },
+      generation,
+    );
+  }
+
+  return getSongAudioStems(ownerId, songId);
+}
+
+export async function resolveSongAudioStems(
+  ownerId: string,
+  songId: string,
+  songTitle: string,
+  signal?: AbortSignal,
+): Promise<StoredAudioStem[]> {
+  try {
+    const savedFolder = await getSavedAudioFolderHandle(ownerId);
+    if (savedFolder?.handle && !signal?.aborted) {
+      const permission = await savedFolder.handle.queryPermission({ mode: "read" });
+      if (permission === "granted" && !signal?.aborted) {
+        const folderFiles = await findSongAudioFiles(savedFolder.handle, songId, songTitle);
+        if (folderFiles.length > 0 && !signal?.aborted) {
+          return await syncFolderFilesToSongStems(ownerId, songId, folderFiles, signal);
+        }
+      }
+    }
+  } catch (error) {
+    if (!signal?.aborted) {
+      console.warn("Could not read linked stems folder; falling back to cached stems.", error);
+    }
+  }
+  return getSongAudioStems(ownerId, songId);
 }
 
 export async function getSongAudioStems(ownerId: string, songId: string): Promise<StoredAudioStem[]> {

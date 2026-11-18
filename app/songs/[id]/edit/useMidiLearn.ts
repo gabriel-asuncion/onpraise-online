@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "../../../../utils/supabase/client";
 import { findMidiConflicts, updateMidiBinding } from "./midiBindings";
-import { buildFeedbackScene, createBeatControls, getMidiOutputs, isShortcutLightActive, syncFeedbackOutputs, type FeedbackControl, type FeedbackScene } from "./midiFeedback";
+import { buildFeedbackScene, createBeatControls, feedbackKey, getMidiOutputs, isShortcutLightActive, syncFeedbackOutputs, type FeedbackControl, type FeedbackScene } from "./midiFeedback";
 import { createMcuBeatControls, createMcuPreset, decodeMcuVpot, parsePitchBend } from "./mcuProtocol";
 import {
   createMidiControllerProfile,
@@ -27,7 +27,7 @@ export type MidiActionId =
   | "BACKING_TRACK_VOLUME" | "CLICK_VOLUME" | "CLICK_MUTE_TOGGLE" | "CLICK_SPEED_CYCLE" | "CLICK_PATTERN_CYCLE" | "TIMELINE_ZOOM"
   | "SAVE_STRUCTURE" | "UNDO_CHANGES" | "DELETE_ACTIVE_SECTION" | "OPEN_ADD_SECTION"
   | "MODAL_INSERT_BEFORE" | "MODAL_INSERT_AFTER" | "MODAL_CANCEL"
-  | "MODAL_ADD_NEW_OR_CYCLE" | "MODAL_CONFIRM" | "MODAL_OPEN_ADD_SECTION"
+  | "MODAL_ADD_NEW_OR_CYCLE" | "MODAL_ADD_EXISTING_OR_CYCLE" | "MODAL_CONFIRM" | "MODAL_OPEN_ADD_SECTION"
   | "BEAT_LIGHT_1" | "BEAT_LIGHT_2" | "BEAT_LIGHT_3" | "BEAT_LIGHT_4";
 
 export type MidiBindingMode = "trigger" | "absolute" | "relative_cw";
@@ -104,6 +104,7 @@ export const MIDI_ACTIONS: Array<{
   { id: "MODAL_OPEN_ADD_SECTION", group: "Modal Navigation", label: "Open Timeline Add Section (+)", description: "Press the timeline add-section button using the current selection.", modes: ["trigger"] },
   { id: "MODAL_CANCEL", group: "Modal Navigation", label: "Modal: Cancel / Dismiss", description: "Cancel the active section dialog.", modes: ["trigger"] },
   { id: "MODAL_ADD_NEW_OR_CYCLE", group: "Modal Navigation", label: "Modal: Add New / Cycle Catalog", description: "Open the section catalog or cycle its selection.", modes: ["trigger"] },
+  { id: "MODAL_ADD_EXISTING_OR_CYCLE", group: "Modal Navigation", label: "Modal: Add Existing / Cycle", description: "Open existing song sections or cycle its selection.", modes: ["trigger"] },
   { id: "MODAL_CONFIRM", group: "Modal Navigation", label: "Modal: Confirm Selection", description: "Confirm the selected section in the catalog.", modes: ["trigger"] },
   { id: "BEAT_LIGHT_1", group: "Metronome Lights", label: "First beat note", description: "Learn the first note in the metronome light range.", modes: ["trigger"] },
   { id: "BEAT_LIGHT_2", group: "Metronome Lights", label: "Beat 2: Strip 8 S", description: "Learn the strip 8 S button for beat 2 feedback.", modes: ["trigger"] },
@@ -227,7 +228,14 @@ export function useMidiLearn(
   const outputsRef = useRef<MidiOutputLike[]>([]);
   const [outputNames, setOutputNames] = useState<string[]>([]);
   const [outputRevision, setOutputRevision] = useState(0);
-  const feedbackStateRef = useRef<Map<MidiOutputLike, FeedbackScene>>(new Map());
+  const feedbackStateRef = useRef(new Map<MidiOutputLike, FeedbackScene>());
+  const lastFeedbackArgsRef = useRef<{
+    placementOpen: boolean;
+    catalogOpen: boolean;
+    beat: number | null;
+    enabled: boolean;
+  }>({ placementOpen: false, catalogOpen: false, beat: null, enabled: false });
+  const sendFeedbackSceneRef = useRef<() => void>(() => {});
   const rescanRef = useRef<() => void>(() => {});
 
   useEffect(() => { onActionRef.current = onAction; }, [onAction]);
@@ -442,7 +450,15 @@ export function useMidiLearn(
         }
         const activeValue = type === "note" ? noteOn : value > 0;
         if (binding.mode === "trigger") {
-          if (activeValue) onActionRef.current(binding.actionId, { rawValue: value, delta: 1 });
+          if (activeValue) {
+            onActionRef.current(binding.actionId, { rawValue: value, delta: 1 });
+          } else if (type === "note" || type === "cc") {
+            const key = feedbackKey({ type, channel: binding.channel, noteOrCcNumber: number });
+            for (const sent of feedbackStateRef.current.values()) {
+              sent.delete(key);
+            }
+            window.requestAnimationFrame(() => sendFeedbackSceneRef.current());
+          }
           continue;
         }
         if (type !== "cc") continue;
@@ -635,6 +651,7 @@ export function useMidiLearn(
   const sendFeedbackScene = useCallback((
     placementOpen: boolean, catalogOpen: boolean, beat: number | null, enabled: boolean,
   ) => {
+    lastFeedbackArgsRef.current = { placementOpen, catalogOpen, beat, enabled };
     const profile = profileDocumentRef.current.profiles.find((item) => item.id === activeProfileIdRef.current);
     const outputs = profile ? getMidiOutputs({ outputs: outputsRef.current }, profile.pairedDeviceName) : [];
     const shortcutControls: Array<{ control: FeedbackControl; active: boolean }> = [];
@@ -653,7 +670,7 @@ export function useMidiLearn(
       if (useRange && beatNumber) continue;
       const active = isShortcutLightActive(action.id, action.group, enabled, placementOpen, catalogOpen);
       for (const item of [binding, ...(binding.alternatives ?? [])]) {
-        if (item.mode !== "trigger" || item.type === "pitchbend") continue;
+        if (item.type === "pitchbend" || (item.type !== "note" && item.mode !== "trigger")) continue;
         const control: FeedbackControl = { type: item.type, channel: item.channel, noteOrCcNumber: item.noteOrCcNumber };
         if (beatNumber) beatControls.push({ control, beat: Number(beatNumber[1]) - 1 });
         else shortcutControls.push({
@@ -675,6 +692,12 @@ export function useMidiLearn(
         current === "Could not send MIDI light feedback to one or more MIDI outputs." ? null : current);
     }
   }, []);
+  useEffect(() => {
+    sendFeedbackSceneRef.current = () => {
+      const { placementOpen, catalogOpen, beat, enabled } = lastFeedbackArgsRef.current;
+      sendFeedbackScene(placementOpen, catalogOpen, beat, enabled);
+    };
+  }, [sendFeedbackScene]);
   useEffect(() => () => {
     const errors = syncFeedbackOutputs([], new Map(), feedbackStateRef.current);
     if (errors.length) console.error("Could not clear MIDI lights on exit.", errors);

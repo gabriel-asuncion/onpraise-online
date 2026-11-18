@@ -131,11 +131,13 @@ export function isShortcutLightActive(
   catalogOpen: boolean,
 ): boolean {
   if (!enabled) return false;
-  if (!placementOpen && !catalogOpen) return group !== "Modal Navigation";
+  if (!placementOpen && !catalogOpen) {
+    return group !== "Modal Navigation" || actionId === "MODAL_OPEN_ADD_SECTION";
+  }
   if (actionId === "PLAY_PAUSE") return catalogOpen;
-  if (group !== "Modal Navigation") return false;
+  if (group !== "Modal Navigation" || actionId === "MODAL_OPEN_ADD_SECTION") return false;
   if (actionId === "MODAL_INSERT_BEFORE" || actionId === "MODAL_INSERT_AFTER") return placementOpen;
-  if (actionId === "MODAL_CANCEL" || actionId === "MODAL_ADD_NEW_OR_CYCLE") return true;
+  if (actionId === "MODAL_CANCEL" || actionId === "MODAL_ADD_NEW_OR_CYCLE" || actionId === "MODAL_ADD_EXISTING_OR_CYCLE") return true;
   return actionId === "MODAL_CONFIRM" && catalogOpen;
 }
 

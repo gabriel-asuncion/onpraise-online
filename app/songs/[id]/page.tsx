@@ -7,7 +7,7 @@ import { useEngine } from "../../context/EngineContext";
 import PageSkeleton from '../../../components/PageSkeleton';
 import OfflineSongButton from "../../../components/OfflineSongButton";
 import { getOfflineSong } from "../../../lib/offline-db";
-import { getSongAudioStems, type StoredAudioStem } from "../../../lib/offline-audio";
+import { resolveSongAudioStems, type StoredAudioStem } from "../../../lib/offline-audio";
 import { getSavedAudioSource, refreshSavedAudioSource, resolveEffectiveAudioSource, saveAudioSourcePreference, type AudioSourceMode } from "../../../lib/audio-source-preference";
 import { groupStemSlots, type StemSlot } from "../../../lib/stem-slots";
 import { useOnlineStatus } from "../../context/NetworkContext";
@@ -1337,7 +1337,7 @@ export default function SoloPracticeRoomPage() {
       return () => controller.abort();
     }
     setIsStemsLoading(true);
-    void getSongAudioStems(realUserId, songId).then(async (stems) => {
+    void resolveSongAudioStems(realUserId, songId, activeSong?.title ?? "", controller.signal).then(async (stems) => {
       if (controller.signal.aborted) return;
       setStoredStems(stems);
       if (stems.length && !await loadWhilePaused(stems.map((stem) => ({
