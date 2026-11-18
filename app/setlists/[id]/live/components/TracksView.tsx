@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import { CompiledSectionToken, ArrangementSection, SongRecord } from "../types/setlist";
 import { MemoizedLyricLine } from "./MemoizedLyricLine";
+import type { StoredAudioStem } from "../../../../../lib/offline-audio";
+import { groupStemSlots, type StemSlot } from "../../../../../lib/stem-slots";
+import type { StemWaveform } from "../../../../../lib/multitrack-engine";
 
 interface TracksViewProps {
   activeSong: SongRecord | null;
@@ -24,6 +27,106 @@ interface TracksViewProps {
   handleSectionInteractiveSelection: (idx: number, trackIdx?: number, exactBeat?: number) => void;
   isMD?: boolean;
   midiZoomSteps?: number;
+  audioSource?: "youtube" | "local";
+  storedStems?: StoredAudioStem[];
+  stemMixes?: Array<{ id: string; volume: number; muted: boolean; solo: boolean; sourceVersion?: string }>;
+  stemWaveforms?: StemWaveform[];
+  onToggleStemMute?: (stemId: string) => void;
+  onToggleStemSolo?: (stemId: string) => void;
+}
+
+const STEM_LANE_STYLES: ReadonlyArray<{
+  slot: StemSlot;
+  label: string;
+  accent: string;
+  clipBg: string;
+  clipBorder: string;
+  waveColor: string;
+  badgeText: string;
+}> = [
+  {
+    slot: "drums",
+    label: "Drums",
+    accent: "#22c55e",
+    clipBg: "rgba(34, 197, 94, 0.22)",
+    clipBorder: "rgba(74, 222, 128, 0.55)",
+    waveColor: "#4ade80",
+    badgeText: "text-emerald-300",
+  },
+  {
+    slot: "bass",
+    label: "Bass",
+    accent: "#f59e0b",
+    clipBg: "rgba(245, 158, 11, 0.22)",
+    clipBorder: "rgba(251, 191, 36, 0.55)",
+    waveColor: "#fbbf24",
+    badgeText: "text-amber-300",
+  },
+  {
+    slot: "keys",
+    label: "Keys",
+    accent: "#0ea5e9",
+    clipBg: "rgba(14, 165, 233, 0.22)",
+    clipBorder: "rgba(56, 189, 248, 0.55)",
+    waveColor: "#38bdf8",
+    badgeText: "text-sky-300",
+  },
+  {
+    slot: "other",
+    label: "Other",
+    accent: "#f97316",
+    clipBg: "rgba(249, 115, 22, 0.22)",
+    clipBorder: "rgba(251, 146, 60, 0.55)",
+    waveColor: "#fb923c",
+    badgeText: "text-orange-300",
+  },
+  {
+    slot: "guitars",
+    label: "Guitar",
+    accent: "#ec4899",
+    clipBg: "rgba(236, 72, 153, 0.22)",
+    clipBorder: "rgba(244, 114, 182, 0.55)",
+    waveColor: "#f472b6",
+    badgeText: "text-pink-300",
+  },
+  {
+    slot: "vocals",
+    label: "Vocals",
+    accent: "#8b5cf6",
+    clipBg: "rgba(139, 92, 246, 0.22)",
+    clipBorder: "rgba(167, 139, 250, 0.55)",
+    waveColor: "#a78bfa",
+    badgeText: "text-violet-300",
+  },
+];
+
+function StemWaveformSvg({ peaks, color }: { peaks: number[]; color: string }) {
+  if (!peaks.length) return null;
+  const w = 1000;
+  const h = 44;
+  const mid = h / 2;
+  const step = w / peaks.length;
+  const topPoints: string[] = [];
+  const bottomPoints: string[] = [];
+
+  for (let i = 0; i < peaks.length; i++) {
+    const x = (i + 0.5) * step;
+    const amp = Math.max(1.2, peaks[i] * (mid - 3));
+    topPoints.push(`${x.toFixed(1)},${(mid - amp).toFixed(1)}`);
+    bottomPoints.unshift(`${x.toFixed(1)},${(mid + amp).toFixed(1)}`);
+  }
+
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      className="h-full w-full pointer-events-none"
+      aria-hidden="true"
+    >
+      <line x1="0" y1={mid} x2={w} y2={mid} stroke={color} strokeOpacity="0.25" strokeWidth="1" />
+      <polygon points={`${topPoints.join(" ")} ${bottomPoints.join(" ")}`} fill={color} fillOpacity="0.75" />
+    </svg>
+  );
 }
 
 function getSectionColor(label: string) {
@@ -41,7 +144,9 @@ export function TracksView(props: TracksViewProps) {
   const {
     activeSong, sections, songAst, sectionStarts, sectionDurations, totalBeats, quarterBeatsPerMeasure,
     activeSectionIndex, activeLineIndex, playheadBeat, isPlaying, tempo, showChords, lyricsFontSize,
-    lineSpacing, chordFormat, activeDisplayKey, handleSectionInteractiveSelection, isMD, midiZoomSteps = 0
+    lineSpacing, chordFormat, activeDisplayKey, handleSectionInteractiveSelection, isMD, midiZoomSteps = 0,
+    audioSource = "youtube", storedStems = [], stemMixes = [], stemWaveforms = [],
+    onToggleStemMute, onToggleStemSolo,
   } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -328,116 +433,220 @@ export function TracksView(props: TracksViewProps) {
         </div>
       </div>
 
-      {/* --- TIMELINE RIBBON --- */}
-      <div className="h-[120px] bg-[#18181b] border-y border-[#27272a] shadow-[0_0_40px_rgba(0,0,0,0.5)] shrink-0 relative flex flex-col">
+      {(() => {
+        const groupedStems = groupStemSlots(storedStems);
+        const activeStemLanes = audioSource === "local"
+          ? STEM_LANE_STYLES.map((style) => {
+              const stem = groupedStems[style.slot].length === 1 ? groupedStems[style.slot][0] : undefined;
+              const mix = stem ? stemMixes.find((m) => m.id === stem.stemId) : undefined;
+              const waveform = stem ? stemWaveforms.find((w) => w.id === stem.stemId) : undefined;
+              return { ...style, stem, mix, waveform };
+            }).filter((lane) => Boolean(lane.stem))
+          : [];
+        const hasStemLanes = activeStemLanes.length > 0;
+        const secPerBeat = 60 / (tempo || 75);
+        const ribbonHeight = hasStemLanes ? Math.min(340, 88 + activeStemLanes.length * 42) : 120;
 
-        {/* PLAYHEAD ANCHOR */}
-        <div className="absolute top-0 bottom-0 left-1/2 w-[2px] bg-red-500 z-50 pointer-events-none transform -translate-x-1/2 shadow-[0_0_12px_rgba(239,68,68,0.9)]">
-           <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-red-500" />
-           <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-b-[8px] border-l-transparent border-r-transparent border-b-red-500" />
-        </div>
+        return (
+          <>
+            {/* --- TIMELINE RIBBON & MULTI-LANE STEMS --- */}
+            <div
+              className="bg-[#18181b] border-y border-[#27272a] shadow-[0_0_40px_rgba(0,0,0,0.5)] shrink-0 relative flex flex-col transition-[height] duration-200"
+              style={{ height: `${ribbonHeight}px` }}
+            >
+              {/* LEFT LANE HEADERS (when multi-lane stems are active) */}
+              {hasStemLanes && (
+                <div className="absolute left-0 top-6 bottom-0 z-40 w-[108px] sm:w-[132px] bg-[#121215]/95 backdrop-blur-md border-r border-white/10 flex flex-col pointer-events-auto">
+                  <div className="h-[56px] shrink-0 border-b border-white/10 px-2.5 flex items-center">
+                    <span className="text-[9px] font-black uppercase tracking-widest text-zinc-400">Sections</span>
+                  </div>
+                  <div className="flex-1 overflow-y-auto custom-scrollbar divide-y divide-white/5">
+                    {activeStemLanes.map((lane) => {
+                      const isMuted = lane.mix?.muted ?? false;
+                      const isSoloed = lane.mix?.solo ?? false;
+                      return (
+                        <div key={lane.slot} className="h-[42px] px-2 flex items-center justify-between gap-1 bg-[#141418]">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="w-1.5 h-5 rounded-full shrink-0" style={{ backgroundColor: lane.accent }} />
+                            <span className={`text-[10px] font-black uppercase tracking-wider truncate ${lane.badgeText}`}>
+                              {lane.label}
+                            </span>
+                          </div>
+                          {lane.stem && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                aria-label={`Mute ${lane.label}`}
+                                onClick={(e) => { e.stopPropagation(); onToggleStemMute?.(lane.stem!.stemId); }}
+                                className={`w-5 h-5 rounded text-[9px] font-black transition-colors cursor-pointer ${
+                                  isMuted ? "bg-amber-500 text-white" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                                }`}
+                              >
+                                M
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={`Solo ${lane.label}`}
+                                onClick={(e) => { e.stopPropagation(); onToggleStemSolo?.(lane.stem!.stemId); }}
+                                className={`w-5 h-5 rounded text-[9px] font-black transition-colors cursor-pointer ${
+                                  isSoloed ? "bg-cyan-500 text-zinc-950" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                                }`}
+                              >
+                                S
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
-        {/* NATIVE SCROLL CANVAS */}
-        <div
-          ref={containerRef}
-          onScroll={handleTimelineScroll}
-          className={`absolute inset-0 overflow-x-auto overflow-y-hidden custom-scrollbar ${isPlaying ? 'pointer-events-none' : isMD ? 'cursor-grab active:cursor-grabbing' : ''}`}
-          style={{ scrollBehavior: 'auto' }}
-        >
-          <div
-            className="h-full relative"
-            style={{ width: `${totalCanvasBeats * pixelsPerBeat}px`, paddingLeft: '50vw', paddingRight: '50vw', boxSizing: 'content-box' }}
-            onClick={handleCanvasClick}
-          >
-             {/* 1. Bar Numbers Layer */}
-             <div className="absolute top-0 h-6 border-b border-[#27272a] flex items-end" style={{ left: '50vw', width: `${totalCanvasBeats * pixelsPerBeat}px` }}>
-               {Array.from({ length: totalRenderMeasures }).map((_, i) => {
-                 const mIdx = i - preRollMeasures;
-                 const beatPos = mIdx * quarterBeatsPerMeasure;
-                 if (beatPos + quarterBeatsPerMeasure < -offsetBeats || beatPos > totalBeats) return null;
+              {/* PLAYHEAD ANCHOR */}
+              <div className="absolute top-0 bottom-0 left-1/2 w-[2px] bg-red-500 z-50 pointer-events-none transform -translate-x-1/2 shadow-[0_0_12px_rgba(239,68,68,0.9)]">
+                <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-red-500" />
+                <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-b-[8px] border-l-transparent border-r-transparent border-b-red-500" />
+              </div>
 
-                 return (
-                   <div
-                     key={`measure-${mIdx}`}
-                     className="absolute h-full border-l border-[#3f3f46] text-[#71717a] font-mono text-[9px] font-bold pl-1 pt-1 pointer-events-none"
-                     style={{ left: `${(beatPos + offsetBeats) * pixelsPerBeat}px`, width: `${quarterBeatsPerMeasure * pixelsPerBeat}px` }}
-                   >
-                     {mIdx < 0 ? mIdx : mIdx + 1}
-                   </div>
-                 );
-               })}
-             </div>
+              {/* NATIVE SCROLL CANVAS */}
+              <div
+                ref={containerRef}
+                onScroll={handleTimelineScroll}
+                className={`absolute inset-0 overflow-x-auto overflow-y-hidden custom-scrollbar ${isPlaying ? 'pointer-events-none' : isMD ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                style={{ scrollBehavior: 'auto' }}
+              >
+                <div
+                  className="h-full relative"
+                  style={{ width: `${totalCanvasBeats * pixelsPerBeat}px`, paddingLeft: '50vw', paddingRight: '50vw', boxSizing: 'content-box' }}
+                  onClick={handleCanvasClick}
+                >
+                  {/* 1. Bar Numbers Layer */}
+                  <div className="absolute top-0 h-6 border-b border-[#27272a] flex items-end" style={{ left: '50vw', width: `${totalCanvasBeats * pixelsPerBeat}px` }}>
+                    {Array.from({ length: totalRenderMeasures }).map((_, i) => {
+                      const mIdx = i - preRollMeasures;
+                      const beatPos = mIdx * quarterBeatsPerMeasure;
+                      if (beatPos + quarterBeatsPerMeasure < -offsetBeats || beatPos > totalBeats) return null;
 
-             {/* 2. Section Blocks Layer */}
-             <div className="absolute top-6 bottom-4" style={{ left: '50vw', width: `${totalCanvasBeats * pixelsPerBeat}px` }}>
+                      return (
+                        <div
+                          key={`measure-${mIdx}`}
+                          className="absolute h-full border-l border-[#3f3f46] text-[#71717a] font-mono text-[9px] font-bold pl-1 pt-1 pointer-events-none"
+                          style={{ left: `${(beatPos + offsetBeats) * pixelsPerBeat}px`, width: `${quarterBeatsPerMeasure * pixelsPerBeat}px` }}
+                        >
+                          {mIdx < 0 ? mIdx : mIdx + 1}
+                        </div>
+                      );
+                    })}
+                  </div>
 
-               {/* 🟡 Empty Offset Pre-Roll Lane */}
-               {offsetBeats > 0 && (
-                 <div
-                   className="absolute top-1 bottom-1 rounded-md border border-white/5 opacity-40 bg-zinc-800/20"
-                   style={{ left: `0px`, width: `${offsetBeats * pixelsPerBeat}px` }}
-                 >
-                   <div className="absolute top-1 right-2 font-black text-[9px] tracking-widest uppercase text-zinc-500 pointer-events-none">
-                     PRE-ROLL
-                   </div>
-                 </div>
-               )}
+                  {/* 2. Section Blocks Layer */}
+                  <div
+                    className={`absolute top-6 ${hasStemLanes ? "h-[56px] border-b border-white/10" : "bottom-4"}`}
+                    style={{ left: '50vw', width: `${totalCanvasBeats * pixelsPerBeat}px` }}
+                  >
+                    {/* 🟡 Empty Offset Pre-Roll Lane */}
+                    {offsetBeats > 0 && (
+                      <div
+                        className="absolute top-1 bottom-1 rounded-md border border-white/5 opacity-40 bg-zinc-800/20"
+                        style={{ left: `0px`, width: `${offsetBeats * pixelsPerBeat}px` }}
+                      >
+                        <div className="absolute top-1 right-2 font-black text-[9px] tracking-widest uppercase text-zinc-500 pointer-events-none">
+                          PRE-ROLL
+                        </div>
+                      </div>
+                    )}
 
-               {sections.map((sec, idx) => {
-                 const startBeat = sectionStarts[idx] ?? 0;
-                 const durationBeats = sectionDurations[idx] ?? 0;
-                 if (durationBeats <= 0) return null;
+                    {sections.map((sec, idx) => {
+                      const startBeat = sectionStarts[idx] ?? 0;
+                      const durationBeats = sectionDurations[idx] ?? 0;
+                      if (durationBeats <= 0) return null;
 
-                 const isSecActive = idx === activeSectionIndex;
-                 const leftPx = (startBeat + offsetBeats) * pixelsPerBeat;
-                 const widthPx = durationBeats * pixelsPerBeat;
-                 const bgColor = getSectionColor(sec.section_name);
+                      const isSecActive = idx === activeSectionIndex;
+                      const leftPx = (startBeat + offsetBeats) * pixelsPerBeat;
+                      const widthPx = durationBeats * pixelsPerBeat;
+                      const bgColor = getSectionColor(sec.section_name);
 
-                 const lineCount = Math.max(1, songAst[idx]?.lines.length || 1);
-                 const lineBeats = getLineBeats(sec.section_name, lineCount, durationBeats);
-                 let accumPartPx = 0;
+                      const lineCount = Math.max(1, songAst[idx]?.lines.length || 1);
+                      const lineBeats = getLineBeats(sec.section_name, lineCount, durationBeats);
+                      let accumPartPx = 0;
 
-                 return (
-                   <div
-                     key={`track-sec-${idx}`}
-                     className={`absolute top-1 bottom-1 rounded-md overflow-hidden transition-all duration-200 border border-white/10 ${
-                       isSecActive ? 'opacity-100 z-20 shadow-[0_0_15px_rgba(255,255,255,0.15)] scale-y-[1.05] border-white/50' : `opacity-60 z-10 ${isMD ? 'hover:opacity-80 hover:border-white/30 cursor-pointer' : ''}`
-                     } ${bgColor}`}
-                     style={{
-                       left: `${leftPx}px`,
-                       width: `${Math.max(4, widthPx - 1)}px`,
-                       backgroundImage: 'linear-gradient(to bottom, rgba(255,255,255,0.1), rgba(0,0,0,0.3))'
-                     }}
-                   >
-                     {Array.from({ length: lineCount - 1 }).map((_, lIdx) => {
-                       accumPartPx += lineBeats[lIdx] * pixelsPerBeat;
-                       return (
-                         <div
-                           key={`line-part-${lIdx}`}
-                           className="absolute top-0 bottom-0 border-l border-white/30 pointer-events-none shadow-[1px_0_3px_rgba(0,0,0,0.2)]"
-                           style={{ left: `${accumPartPx}px` }}
-                         />
-                       );
-                     })}
+                      return (
+                        <div
+                          key={`track-sec-${idx}`}
+                          className={`absolute top-1 bottom-1 rounded-md overflow-hidden transition-all duration-200 border border-white/10 ${
+                            isSecActive ? 'opacity-100 z-20 shadow-[0_0_15px_rgba(255,255,255,0.15)] scale-y-[1.05] border-white/50' : `opacity-60 z-10 ${isMD ? 'hover:opacity-80 hover:border-white/30 cursor-pointer' : ''}`
+                          } ${bgColor}`}
+                          style={{
+                            left: `${leftPx}px`,
+                            width: `${Math.max(4, widthPx - 1)}px`,
+                            backgroundImage: 'linear-gradient(to bottom, rgba(255,255,255,0.1), rgba(0,0,0,0.3))'
+                          }}
+                        >
+                          {Array.from({ length: lineCount - 1 }).map((_, lIdx) => {
+                            accumPartPx += lineBeats[lIdx] * pixelsPerBeat;
+                            return (
+                              <div
+                                key={`line-part-${lIdx}`}
+                                className="absolute top-0 bottom-0 border-l border-white/30 pointer-events-none shadow-[1px_0_3px_rgba(0,0,0,0.2)]"
+                                style={{ left: `${accumPartPx}px` }}
+                              />
+                            );
+                          })}
 
-                     <div className="absolute top-1 left-2 font-black text-[10px] tracking-widest uppercase text-white drop-shadow-md whitespace-nowrap overflow-hidden pointer-events-none">
-                       {sec.section_name}
-                     </div>
-                   </div>
-                 );
-               })}
-             </div>
-          </div>
-        </div>
-      </div>
+                          <div className="absolute top-1 left-2 font-black text-[10px] tracking-widest uppercase text-white drop-shadow-md whitespace-nowrap overflow-hidden pointer-events-none">
+                            {sec.section_name}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
 
-      {/* ✅ ZOOM CONTROLS */}
-      <div className="absolute right-4 bottom-[27vh] z-50 flex flex-col gap-1 bg-[#18181b]/80 backdrop-blur-md border border-white/10 p-1 rounded-lg shadow-xl">
-        <button onClick={() => setPixelsPerBeat(p => Math.min(Math.max(200, (containerRef.current?.clientWidth || 0) / Math.max(1, totalCanvasBeats)), p + 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">add</span></button>
-        <button onClick={() => setPixelsPerBeat(p => Math.max((containerRef.current?.clientWidth || 0) / Math.max(1, totalCanvasBeats), p - 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">remove</span></button>
-      </div>
+                  {/* 3. Multi-Lane Stems with Waveforms (up to 6 lanes) */}
+                  {hasStemLanes && (
+                    <div
+                      className="absolute top-[80px] bottom-0 flex flex-col divide-y divide-white/5"
+                      style={{ left: '50vw', width: `${totalCanvasBeats * pixelsPerBeat}px` }}
+                    >
+                      {activeStemLanes.map((lane) => {
+                        const stemDurationSecs = lane.waveform?.durationSeconds ?? 0;
+                        const stemWidthPx = Math.max(12, (stemDurationSecs / secPerBeat) * pixelsPerBeat);
+                        const isMuted = lane.mix?.muted ?? false;
+                        return (
+                          <div key={`lane-track-${lane.slot}`} className="h-[42px] relative bg-[#111114]/70">
+                            <div
+                              className={`absolute top-1 bottom-1 rounded-md overflow-hidden border transition-opacity ${isMuted ? "opacity-35" : "opacity-95"}`}
+                              style={{
+                                left: "0px",
+                                width: `${stemWidthPx}px`,
+                                backgroundColor: lane.clipBg,
+                                borderColor: lane.clipBorder,
+                              }}
+                            >
+                              <div className="absolute top-0.5 left-2 z-10 text-[8px] font-bold tracking-wider text-white/90 truncate max-w-[240px] pointer-events-none drop-shadow">
+                                {lane.stem?.fileName}
+                              </div>
+                              {lane.waveform && (
+                                <StemWaveformSvg peaks={lane.waveform.peaks} color={lane.waveColor} />
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
 
-      <div className="h-[25vh] min-h-[120px] bg-[#09090b] shrink-0" />
+            {/* ✅ ZOOM CONTROLS */}
+            <div className="absolute right-4 bottom-6 z-50 flex flex-col gap-1 bg-[#18181b]/80 backdrop-blur-md border border-white/10 p-1 rounded-lg shadow-xl">
+              <button onClick={() => setPixelsPerBeat(p => Math.min(Math.max(200, (containerRef.current?.clientWidth || 0) / Math.max(1, totalCanvasBeats)), p + 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">add</span></button>
+              <button onClick={() => setPixelsPerBeat(p => Math.max((containerRef.current?.clientWidth || 0) / Math.max(1, totalCanvasBeats), p - 10))} className="w-8 h-8 flex items-center justify-center text-white hover:bg-white/10 rounded cursor-pointer transition-colors"><span className="material-symbols-outlined text-[18px]">remove</span></button>
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }

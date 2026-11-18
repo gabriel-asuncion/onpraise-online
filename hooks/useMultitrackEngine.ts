@@ -1,26 +1,43 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MultitrackEngine, type DecodedStem } from "../lib/multitrack-engine";
+import { MultitrackEngine, type DecodedStem, type StemWaveform } from "../lib/multitrack-engine";
+import type { StemRole } from "../lib/offline-audio";
 
 export interface MultitrackInput {
   id: string;
   blob: Blob;
+  role?: StemRole;
   sourceVersion?: string;
 }
 
 export function useMultitrackEngine(getAudioContext: () => AudioContext | null) {
   const engineRef = useRef<MultitrackEngine | null>(null);
+  const unsubscribeRef = useRef<(() => void) | null>(null);
   const loadRevisionRef = useRef(0);
   const [currentTimeSeconds, setCurrentTimeSeconds] = useState(0);
   const [durationSeconds, setDurationSeconds] = useState(0);
+  const [eqEnabled, setEqEnabledState] = useState(true);
+  const [mixes, setMixes] = useState<ReturnType<MultitrackEngine["getStemMixes"]>>([]);
+  const [waveforms, setWaveforms] = useState<StemWaveform[]>([]);
+
+  const syncEngineState = useCallback((engine: MultitrackEngine) => {
+    setMixes(engine.getStemMixes());
+    setWaveforms(engine.getStemWaveforms());
+    setDurationSeconds(engine.durationSeconds);
+    setEqEnabledState(engine.isEqEnabled);
+  }, []);
 
   const getEngine = useCallback((): MultitrackEngine => {
     const context = getAudioContext();
     if (!context) throw new Error("The audio context has not been initialized.");
-    if (!engineRef.current) engineRef.current = new MultitrackEngine(context);
+    if (!engineRef.current) {
+      const engine = new MultitrackEngine(context);
+      engineRef.current = engine;
+      unsubscribeRef.current = engine.subscribe(() => syncEngineState(engine));
+    }
     return engineRef.current;
-  }, [getAudioContext]);
+  }, [getAudioContext, syncEngineState]);
 
   const load = useCallback(async (inputs: MultitrackInput[]) => {
     const revision = ++loadRevisionRef.current;
@@ -32,6 +49,7 @@ export function useMultitrackEngine(getAudioContext: () => AudioContext | null) 
       volume: 1,
       muted: false,
       solo: false,
+      role: input.role,
       sourceVersion: input.sourceVersion,
     })));
     if (revision !== loadRevisionRef.current) return false;
@@ -59,6 +77,7 @@ export function useMultitrackEngine(getAudioContext: () => AudioContext | null) 
         volume: 1,
         muted: false,
         solo: false,
+        role: input.role,
         sourceVersion: input.sourceVersion,
       };
     }));
@@ -74,11 +93,25 @@ export function useMultitrackEngine(getAudioContext: () => AudioContext | null) 
     return true;
   }, [getAudioContext, getEngine]);
 
+  const toggleStemMute = useCallback((id: string) => {
+    getEngine().toggleStemMute(id);
+  }, [getEngine]);
+
+  const toggleStemSolo = useCallback((id: string) => {
+    getEngine().toggleStemSolo(id);
+  }, [getEngine]);
+
+  const setEqEnabled = useCallback((enabled: boolean) => {
+    getEngine().setEqEnabled(enabled);
+  }, [getEngine]);
+
   const clear = useCallback(() => {
     cancelLoad();
     engineRef.current?.setStems([]);
     setCurrentTimeSeconds(0);
     setDurationSeconds(0);
+    setMixes([]);
+    setWaveforms([]);
   }, [cancelLoad]);
 
   useEffect(() => {
@@ -91,10 +124,26 @@ export function useMultitrackEngine(getAudioContext: () => AudioContext | null) 
     return () => {
       loadRevisionRef.current += 1;
       cancelAnimationFrame(frame);
+      unsubscribeRef.current?.();
+      unsubscribeRef.current = null;
       engineRef.current?.dispose();
       engineRef.current = null;
     };
   }, []);
 
-  return { getEngine, load, loadWhilePaused, cancelLoad, clear, currentTimeSeconds, durationSeconds };
+  return {
+    getEngine,
+    load,
+    loadWhilePaused,
+    cancelLoad,
+    clear,
+    toggleStemMute,
+    toggleStemSolo,
+    eqEnabled,
+    setEqEnabled,
+    mixes,
+    waveforms,
+    currentTimeSeconds,
+    durationSeconds,
+  };
 }

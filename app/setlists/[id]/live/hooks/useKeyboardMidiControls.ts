@@ -56,7 +56,33 @@ export type ControlActionId =
   | "youtubeVolume" | "beatLightFirst" | StemMidiActionId;
 
 export type ControlCategory = "Playback" | "Audio" | "Display" | "Visuals / Hardware";
+export type MidiAudioScope = "shared" | "youtube" | "stems";
 export type MidiMessageType = "note" | "cc" | "pitchbend";
+
+export function getControlActionScope(actionId: ControlActionId): MidiAudioScope {
+  if (
+    actionId === "youtubeVolume" ||
+    actionId === "youtubeMute" ||
+    actionId === "youtubeSolo" ||
+    actionId === "youtubeSync"
+  ) {
+    return "youtube";
+  }
+  if (actionId.startsWith("STEM_")) {
+    return "stems";
+  }
+  return "shared";
+}
+
+export function isControlActionActiveForSource(
+  actionId: ControlActionId,
+  audioSource: "youtube" | "local",
+): boolean {
+  const scope = getControlActionScope(actionId);
+  if (scope === "youtube") return audioSource === "youtube";
+  if (scope === "stems") return audioSource === "local";
+  return true;
+}
 
 export interface MidiControlMapping {
   deviceId: string;
@@ -233,7 +259,15 @@ function keyboardActionForEvent(event: KeyboardEvent): ControlActionId | null {
   return keys[event.code] ?? null;
 }
 
-export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient>, actions: ControlActions, beat: number | null = null, page: Extract<MidiProfilePage, "live" | "solo"> = "live", playback: LightShowPlayback = { isPlaying: false, beat: 0, tempo: 75, quarterBeatsPerMeasure: 4, unitQuarterBeats: 1 }, audioSource: "youtube" | "local" = "youtube") {
+export function useKeyboardMidiControls(
+  supabase: ReturnType<typeof createClient>,
+  actions: ControlActions,
+  beat: number | null = null,
+  page: Extract<MidiProfilePage, "live" | "solo"> = "live",
+  playback: LightShowPlayback = { isPlaying: false, beat: 0, tempo: 75, quarterBeatsPerMeasure: 4, unitQuarterBeats: 1 },
+  audioSource: "youtube" | "local" = "youtube",
+  stemLedStates: Partial<Record<StemMidiActionId, boolean>> = {},
+) {
   const { realUserId } = useEngine();
   const { isOnline } = useOnlineStatus();
   const [preferences, setPreferences] = useState(EMPTY_CONTROL_PREFERENCES);
@@ -568,11 +602,10 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
 
         const currentPreferences = preferencesRef.current;
         if (input.id !== currentPreferences.pairedDeviceId) return;
-        const isLocalAudio = audioSourceRef.current === "local";
+        const activeSource = audioSourceRef.current;
         const candidateEntries = Object.entries(currentPreferences.mappings).filter(([actionId, candidate]) => {
           if (!isMidiActionAllowedInEq(eqModeRef.current, actionId)) return false;
-          if (isLocalAudio && (actionId === "youtubeVolume" || actionId === "youtubeMute" || actionId === "youtubeSolo")) return false;
-          if (!isLocalAudio && actionId.startsWith("STEM_")) return false;
+          if (!isControlActionActiveForSource(actionId as ControlActionId, activeSource)) return false;
           return Boolean(candidate && matchesPairedMidiMapping(
             currentPreferences.pairedDeviceId,
             input.id,
@@ -582,7 +615,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
             messageType === "pitchbend" ? channel : number,
           ));
         });
-        const mapping = isLocalAudio
+        const mapping = activeSource === "local"
           ? candidateEntries.find(([id]) => id.startsWith("STEM_")) ?? candidateEntries[0]
           : candidateEntries[0];
         if (!mapping) {
@@ -660,7 +693,12 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
     const shortcuts = Object.entries(preferences.mappings).flatMap(([actionId, mapping]) => {
       if (!mapping || mapping.messageType === "pitchbend" || ["jogScrub", "clickOffset", "cycleLightShowPreset", "transpose", "timelineZoom", "clickSound"].includes(actionId) ||
         CONTROL_ACTIONS.find((action) => action.id === actionId)?.isFader) return [];
-      return [{ control: { type: mapping.messageType, channel: mapping.channel, noteOrCcNumber: mapping.number }, active: !isSetupOpen && actionId !== "toggleEqMode" }];
+      if (!isControlActionActiveForSource(actionId as ControlActionId, audioSource)) return [];
+      const isStemToggle = actionId.startsWith("STEM_") && (actionId.endsWith("_MUTE") || actionId.endsWith("_SOLO"));
+      const active = isStemToggle
+        ? !isSetupOpen && Boolean(stemLedStates[actionId as StemMidiActionId])
+        : !isSetupOpen && actionId !== "toggleEqMode";
+      return [{ control: { type: mapping.messageType, channel: mapping.channel, noteOrCcNumber: mapping.number }, active }];
     });
     const beatControls = preferences.beatLights
       ? createBeatControls(preferences.beatLights.firstNote, preferences.beatLights.channel, preferences.beatLights.count)
@@ -675,7 +713,7 @@ export function useKeyboardMidiControls(supabase: ReturnType<typeof createClient
       console.error("Could not send live MIDI light feedback.", errors);
       setMidiError("Could not send MIDI light feedback to one or more outputs.");
     }
-  }, [preferences, profileDocument, activeProfileId, isSetupOpen, beat, outputRevision, isEqModeActive, sendEqFrame]);
+  }, [preferences, profileDocument, activeProfileId, isSetupOpen, beat, outputRevision, isEqModeActive, sendEqFrame, stemLedStates, audioSource]);
 
   useEffect(() => () => {
     const outputs = [...feedbackRef.current.keys()];

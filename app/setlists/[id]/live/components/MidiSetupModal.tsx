@@ -3,7 +3,10 @@
 import React, { useState } from "react";
 import {
   CONTROL_ACTIONS,
+  ControlActionDefinition,
   ControlActionId,
+  getControlActionScope,
+  MidiAudioScope,
   MidiDeviceOption,
   UserControlPreferences,
 } from "../hooks/useKeyboardMidiControls";
@@ -26,6 +29,8 @@ export interface MidiSetupModalProps {
   midiError: string | null;
   learningAction: ControlActionId | null;
   unavailableActions?: ControlActionId[];
+  audioSource?: "youtube" | "local";
+  onApplySmcStemPreset?: () => void;
   onClose: () => void;
   onScan: () => void;
   onPairDevice: (deviceId: string) => void;
@@ -55,6 +60,8 @@ export function MidiSetupModal({
   midiError,
   learningAction,
   unavailableActions = [],
+  audioSource,
+  onApplySmcStemPreset,
   onClose,
   onScan,
   onPairDevice,
@@ -67,10 +74,80 @@ export function MidiSetupModal({
   onRenameProfile,
   onDeleteProfile,
 }: MidiSetupModalProps) {
-  const categories = ["Playback", "Audio", "Display", "Visuals / Hardware"] as const;
   const pairedDeviceConnected = devices.some((device) => device.id === preferences.pairedDeviceId);
   const [draftCount, setDraftCount] = useState<string | null>(null);
   const [countError, setCountError] = useState("");
+
+  const sections: Array<{
+    key: string;
+    title: string;
+    subtitle?: string;
+    badge?: { text: string; tone: "youtube" | "stems" | "shared" };
+    actions: ControlActionDefinition[];
+    headerAction?: React.ReactNode;
+  }> = [
+    {
+      key: "Playback",
+      title: "Playback",
+      actions: CONTROL_ACTIONS.filter((action) => action.category === "Playback"),
+    },
+    {
+      key: "Audio-Shared",
+      title: "Audio — Shared",
+      subtitle: "Click and Guide controls stay active in both YouTube and Stems modes.",
+      badge: { text: "Always Active", tone: "shared" },
+      actions: CONTROL_ACTIONS.filter(
+        (action) => action.category === "Audio" && getControlActionScope(action.id) === "shared",
+      ),
+    },
+    {
+      key: "Audio-YouTube",
+      title: "YouTube Only MIDI",
+      subtitle: "Active only when Audio Source is YouTube. Safe to share Strip 3–8 faders/buttons with Stems.",
+      badge: {
+        text: audioSource === "youtube" ? "YouTube Only · Active" : "YouTube Only",
+        tone: "youtube",
+      },
+      actions: CONTROL_ACTIONS.filter(
+        (action) => action.category === "Audio" && getControlActionScope(action.id) === "youtube",
+      ),
+    },
+    {
+      key: "Audio-Stems",
+      title: "Stems Only MIDI",
+      subtitle: "Active only when Audio Source is Local / Stems. Automatically takes over shared Strip 3–8 controls.",
+      badge: {
+        text: audioSource === "local" ? "Stems Only · Active" : "Stems Only",
+        tone: "stems",
+      },
+      actions: CONTROL_ACTIONS.filter(
+        (action) => action.category === "Audio" && getControlActionScope(action.id) === "stems",
+      ),
+      headerAction: onApplySmcStemPreset ? (
+        <button
+          type="button"
+          disabled={!preferences.pairedDeviceId || isLoading}
+          onClick={onApplySmcStemPreset}
+          className="rounded-lg border border-cyan-400/30 bg-cyan-500/15 px-2.5 py-1 text-[10px] font-bold text-cyan-300 hover:bg-cyan-500/25 disabled:opacity-40"
+        >
+          Auto-Map Strips 3–8
+        </button>
+      ) : undefined,
+    },
+    {
+      key: "Display",
+      title: "Display",
+      actions: CONTROL_ACTIONS.filter((action) => action.category === "Display"),
+    },
+    {
+      key: "Visuals / Hardware",
+      title: "Visuals / Hardware",
+      actions: CONTROL_ACTIONS.filter((action) => action.category === "Visuals / Hardware"),
+    },
+  ];
+
+  const scopesConflict = (a: MidiAudioScope, b: MidiAudioScope) =>
+    a === b || a === "shared" || b === "shared";
 
   return (
     <div
@@ -191,14 +268,55 @@ export function MidiSetupModal({
             {countError && <p role="alert" className="text-xs text-error">{countError}</p>}
           </section>
 
-          {categories.map((category) => (
-            <section key={category} className="space-y-2">
-              <h3 className="px-1 text-xs font-black uppercase tracking-widest text-on-surface-variant">{category}</h3>
+          {sections.map((section) => (
+            <section key={section.key} className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs font-black uppercase tracking-widest text-on-surface-variant">{section.title}</h3>
+                  {section.badge && (
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${
+                        section.badge.tone === "youtube"
+                          ? "bg-rose-500/15 text-rose-300 border border-rose-400/30"
+                          : section.badge.tone === "stems"
+                            ? "bg-cyan-500/15 text-cyan-300 border border-cyan-400/30"
+                            : "bg-surface-container-high text-on-surface-variant border border-outline-variant/20"
+                      }`}
+                    >
+                      {section.badge.text}
+                    </span>
+                  )}
+                </div>
+                {section.headerAction}
+              </div>
+              {section.subtitle && (
+                <p className="px-1 text-[11px] text-on-surface-variant">{section.subtitle}</p>
+              )}
               <div className="overflow-hidden rounded-xl border border-outline-variant/20 bg-surface-container">
-                {CONTROL_ACTIONS.filter((action) => action.category === category).map((action) => {
+                {section.actions.map((action) => {
                   const mapping = preferences.mappings[action.id];
                   const isLearning = learningAction === action.id;
                   const isUnavailable = unavailableActions.includes(action.id);
+                  const actionScope = getControlActionScope(action.id);
+                  const overlapping = mapping
+                    ? CONTROL_ACTIONS.filter((other) => {
+                        if (other.id === action.id) return false;
+                        const otherMapping = preferences.mappings[other.id];
+                        return Boolean(
+                          otherMapping &&
+                          otherMapping.deviceId === mapping.deviceId &&
+                          otherMapping.messageType === mapping.messageType &&
+                          otherMapping.channel === mapping.channel &&
+                          otherMapping.number === mapping.number,
+                        );
+                      })
+                    : [];
+                  const sameModeConflicts = overlapping.filter((other) =>
+                    scopesConflict(actionScope, getControlActionScope(other.id)),
+                  );
+                  const crossModeShares = overlapping.filter(
+                    (other) => !scopesConflict(actionScope, getControlActionScope(other.id)),
+                  );
                   const mappingDescription = mapping
                     ? `${mapping.deviceName} · ${mapping.messageType === "pitchbend" ? "Pitch bend" : `${mapping.messageType === "cc" ? "CC" : "Note"} ${mapping.number}`} · Ch ${mapping.channel + 1}`
                     : null;
@@ -211,10 +329,20 @@ export function MidiSetupModal({
                             ? "Not available in Solo mode"
                             : action.id === "cycleLightShowPreset" && mapping && mapping.messageType !== "cc"
                               ? "Previous button mapping is inactive. Relearn using an MCU encoder."
-                            : mappingDescription
-                              ? `Keyboard: ${action.shortcut} · MIDI: ${mappingDescription}`
-                              : `Keyboard: ${action.shortcut}`}
+                              : mappingDescription
+                                ? `Keyboard: ${action.shortcut} · MIDI: ${mappingDescription}`
+                                : `Keyboard: ${action.shortcut}`}
                         </div>
+                        {sameModeConflicts.length > 0 && (
+                          <div className="mt-0.5 truncate text-[10px] font-semibold text-amber-300">
+                            Conflicts with {sameModeConflicts.map((item) => item.label).join(", ")}
+                          </div>
+                        )}
+                        {crossModeShares.length > 0 && (
+                          <div className="mt-0.5 truncate text-[10px] font-semibold text-cyan-300">
+                            Shares control with {crossModeShares.map((item) => item.label).join(", ")} (switches by audio mode)
+                          </div>
+                        )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
                         {mapping && (

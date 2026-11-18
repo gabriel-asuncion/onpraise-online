@@ -494,9 +494,14 @@ export default function SoloPracticeRoomPage() {
     playingSongRef.current = activeSongRef.current;
     playingSectionsRef.current = sectionsRef.current;
     const sectionIndex = currentSectionIndexRef.current;
-    const exactBeat = explicitScrubBeat;
+    const songForStart = activeSongRef.current;
+    const preRollStartBeat =
+      songForStart && sectionIndex === 0 && (songForStart.youtube_sync_offset_ms || 0) > 0
+        ? getYoutubeStartBeat(songForStart.tempo || 75, songForStart.youtube_sync_offset_ms || 0)
+        : null;
+    const exactBeat = explicitScrubBeat !== null ? explicitScrubBeat : preRollStartBeat;
     const sectionStartBeat = beatMapRef.current.sectionStartBeats[sectionIndex] || 0;
-    const beatDurationMs = 60000 / (activeSongRef.current?.tempo || 75);
+    const beatDurationMs = 60000 / (songForStart?.tempo || 75);
     setExplicitScrubBeat(null);
 
     if (isYtSource) {
@@ -853,7 +858,7 @@ export default function SoloPracticeRoomPage() {
           cancelFutureAudio();
           const song = activeSongRef.current;
           const now = getGlobalTime();
-          const startAt = Math.max(audioCtx.currentTime + 0.03, audioCtx.currentTime + (jumpTime - now) / 1000);
+          const startAt = audioCtx.currentTime + 0.03;
           const sectionStartBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
           const elapsedMs = now + (startAt - audioCtx.currentTime) * 1000 - jumpTime;
           const rawTime = (sectionStartBeat * beatSpeedSecs * 1000 + elapsedMs + (song.youtube_sync_offset_ms || 0)) / 1000;
@@ -886,7 +891,7 @@ export default function SoloPracticeRoomPage() {
     const exactBeat = exactStartBeat ?? sectionStartBeat;
     lastAudioBeatRef.current = audioAnchor
       ? getNextTimelineBeat(audioAnchor.absoluteBeat, getTimelineMeter(activeSongRef.current?.section_timings))
-      : Math.max(sectionStartBeat, exactBeat);
+      : exactBeat;
     setTracksPlayheadBeat(isPlayingRef.current
       ? sectionStartBeat + (getGlobalTime() - jumpTime) / beatDurationMs
       : exactBeat);
@@ -1336,7 +1341,7 @@ export default function SoloPracticeRoomPage() {
       if (controller.signal.aborted) return;
       setStoredStems(stems);
       if (stems.length && !await loadWhilePaused(stems.map((stem) => ({
-        id: stem.stemId, blob: stem.blob, sourceVersion: stem.updatedAt,
+        id: stem.stemId, blob: stem.blob, role: stem.role, sourceVersion: stem.updatedAt,
       })), controller.signal) && !controller.signal.aborted) {
         throw new Error("Local audio loading was interrupted.");
       }
@@ -1377,8 +1382,8 @@ export default function SoloPracticeRoomPage() {
       if (action === "vol") {
         if (typeof value !== "number") return;
         engine.setStemMix(stem.stemId, { volume: Math.max(0, Math.min(1, value)) });
-      } else if (action === "mute") engine.setStemMix(stem.stemId, { muted: !mix.muted });
-      else engine.setStemMix(stem.stemId, { solo: !mix.solo });
+      } else if (action === "mute") multitrack.toggleStemMute(stem.stemId);
+      else multitrack.toggleStemSolo(stem.stemId);
     } catch (error) {
       console.error("Could not apply stem MIDI control.", error);
       setLocalAudioError(error instanceof Error ? error.message : "Could not apply stem MIDI control.");
@@ -1391,6 +1396,19 @@ export default function SoloPracticeRoomPage() {
     stemMidiActions[group.mute] = () => updateStemMidi(group.slot, "mute");
     stemMidiActions[group.solo] = () => updateStemMidi(group.slot, "solo");
   }
+
+  const stemLedStates = useMemo(() => {
+    const states: Partial<Record<typeof STEM_MIDI_ACTION_GROUPS[number]["mute" | "solo"], boolean>> = {};
+    if (audioSource !== "local") return states;
+    const grouped = groupStemSlots(storedStems);
+    for (const group of STEM_MIDI_ACTION_GROUPS) {
+      const stem = grouped[group.slot].length === 1 ? grouped[group.slot][0] : undefined;
+      const mix = stem ? multitrack.mixes.find((m) => m.id === stem.stemId) : undefined;
+      states[group.mute] = Boolean(mix?.muted);
+      states[group.solo] = Boolean(mix?.solo);
+    }
+    return states;
+  }, [audioSource, storedStems, multitrack.mixes]);
 
   const soloStackAst = useMemo(() => activeSong ? [{
     trackId: activeSong.id, trackIndex: 0, title: activeSong.title, tempo: activeSong.tempo, displayKey: activeDisplayKey, ast: memoizedSongAstTree,
@@ -1448,7 +1466,7 @@ export default function SoloPracticeRoomPage() {
   }, isPlayingFlow ? midiBeatLight : null, "solo", {
     isPlaying: isPlayingFlow, beat: tracksPlayheadBeat, tempo: activeSong?.tempo || 75,
     ...getTimelineMeter(activeSong?.section_timings),
-  }, audioSource);
+  }, audioSource, stemLedStates);
 
   if (loading) return <PageSkeleton message="LOADING SONG..." variant="live" />;
 
@@ -1524,6 +1542,12 @@ export default function SoloPracticeRoomPage() {
               activeDisplayKey={activeDisplayKey}
               handleSectionInteractiveSelection={handleSectionInteractiveSelection}
               isMD={true}
+              audioSource={audioSource}
+              storedStems={storedStems}
+              stemMixes={multitrack.mixes}
+              stemWaveforms={multitrack.waveforms}
+              onToggleStemMute={multitrack.toggleStemMute}
+              onToggleStemSolo={multitrack.toggleStemSolo}
             />
           ) : isSimplifiedMode ? (
               <SimplifiedStackView 

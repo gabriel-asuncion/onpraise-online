@@ -3,10 +3,19 @@
 import React, { useCallback, useState, useRef, useEffect } from "react";
 import type { useMultitrackEngine } from "../../../../../hooks/useMultitrackEngine";
 import {
-  getSongAudioStems, saveSongAudioStem, removeSongAudioStem, inferStemRole,
-  getSavedAudioFolderHandle, pickAndSaveRootAudioFolder, verifyFolderPermission, findSongAudioFiles,
-  type StoredAudioStem, type AudioDirectoryHandle,
+  findSongAudioFiles, getSavedAudioFolderHandle, getSongAudioStems, inferStemRole,
+  pickAndSaveRootAudioFolder, removeSongAudioStem, saveSongAudioStem, verifyFolderPermission,
+  type AudioDirectoryHandle, type StoredAudioStem,
 } from "../../../../../lib/offline-audio";
+import { expandAndFilterStemFiles } from "../../../../../lib/zip-audio";
+import {
+  downloadPublicDriveStemFile,
+  findMatchingDriveStemFiles,
+  formatDriveFileSize,
+  isGoogleDriveConfigured,
+  listPublicDriveStems,
+  type DriveStemFile,
+} from "../../../../../lib/google-drive-stems";
 import { getStemSlot, groupStemSlots, type StemSlot } from "../../../../../lib/stem-slots";
 import type { MultitrackEngine } from "../../../../../lib/multitrack-engine";
 import { STEM_MIDI_ACTION_GROUPS } from "../hooks/midiProfiles";
@@ -189,6 +198,18 @@ export function VolumeMixerModal({
   const [assignMode, setAssignMode] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [loadedKey, setLoadedKey] = useState("");
+  const [isDriveOpen, setIsDriveOpen] = useState(false);
+  const [driveFiles, setDriveFiles] = useState<DriveStemFile[]>([]);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveSearch, setDriveSearch] = useState("");
+  const [driveStatus, setDriveStatus] = useState<string | null>(null);
+  const [driveProgress, setDriveProgress] = useState<{
+    percent: number | null;
+    loadedBytes: number;
+    totalBytes: number | null;
+    phase: "downloading" | "extracting";
+  } | null>(null);
+  const hasGoogleDrive = isGoogleDriveConfigured();
   const batchInput = useRef<HTMLInputElement>(null);
   const slotInput = useRef<HTMLInputElement>(null);
   const folderRef = useRef<AudioDirectoryHandle | null>(null);
@@ -290,7 +311,7 @@ export function VolumeMixerModal({
     if (signal.aborted) return;
     setStems(saved);
     onStemsChanged?.(saved);
-    if (!await multitrack.loadWhilePaused(saved.map((stem) => ({ id: stem.stemId, blob: stem.blob, sourceVersion: stem.updatedAt })), signal)) {
+    if (!await multitrack.loadWhilePaused(saved.map((stem) => ({ id: stem.stemId, blob: stem.blob, role: stem.role, sourceVersion: stem.updatedAt })), signal)) {
       if (signal.aborted) return;
       throw new Error("Audio loading was interrupted. Reopen the mixer and try again.");
     }
@@ -299,18 +320,23 @@ export function VolumeMixerModal({
 
   const importFiles = async (files: File[], signal: AbortSignal, slot?: StemSlot) => {
     if (!userId || !songId) throw new Error("Select a song and sign in before importing audio.");
+    const resolvedFiles = slot ? files : await expandAndFilterStemFiles(files, signal);
+    if (signal.aborted) return;
+    if (!resolvedFiles.length) {
+      throw new Error("No valid stem audio files were found (instrumental tracks are ignored).");
+    }
     const existing = await getSongAudioStems(userId, songId);
     const groups = groupStemSlots(existing);
     const used = new Set<StemSlot>();
-    for (const file of files) {
+    for (const file of resolvedFiles) {
       if (signal.aborted) return;
       const role = slot ?? getStemSlot(inferStemRole(file.name));
-      if (used.has(role) || groups[role].length > (slot ? 1 : 0)) {
+      if (used.has(role) || groups[role].length > 1) {
         throw new Error(`Multiple files match ${role.toUpperCase()}. Resolve the conflict before importing.`);
       }
       used.add(role);
     }
-    for (const file of files) {
+    for (const file of resolvedFiles) {
       if (signal.aborted) return;
       const role = slot ?? getStemSlot(inferStemRole(file.name));
       const stemId = groups[role][0]?.stemId ?? crypto.randomUUID();
@@ -319,6 +345,82 @@ export function VolumeMixerModal({
     }
     await reload(signal);
   };
+
+  const loadDriveLibrary = useCallback(async (forceRefresh = false) => {
+    if (!forceRefresh && driveFiles.length > 0) {
+      setIsDriveOpen(true);
+      return;
+    }
+    setIsDriveOpen(true);
+    setDriveLoading(true);
+    setError(null);
+    try {
+      const files = await listPublicDriveStems(abortRef.current?.signal);
+      setDriveFiles(files);
+    } catch (reason) {
+      if (!abortRef.current?.signal.aborted) reportError(reason);
+    } finally {
+      setDriveLoading(false);
+    }
+  }, [driveFiles.length, reportError]);
+
+  const importFromDrive = (targets: DriveStemFile[]) => {
+    if (!targets.length) return;
+    void run(async (signal) => {
+      try {
+        const downloaded: File[] = [];
+        const knownSizes = targets.map((t) => Number(t.size) || 0);
+        const allSizesKnown = knownSizes.every((s) => s > 0);
+        const batchTotalBytes = allSizesKnown ? knownSizes.reduce((sum, s) => sum + s, 0) : null;
+        let completedBytes = 0;
+
+        for (let i = 0; i < targets.length; i++) {
+          if (signal.aborted) return;
+          const target = targets[i];
+          setDriveStatus(
+            targets.length > 1
+              ? `Downloading ${target.name} (${i + 1}/${targets.length})...`
+              : `Downloading ${target.name}...`
+          );
+          const file = await downloadPublicDriveStemFile(target, signal, (prog) => {
+            const total = batchTotalBytes ?? (targets.length === 1 ? prog.totalBytes : null);
+            const loaded = completedBytes + prog.loadedBytes;
+            const percent = total && total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : prog.percent;
+            setDriveProgress({
+              percent,
+              loadedBytes: loaded,
+              totalBytes: total,
+              phase: "downloading",
+            });
+          });
+          completedBytes += file.size;
+          downloaded.push(file);
+        }
+
+        setDriveStatus("Extracting & caching stems offline...");
+        setDriveProgress({
+          percent: 100,
+          loadedBytes: completedBytes,
+          totalBytes: completedBytes || null,
+          phase: "extracting",
+        });
+        await importFiles(downloaded, signal);
+        setIsDriveOpen(false);
+      } finally {
+        setDriveStatus(null);
+        setDriveProgress(null);
+      }
+    });
+  };
+
+  useEffect(() => {
+    if (!isOpen) {
+      setIsDriveOpen(false);
+      setDriveSearch("");
+      setDriveStatus(null);
+      setDriveProgress(null);
+    }
+  }, [isOpen]);
 
   const updateMix = (id: string, update: { volume?: number; muted?: boolean; solo?: boolean }) => {
     try {
@@ -372,7 +474,7 @@ export function VolumeMixerModal({
         </div>
 
         {audioSource === "local" && <div className="flex flex-wrap items-center gap-2 px-5 py-3 bg-[#262628] border-b border-[#343438] text-[11px] font-bold text-zinc-200">
-          <input ref={batchInput} type="file" accept="audio/*" multiple className="hidden" onChange={(event) => {
+          <input ref={batchInput} type="file" accept="audio/*,.zip,application/zip,application/x-zip-compressed" multiple className="hidden" onChange={(event) => {
             const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
             if (files.length) void run((signal) => importFiles(files, signal));
           }} />
@@ -380,7 +482,187 @@ export function VolumeMixerModal({
             const file = event.currentTarget.files?.[0]; const slot = selectedSlot.current; event.currentTarget.value = "";
             if (file && slot) void run((signal) => importFiles([file], signal, slot));
           }} />
+          <button
+            type="button"
+            aria-pressed={multitrack?.eqEnabled ?? true}
+            disabled={!multitrack}
+            onClick={() => multitrack?.setEqEnabled(!(multitrack?.eqEnabled ?? true))}
+            className={`rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-40 ${
+              (multitrack?.eqEnabled ?? true)
+                ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-300"
+                : "border-white/10 bg-[#38383d] text-zinc-400 hover:bg-[#44444a]"
+            }`}
+          >
+            AI Stem EQ: {(multitrack?.eqEnabled ?? true) ? "ON" : "OFF"}
+          </button>
           <button type="button" className="rounded-lg bg-[#38383d] hover:bg-[#44444a] border border-white/10 px-3 py-1.5 transition-colors disabled:opacity-40" disabled={busy || playing || !userId || !songId || !multitrack} onClick={() => batchInput.current?.click()}>Import Stems</button>
+          {hasGoogleDrive && (
+            <button
+              type="button"
+              disabled={busy || playing || !userId || !songId || !multitrack}
+              onClick={() => void loadDriveLibrary(false)}
+              className="rounded-lg border border-sky-400/35 bg-sky-500/15 px-3 py-1.5 text-sky-300 transition-colors hover:bg-sky-500/25 disabled:opacity-40"
+            >
+              Google Drive
+            </button>
+          )}
+          {isDriveOpen && (
+            <div className="fixed inset-0 z-[600000] flex items-end justify-center p-0 sm:items-center sm:p-4">
+              <div className="absolute inset-0 animate-in fade-in bg-black/70 backdrop-blur-sm" onClick={() => setIsDriveOpen(false)} />
+              <div className="relative z-10 flex w-full max-h-[90vh] flex-col overflow-hidden rounded-t-2xl border border-white/15 bg-[#1e1e22] shadow-2xl animate-in slide-in-from-bottom duration-300 sm:max-w-xl sm:rounded-2xl sm:slide-in-from-bottom-8">
+                <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+                  <div>
+                    <h4 className="text-sm font-black uppercase tracking-wider text-zinc-100">Google Drive Stems</h4>
+                    <p className="text-[11px] font-medium text-zinc-400">
+                      Select a song ZIP or stem audio file to cache offline for {songTitle || "this song"}.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={driveLoading || busy}
+                      onClick={() => void loadDriveLibrary(true)}
+                      className="rounded-lg border border-white/10 bg-[#2f2f35] px-3 py-1.5 text-[11px] font-bold text-zinc-200 transition-colors hover:bg-[#3a3a42] disabled:opacity-40"
+                    >
+                      {driveLoading ? "Refreshing..." : "Refresh"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setIsDriveOpen(false)}
+                      className="flex h-8 w-8 items-center justify-center rounded-full bg-[#2f2f35] text-zinc-300 transition-colors hover:bg-[#3a3a42] hover:text-white disabled:opacity-40"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">close</span>
+                    </button>
+                  </div>
+                </div>
+
+              {(() => {
+                const matchedFiles = findMatchingDriveStemFiles(driveFiles, songTitle);
+                const primaryZipMatch = matchedFiles.find((f) => /\.zip$/i.test(f.name));
+                const quickTargets = primaryZipMatch ? [primaryZipMatch] : matchedFiles;
+                const filteredFiles = driveFiles.filter((file) =>
+                  file.name.toLowerCase().includes(driveSearch.trim().toLowerCase())
+                );
+                const loadedLabel = driveProgress ? formatDriveFileSize(String(driveProgress.loadedBytes)) : null;
+                const totalLabel = driveProgress?.totalBytes ? formatDriveFileSize(String(driveProgress.totalBytes)) : null;
+
+                return (
+                  <div className="flex flex-1 flex-col overflow-hidden p-4 gap-3">
+                    {quickTargets.length > 0 && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-3.5 py-2.5">
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-black uppercase tracking-wider text-emerald-300">
+                            Matched for {songTitle}
+                          </div>
+                          <div className="truncate text-xs font-semibold text-zinc-100">
+                            {quickTargets.length === 1
+                              ? quickTargets[0].name
+                              : `${quickTargets.length} stem files matched`}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={busy || driveLoading}
+                          onClick={() => importFromDrive(quickTargets)}
+                          className="shrink-0 rounded-lg bg-emerald-500 px-3 py-1.5 text-[11px] font-black text-zinc-950 hover:bg-emerald-400 disabled:opacity-40"
+                        >
+                          {busy ? "Importing..." : "Import Match"}
+                        </button>
+                      </div>
+                    )}
+
+                    {(driveStatus || driveProgress) && (
+                      <div
+                        role="status"
+                        aria-live="polite"
+                        className="rounded-xl border border-sky-400/30 bg-[#141417] px-3.5 py-2.5 shadow-inner"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                          <span className="truncate font-semibold text-sky-300">
+                            {driveStatus ?? "Downloading..."}
+                          </span>
+                          <span className="shrink-0 font-mono text-[10px] font-bold tabular-nums text-zinc-300">
+                            {driveProgress?.phase === "extracting"
+                              ? "Unzipping"
+                              : driveProgress?.percent !== null && driveProgress?.percent !== undefined
+                                ? `${driveProgress.percent}%${loadedLabel && totalLabel ? ` · ${loadedLabel} / ${totalLabel}` : ""}`
+                                : loadedLabel ?? ""}
+                          </span>
+                        </div>
+                        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-zinc-800">
+                          <div
+                            className={`h-full rounded-full transition-all duration-150 ${
+                              driveProgress?.phase === "extracting"
+                                ? "w-full animate-pulse bg-emerald-400"
+                                : driveProgress?.percent !== null && driveProgress?.percent !== undefined
+                                  ? "bg-gradient-to-r from-sky-500 to-cyan-400"
+                                  : "w-1/2 animate-pulse bg-sky-400"
+                            }`}
+                            style={
+                              driveProgress?.phase !== "extracting" &&
+                              driveProgress?.percent !== null &&
+                              driveProgress?.percent !== undefined
+                                ? { width: `${driveProgress.percent}%` }
+                                : undefined
+                            }
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <input
+                      type="search"
+                      value={driveSearch}
+                      onChange={(e) => setDriveSearch(e.target.value)}
+                      placeholder="Search song ZIP in Stems folder..."
+                      className="w-full rounded-lg border border-white/10 bg-[#141417] px-3 py-2 text-xs font-medium text-zinc-100 placeholder:text-zinc-500 focus:border-sky-400/50 focus:outline-none"
+                    />
+
+                    <div className="flex-1 overflow-y-auto divide-y divide-white/5 rounded-xl border border-white/10 bg-[#16161a]">
+                      {driveLoading ? (
+                        <div className="p-6 text-center text-xs font-medium text-zinc-400">
+                          Loading songs from Google Drive...
+                        </div>
+                      ) : filteredFiles.length === 0 ? (
+                        <div className="p-6 text-center text-xs font-medium text-zinc-400">
+                          {driveFiles.length === 0
+                            ? "No .zip or stem audio files found in the Stems folder."
+                            : "No files match your search."}
+                        </div>
+                      ) : (
+                        filteredFiles.map((file) => {
+                          const sizeLabel = formatDriveFileSize(file.size);
+                          return (
+                            <div
+                              key={file.id}
+                              className="flex items-center justify-between gap-3 px-3.5 py-2.5 hover:bg-white/[0.03]"
+                            >
+                              <div className="min-w-0">
+                                <div className="truncate text-xs font-semibold text-zinc-100">{file.name}</div>
+                                {sizeLabel && (
+                                  <div className="text-[10px] font-medium text-zinc-500">{sizeLabel}</div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => importFromDrive([file])}
+                                className="shrink-0 rounded-lg border border-white/10 bg-[#2d2d34] px-3 py-1.5 text-[11px] font-bold text-zinc-100 hover:bg-[#3a3a42] disabled:opacity-40"
+                              >
+                                Import
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+              </div>
+            </div>
+          )}
           <button type="button" className="rounded-lg bg-[#38383d] hover:bg-[#44444a] border border-white/10 px-3 py-1.5 transition-colors disabled:opacity-40" disabled={busy || playing || !userId || !songId || !multitrack} onClick={() => void run(async (signal) => {
             if (!userId || !songId) throw new Error("Select a song and sign in first.");
             const saved = folderRef.current ? null : await pickAndSaveRootAudioFolder(userId);
@@ -452,8 +734,24 @@ export function VolumeMixerModal({
             return <FaderChannel key={group.slot} id={group.slot} label={group.label}
               val={mix?.volume ?? 1} isMuted={mix?.muted ?? false} isSoloed={mix?.solo ?? false} anySoloActive={anyStemSolo}
               setVal={(volume) => stem && updateMix(stem.stemId, { volume })}
-              toggleMute={() => stem && mix && updateMix(stem.stemId, { muted: !mix.muted })}
-              toggleSolo={() => stem && mix && updateMix(stem.stemId, { solo: !mix.solo })}
+              toggleMute={() => {
+                if (!stem || !mix) return;
+                if (multitrack?.toggleStemMute) {
+                  multitrack.toggleStemMute(stem.stemId);
+                  setMixes(multitrack.getEngine().getStemMixes());
+                } else {
+                  updateMix(stem.stemId, { muted: !mix.muted });
+                }
+              }}
+              toggleSolo={() => {
+                if (!stem || !mix) return;
+                if (multitrack?.toggleStemSolo) {
+                  multitrack.toggleStemSolo(stem.stemId);
+                  setMixes(multitrack.getEngine().getStemMixes());
+                } else {
+                  updateMix(stem.stemId, { solo: !mix.solo });
+                }
+              }}
               disabled={!stem || !mix} meterActive={playing && Boolean(mix)} assignMode={assignMode} actions={group} learningActionId={learningActionId}
               midiBindings={midiBindings} onStartMidiLearn={onStartMidiLearn} onClearMidiBinding={onClearMidiBinding}
               top={<div className="w-full flex flex-col items-center gap-1 text-[9px] text-zinc-300">

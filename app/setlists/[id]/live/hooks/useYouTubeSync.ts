@@ -37,6 +37,8 @@ export function useYouTubeSync({
   
   // ✅ SURGICAL FIX: A synchronous reference so the hardware clock never waits for a React render
   const isYtBufferingRef = useRef<boolean>(false);
+  const isSyncEnabledRef = useRef<boolean>(isYoutubeSyncEnabled);
+  isSyncEnabledRef.current = isYoutubeSyncEnabled;
   const onPlaybackStartedRef = useRef(onPlaybackStarted);
   const onPlaybackErrorRef = useRef(onPlaybackError);
   const requestedVideoIdRef = useRef<string | null>(youtubeVideoId);
@@ -101,6 +103,10 @@ export function useYouTubeSync({
                 isYtBufferingRef.current = false;
                 setIsYtBuffering(false);
                 if (event.data === 1) {
+                  if (!isSyncEnabledRef.current) {
+                    ytPlayerRef.current?.pauseVideo?.();
+                    return;
+                  }
                   onPlaybackStartedRef.current?.(
                     event.target.getCurrentTime?.() ?? 0,
                     event.target.getVideoData?.().video_id

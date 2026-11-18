@@ -286,9 +286,7 @@ export default function EventCockpitPage() {
       await fetchEventSetlists(eventId);
       await syncRosterUI(combinedProfiles);
       const songs = await getAllSongs();
-      setAllDatabaseSongs(songs.filter((song) =>
-        song.visibility_scope !== "global" || song.approval_status === "approved",
-      ));
+      setAllDatabaseSongs(songs);
     } catch (e) { console.error(e); }
     setLoading(false);
   }

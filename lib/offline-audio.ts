@@ -1,4 +1,5 @@
 import { captureOfflineGeneration, isCurrentOfflineGeneration, openOfflineDatabase } from "./offline-db";
+import { extractAudioFilesFromZip, isInstrumentalAudioFile, isZipFile } from "./zip-audio";
 
 export type StemRole = "track" | "drums" | "bass" | "keys" | "guitars" | "vocals" | "guide" | "other";
 
@@ -18,7 +19,7 @@ export interface StoredAudioStem {
 export interface AudioDirectoryHandle extends FileSystemDirectoryHandle {
   queryPermission(options: { mode: "read" }): Promise<PermissionState>;
   requestPermission(options: { mode: "read" }): Promise<PermissionState>;
-  values(): AsyncIterableIterator<FileSystemHandle>;
+  values(): ReturnType<FileSystemDirectoryHandle["values"]>;
 }
 
 interface SavedDirectory {
@@ -98,18 +99,26 @@ export async function findSongAudioFiles(handle: AudioDirectoryHandle, songId: s
   const id = normalizeAudioName(songId);
   const normalizedTitle = normalizeAudioName(title);
   const files: File[] = [];
+  const collectFile = async (file: File) => {
+    if (isZipFile(file)) {
+      files.push(...(await extractAudioFilesFromZip(file)));
+    } else if (
+      !isInstrumentalAudioFile(file.name) &&
+      (file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac|aiff?|opus)$/i.test(file.name))
+    ) {
+      files.push(file);
+    }
+  };
   for await (const entry of handle.values()) {
     const normalized = normalizeAudioName(entry.name);
     const matches = Boolean((id && normalized.startsWith(id)) || (normalizedTitle && normalized.startsWith(normalizedTitle)));
     if (!matches) continue;
     if (entry.kind === "file") {
-      const file = await (entry as FileSystemFileHandle).getFile();
-      if (file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac|aiff?|opus)$/i.test(file.name)) files.push(file);
+      await collectFile(await (entry as FileSystemFileHandle).getFile());
     } else {
       for await (const child of (entry as AudioDirectoryHandle).values()) {
         if (child.kind !== "file") continue;
-        const file = await (child as FileSystemFileHandle).getFile();
-        if (file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac|aiff?|opus)$/i.test(file.name)) files.push(file);
+        await collectFile(await (child as FileSystemFileHandle).getFile());
       }
     }
   }

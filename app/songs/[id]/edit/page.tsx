@@ -417,7 +417,7 @@ function SongEditContent() {
   const [midiScrubFollowRequest, setMidiScrubFollowRequest] = useState(0);
   const [midiBeatLight, setMidiBeatLight] = useState<number | null>(null);
   const [midiLaneRequest, setMidiLaneRequest] = useState<{ rawValue: number; delta?: number } | null>(null);
-  const [midiToggleSectionRequest, setMidiToggleSectionRequest] = useState<{ sectionId: string } | null>(null);
+  const [midiToggleSectionRequest, setMidiToggleSectionRequest] = useState<{ sectionId: string | null } | null>(null);
   const midiScrubSeekRef = useRef<{ time: number; timestamp: number } | null>(null);
   const timelineAddSectionButtonRef = useRef<HTMLButtonElement>(null);
   const midiFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3776,10 +3776,8 @@ function formatTimeWithMs(seconds: number) {
         seekToMidiTime(currentTime + (actionId === "NUDGE_MEASURE_NEXT" ? 1 : -1) * quarterBeatsPerMeasure * 60 / bpm);
         break;
       case "SELECT_SECTION_AT_PLAYHEAD":
-        if (activeChapter) {
-          setPendingTimelineFocusSectionId(null);
-          setMidiToggleSectionRequest({ sectionId: activeChapter.id });
-        }
+        setPendingTimelineFocusSectionId(null);
+        setMidiToggleSectionRequest({ sectionId: activeChapter?.id ?? null });
         break;
       case "LANE_SCRUB":
         setMidiLaneRequest({ rawValue: payload?.rawValue ?? 0, delta: payload?.delta });
@@ -5453,7 +5451,7 @@ function formatTimeWithMs(seconds: number) {
               <p className="mt-1 text-xs text-on-surface-variant">
                 {source
                   ? `Place ${source.label} around ${anchor?.label ?? currentTimelineChapter?.label ?? "the selected position"}.`
-                  : `Add ${pendingTimelineSectionType} before or after the current section${currentTimelineChapter ? ` (${currentTimelineChapter.label})` : ""}.`}
+                  : `Add ${pendingTimelineSectionType} before or after ${anchor?.label ?? (currentTimelineChapter ? `the current section (${currentTimelineChapter.label})` : "the selected position")}.`}
               </p>
             </div>
             <div className="grid grid-cols-2 gap-2">

@@ -245,7 +245,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
         const beatUnitQuarter = meter.unitQuarterBeats * getMetronomeStep(clickSpeed);
         const currentAudioTime = audioCtx.currentTime;
 
-        const audioOffsetSecs = ((c.localClickOffsetMsRef?.current ?? 0) - c.audioLatencyOffsetMs) / 1000;
+        const audioOffsetSecs = (c.localClickOffsetMsRef?.current ?? 0) / 1000;
 
         // ✅ SURGICAL FIX: Use Math.floor to ensure we catch the exact beat boundary (0-indexed timeline)
         // instead of aggressively rounding up to the next beat.
@@ -310,29 +310,27 @@ export function useHardwareClock(config: HardwareClockConfig) {
 
       }
 
-      if (elapsedMs >= 0) {
-        const localSectionElapsedBeats = elapsedMs / beatSpeedMsCurrent;
-        const absoluteVisualBeatFloat = (c.beatMapRef.current.sectionStartBeats[idx] || 0) + localSectionElapsedBeats;
-        const clockBeat = c.audioContextStartTimeRef?.current != null && audioCtx?.state === "running"
-          ? (audioCtx.currentTime - c.audioContextStartTimeRef.current) / (beatSpeedMsCurrent / 1000)
-          : absoluteVisualBeatFloat;
-        const midiBeat = getOffsetMidiBeat(clockBeat, beatSpeedMsCurrent, meter.unitQuarterBeats * getMetronomeStep(clickSpeed),
-          c.localClickOffsetMsRef?.current ?? 0, c.audioLatencyOffsetMs);
-        if (midiBeat !== lastMidiBeat) {
-          lastMidiBeat = midiBeat;
-          c.onMidiBeat?.(midiBeat);
-        }
-        const { beatIndex: currentVisualBeatPulse, measureLength: activeMeasureLength } =
-          getTimelineMeasureBeat(absoluteVisualBeatFloat, meter);
+      const localSectionElapsedBeats = elapsedMs / beatSpeedMsCurrent;
+      const absoluteVisualBeatFloat = (c.beatMapRef.current.sectionStartBeats[idx] || 0) + localSectionElapsedBeats;
+      const clockBeat = c.audioContextStartTimeRef?.current != null && audioCtx?.state === "running"
+        ? (audioCtx.currentTime - c.audioContextStartTimeRef.current) / (beatSpeedMsCurrent / 1000)
+        : absoluteVisualBeatFloat;
+      const midiBeat = getOffsetMidiBeat(clockBeat, beatSpeedMsCurrent, meter.unitQuarterBeats * getMetronomeStep(clickSpeed),
+        c.localClickOffsetMsRef?.current ?? 0, c.audioLatencyOffsetMs);
+      if (midiBeat !== lastMidiBeat) {
+        lastMidiBeat = midiBeat;
+        c.onMidiBeat?.(midiBeat);
+      }
+      const { beatIndex: currentVisualBeatPulse, measureLength: activeMeasureLength } =
+        getTimelineMeasureBeat(absoluteVisualBeatFloat, meter);
 
-        if (activeMeasureLength !== c.lastVisualMeasureLengthRef.current) {
-          c.lastVisualMeasureLengthRef.current = activeMeasureLength;
-          c.setCurrentMeasureLength(activeMeasureLength);
-        }
-        if (currentVisualBeatPulse !== c.lastVisualBeatRef.current) {
-          c.lastVisualBeatRef.current = currentVisualBeatPulse;
-          c.updateMetronomeUI(currentVisualBeatPulse, true, activeMeasureLength, absoluteVisualBeatFloat);
-        }
+      if (activeMeasureLength !== c.lastVisualMeasureLengthRef.current) {
+        c.lastVisualMeasureLengthRef.current = activeMeasureLength;
+        c.setCurrentMeasureLength(activeMeasureLength);
+      }
+      if (currentVisualBeatPulse !== c.lastVisualBeatRef.current) {
+        c.lastVisualBeatRef.current = currentVisualBeatPulse;
+        c.updateMetronomeUI(currentVisualBeatPulse, true, activeMeasureLength, absoluteVisualBeatFloat);
       }
 
       const safeDuration = Math.max(1, totalDurationMs);

@@ -51,7 +51,7 @@ interface TimelineArrangementProps {
   midiControlFeedback: MidiControlFeedback | null;
   midiScrubFollowRequest: number;
   midiLaneRequest: { rawValue: number; delta?: number } | null;
-  midiToggleSectionRequest: { sectionId: string } | null;
+  midiToggleSectionRequest: { sectionId: string | null } | null;
   addSectionButtonRef: React.RefObject<HTMLButtonElement | null>;
   onEffectiveZoomChange: (pixelsPerBeat: number) => void;
   onClearMidiPixelsPerBeat: () => void;
@@ -353,14 +353,49 @@ export default function TimelineArrangement({
     if (!midiToggleSectionRequest || handledMidiToggleRef.current === midiToggleSectionRequest) return;
     const frame = window.requestAnimationFrame(() => {
       handledMidiToggleRef.current = midiToggleSectionRequest;
+
+      // 1. Pressing again when a section is already selected clears both section and lane selection
+      if (selectedSectionId !== null) {
+        setSelectedSectionId(null);
+        setSelectedLaneType(null);
+        return;
+      }
+
+      // 2. When a lane was selected via knob, select the section inside that lane
+      if (selectedLaneType !== null) {
+        const laneIndices = sections
+          .map((item, index) => (item.type === selectedLaneType ? index : -1))
+          .filter((index) => index >= 0);
+        if (laneIndices.length === 0) {
+          setSelectedLaneType(null);
+          return;
+        }
+        const atPlayheadIndex = laneIndices.find(
+          (index) => playheadBeat >= starts[index] && playheadBeat < starts[index] + durations[index],
+        );
+        const targetIndex = atPlayheadIndex ?? laneIndices.reduce((closest, index) =>
+          Math.abs(starts[index] - playheadBeat) < Math.abs(starts[closest] - playheadBeat) ? index : closest,
+        );
+        const targetSection = sections[targetIndex];
+        if (!targetSection) return;
+        setSelectedSectionId(targetSection.id);
+        setSelectedLaneType(targetSection.type);
+        document.getElementById(`timeline-clip-${targetSection.id}`)?.scrollIntoView({
+          behavior: "smooth",
+          block: "nearest",
+          inline: "nearest",
+        });
+        return;
+      }
+
+      // 3. Fallback when no lane is selected: select the section at the playhead
       const section = sections.find((item) => item.id === midiToggleSectionRequest.sectionId);
       if (!section) return;
-      const deselect = selectedSectionId === section.id;
-      setSelectedSectionId(deselect ? null : section.id);
-      setSelectedLaneType(deselect ? null : section.type);
+      setSelectedSectionId(section.id);
+      setSelectedLaneType(section.type);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [midiToggleSectionRequest, sections, selectedSectionId]);
+  }, [durations, midiToggleSectionRequest, playheadBeat, sections, selectedLaneType, selectedSectionId, starts]);
   const setZoomKeepingPlayheadVisible = useCallback((nextZoom: number) => {
     onClearMidiPixelsPerBeat();
     const viewport = viewportRef.current;
@@ -374,8 +409,6 @@ export default function TimelineArrangement({
     playheadBeat >= starts[index] && playheadBeat < starts[index] + durations[index],
   ), [durations, playheadBeat, sections, starts]);
   const getInsertionAnchorIndex = useCallback(() => {
-    const playingIndex = getPlayingSectionIndex();
-    if (playingIndex >= 0) return playingIndex;
     const selectedIndex = sections.findIndex((section) => section.id === selectedSectionId);
     if (selectedIndex >= 0) return selectedIndex;
     const laneIndices = sections
@@ -386,6 +419,8 @@ export default function TimelineArrangement({
         Math.abs(starts[index] - playheadBeat) < Math.abs(starts[closest] - playheadBeat) ? index : closest,
       );
     }
+    const playingIndex = getPlayingSectionIndex();
+    if (playingIndex >= 0) return playingIndex;
     return -1;
   }, [getPlayingSectionIndex, playheadBeat, sections, selectedLaneType, selectedSectionId, starts]);
   const getDuplicateSourceIndex = useCallback(() => {

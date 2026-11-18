@@ -387,10 +387,10 @@ export function SettingsModal(props: SettingsModalProps) {
                     disabled={isOnline && !isMDActive}
                     aria-disabled={!isOnline || !isMDActive}
                     onClick={() => !isOnline ? openNoConnectionModal("YouTube sync") : setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled)}
-                    className={`relative inline-flex h-7 w-12 items-center rounded-full p-0.5 transition-colors focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isYoutubeSyncEnabled ? 'bg-[#2563eb]' : 'bg-surface-container-highest'}`} 
+                    className={`relative inline-flex h-7 w-12 items-center rounded-full p-0.5 transition-colors focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isYoutubeSyncEnabled && props.audioSource !== "local" ? 'bg-[#2563eb]' : 'bg-surface-container-highest'}`} 
                     type="button"
                   >
-                    <span className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform duration-200 ease-in-out shadow-sm ${isYoutubeSyncEnabled ? 'translate-x-5' : 'translate-x-0 bg-outline'}`}></span>
+                    <span className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform duration-200 ease-in-out shadow-sm ${isYoutubeSyncEnabled && props.audioSource !== "local" ? 'translate-x-5' : 'translate-x-0 bg-outline'}`}></span>
                   </button>
                 </div>
               )}
@@ -519,9 +519,11 @@ export function SettingsModal(props: SettingsModalProps) {
         metronomeSoundType={metronomeSoundType}
         setMetronomeSoundType={setMetronomeSoundType}
       />
-      {isMidiSetupOpen && (
+      {isMidiSetupOpen && props.midiSetup && (
         <MidiSetupModal
           {...props.midiSetup}
+          audioSource={props.audioSource}
+          onApplySmcStemPreset={props.onApplySmcStemPreset}
           onClose={() => {
             props.midiSetup.setSetupOpen(false);
             setIsMidiSetupOpen(false);
