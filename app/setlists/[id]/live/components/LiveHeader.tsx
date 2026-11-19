@@ -207,8 +207,7 @@ export function LiveHeader({
             if (wakeUpAudioEngine) wakeUpAudioEngine();
             handleToggleFlowPlaybackState();
           }}
-          // ✅ SURGICAL FIX: Play button glows blue if you are the MD!
-          className={`w-10 h-10 flex items-center justify-center shrink-0 transition-transform active:scale-90 ${isPlayingFlow || localPresenceUser?.isMD ? "text-primary" : "text-white"}`}
+          className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-90 shadow-sm cursor-pointer z-[100] relative ${isPlayingFlow ? 'bg-primary-container text-primary' : (localPresenceUser?.isMD ? 'bg-primary text-on-primary shadow-md' : 'bg-transparent text-white')}`}
         >
           {isPlayingFlow ? <StopIcon /> : <PlayIcon />}
         </button>

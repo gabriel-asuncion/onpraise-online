@@ -74,7 +74,7 @@ export function useYouTubeSync({
         loadedVideoIdRef.current = youtubeVideoId;
         try {
           ytPlayerRef.current = new youtubeApi.Player("yt-live-player-container", {
-          height: "10px", width: "10px", videoId: youtubeVideoId,
+          height: "360", width: "640", videoId: youtubeVideoId,
           playerVars: { playsinline: 1, controls: 0, disablekb: 1 },
           events: {
             onReady: (event: { target: YouTubePlayer & { setVolume: (volume: number) => void } }) => {

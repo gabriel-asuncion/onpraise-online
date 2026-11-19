@@ -5,7 +5,6 @@ import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../utils/supabase/client";
 import { useEngine } from "../../context/EngineContext"; 
 import PageSkeleton from '../../../components/PageSkeleton';
-import OfflineSongButton from "../../../components/OfflineSongButton";
 import { getOfflineSong } from "../../../lib/offline-db";
 import { resolveSongAudioStems, type StoredAudioStem } from "../../../lib/offline-audio";
 import { getSavedAudioSource, refreshSavedAudioSource, resolveEffectiveAudioSource, saveAudioSourcePreference, type AudioSourceMode } from "../../../lib/audio-source-preference";
@@ -23,6 +22,7 @@ import { useKeyboardMidiControls, type ControlActions } from "../../setlists/[id
 import { STEM_MIDI_ACTION_GROUPS } from "../../setlists/[id]/live/hooks/midiProfiles";
 import { useLocalClickOffset } from "../../setlists/[id]/live/hooks/useLocalClickOffset";
 import { useControlFeedback } from "../../setlists/[id]/live/hooks/useControlFeedback";
+import { getMetronomePulse, getMetronomeStep } from "../../../lib/metronome";
 
 import { LiveHeader } from "../../setlists/[id]/live/components/LiveHeader";
 import { EqualizerStatus } from "../../setlists/[id]/live/components/EqualizerStatus";
@@ -31,7 +31,6 @@ import { ControlFeedback } from "../../setlists/[id]/live/components/ControlFeed
 import { SimplifiedStackView } from "../../setlists/[id]/live/components/SimplifiedStackView";
 import { StandardSheetView } from "../../setlists/[id]/live/components/StandardSheetView";
 import { TracksView } from "../../setlists/[id]/live/components/TracksView";
-import { ScrubberOverlay } from "../../setlists/[id]/live/components/ScrubberOverlay";
 import { SettingsModal } from "../../setlists/[id]/live/components/SettingsModal";
 import { TransposerModal } from "../../setlists/[id]/live/components/TransposerModal";
 import { ZenMovableFAB } from "../../setlists/[id]/live/components/ZenMovableFAB";
@@ -678,21 +677,27 @@ export default function SoloPracticeRoomPage() {
       const offsetMs = song.youtube_sync_offset_ms || 0;
       const beatDurationMs = 60000 / (song.tempo || 75);
       const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
-      const absoluteBeat = ((actualYoutubeTime * 1000) - offsetMs) / beatDurationMs;
+      
+      // ✅ SURGICAL FIX: Ensure float precision matches Edit page EXACTLY
+      const absoluteBeat = Math.max(0, ((actualYoutubeTime * 1000) - offsetMs)) / beatDurationMs;
       const sectionElapsedMs = (absoluteBeat - sectionStartBeat) * beatDurationMs;
       const startTimestamp = globalTime - sectionElapsedMs;
-      const audioAnchor = { audioTime, absoluteBeat };
+      
+      // ✅ The anchor locks absoluteBeat to audioTime directly for phase-locking
+      const audioAnchor = { audioTime, absoluteBeat: ((actualYoutubeTime * 1000) - offsetMs) / beatDurationMs };
+      
       const meter = getTimelineMeter(song.section_timings);
-      const beatPosition = getTimelineMeasureBeat(absoluteBeat, meter);
-      const clickKey = `metronome_${metronomeSoundTypeRef.current}_${beatPosition.beatIndex === 1 ? 1 : 2}`;
+      const clickIndex = Math.floor(audioAnchor.absoluteBeat / (meter.unitQuarterBeats * getMetronomeStep("default")));
+      const pulse = getMetronomePulse(clickIndex, "default", "default", meter.numerator);
+      const clickKey = `metronome_${metronomeSoundTypeRef.current}_${pulse}`;
 
       pendingYoutubeStartRef.current = null;
       completeSoloStart(pendingStart.sectionIndex, startTimestamp, true, pendingStart.exactBeat, audioAnchor);
-      if (isPlayingRef.current && isYtBackingTrackStartRef.current && localClickVolumeRef.current > 0) {
+      if (pulse !== null && isPlayingRef.current && isYtBackingTrackStartRef.current && localClickVolumeRef.current > 0) {
         playZeroLatencyAudio(
           clickKey,
           localClickVolumeRef.current,
-          audioAnchor.audioTime + (localClickOffsetMsRef.current - audioLatencyOffsetMs) / 1000
+          audioAnchor.audioTime + ((localClickOffsetMsRef.current - audioLatencyOffsetMs) / 1000)
         );
       }
     } catch (error) {
@@ -797,10 +802,10 @@ export default function SoloPracticeRoomPage() {
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
     audioLatencyOffsetMs, localClickOffsetMsRef, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
-    queuedSectionIndexRef, queuedTrackIndexRef,
+    queuedSectionIndexRef, queuedTrackIndexRef, isYtBufferingRef,
     isDoubleMetronomeEnabledRef, onMidiBeat: setMidiBeatLight, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
-    playGuideCue, getAudioContext, audioContextStartTimeRef,
+    playGuideCue, cancelFutureAudio, getAudioContext, audioContextStartTimeRef,
 
     // 👇 ADD THIS EXACT BLOCK 👇
     triggerMetronomeSound: (beatPulse, time) => {
@@ -813,7 +818,12 @@ export default function SoloPracticeRoomPage() {
     // 👆 ---------------------- 👆
 
     getYoutubeTime: () => {
-      if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function' && !isYtBufferingRef.current) {
+      if (
+        ytPlayerRef.current &&
+        typeof ytPlayerRef.current.getCurrentTime === 'function' &&
+        !isYtBufferingRef.current &&
+        ytPlayerRef.current.getPlayerState?.() === 1
+      ) {
         return ytPlayerRef.current.getCurrentTime();
       }
       return null;
@@ -846,8 +856,9 @@ export default function SoloPracticeRoomPage() {
       if (audioCtx) {
         const beatSpeedSecs = 60 / (activeSongRef.current?.tempo || 75);
         if (audioAnchor) {
+          // ✅ Phase-lock EXACTLY like the Edit Page by placing the anchor at Audio Time 0
           audioContextStartTimeRef.current =
-            audioAnchor.audioTime + (audioLatencyOffsetMs / 1000) - (audioAnchor.absoluteBeat * beatSpeedSecs);
+            audioAnchor.audioTime - (audioAnchor.absoluteBeat * beatSpeedSecs);
         } else {
           const timeUntilJumpMs = jumpTime - getGlobalTime();
           const absoluteHardwareTimeAtJump = audioCtx.currentTime + (timeUntilJumpMs / 1000);
@@ -929,7 +940,7 @@ export default function SoloPracticeRoomPage() {
     pendingYoutubeSyncRef.current = null;
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') ytPlayerRef.current.pauseVideo();
-    currentSectionIndexRef.current = 0; lastBeatRef.current = 0; activeLineIndexRef.current = 0;
+    currentSectionIndexRef.current = 0; lastBeatRef.current = 0; lastAudioBeatRef.current = 0; activeLineIndexRef.current = 0;
     setExplicitScrubBeat(null);
     setTracksPlayheadBeat(0);
     setCurrentSectionIndex(0); updateMetronomeUI(1, false); setActiveLineIndex(0);
@@ -946,9 +957,10 @@ export default function SoloPracticeRoomPage() {
       pendingYoutubeStartRef.current = null;
       isYtBackingTrackStartRef.current = false;
       ytPlayerRef.current?.pauseVideo?.();
+      handleResetFlowTrigger();
       return;
     }
-    if (isPlayingFlow) {
+    if (isPlayingRef.current) {
       const song = playingSongRef.current || activeSongRef.current;
       const beat = (beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] ?? 0) +
         (getGlobalTime() - (mdSectionStartTimeRef.current || getGlobalTime())) / (60000 / (song?.tempo || 75));
@@ -1472,10 +1484,11 @@ export default function SoloPracticeRoomPage() {
 
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
-      <div className="relative z-50 flex items-center justify-center gap-2 bg-zinc-900 p-2 text-white">
-        <OfflineSongButton songId={songId} />
-        {!isOnline && <button type="button" onClick={() => openNoConnectionModal("YouTube")} className="rounded-lg bg-zinc-700 px-3 py-2 text-xs font-bold">YouTube unavailable offline</button>}
-      </div>
+      {!isOnline && (
+        <div className="relative z-50 flex items-center justify-center gap-2 bg-zinc-900 p-2 text-white">
+          <button type="button" onClick={() => openNoConnectionModal("YouTube")} className="rounded-lg bg-zinc-700 px-3 py-2 text-xs font-bold">YouTube unavailable offline</button>
+        </div>
+      )}
       {localAudioError && <p role="alert" className="relative z-40 bg-red-900 px-3 py-2 text-sm text-white">{localAudioError}</p>}
       
       {/* ✅ EXACT MATCH: Passed props identically to page_4 to ensure internal UI/Scroll hooks function[cite: 5] */}
@@ -1581,14 +1594,7 @@ export default function SoloPracticeRoomPage() {
             />
           )}
 
-          {/* ✅ EXACT MATCH: ScrubberOverlay now sits side-by-side inside the scroll wrapper[cite: 5] */}
-          {!isZenMode && (
-            <ScrubberOverlay 
-              sections={sections} currentSectionIndex={currentSectionIndex} queuedTrackIndex={null} currentTrackIndex={0}
-              queuedSectionIndex={queuedSectionIndex} isPlayingFlow={isPlayingFlow} sectionRefs={trackSectionRefs.current[0]} isAutoScrollingRef={isAutoScrollingRef} setShowSyncBack={setShowSyncBack}
-              isSimplifiedMode={isSimplifiedMode} tracksList={mockedSoloTrackList as any} handleUserSelectTrackBadge={() => {}}
-            />
-          )}
+          {/* RIGHT: Floating Utilities Container */}
         </div>
       </div>
 
@@ -1784,7 +1790,7 @@ export default function SoloPracticeRoomPage() {
         </div>
       )}
 
-      <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>
+      <div className="fixed bottom-0 right-0 w-[200px] h-[200px] opacity-[0.001] pointer-events-none -z-50 overflow-hidden"><div id="yt-live-player-container"></div></div>
     </div>
   );
 }

@@ -5,7 +5,6 @@ import { useParams, useRouter } from "next/navigation";
 import { createClient } from "../../../../utils/supabase/client";
 import { useEngine } from "../../../context/EngineContext";
 import PageSkeleton from '../../../../components/PageSkeleton';
-import OfflineSetlistButton from "../../../../components/OfflineSetlistButton";
 import { useOnlineStatus } from "../../../context/NetworkContext";
 import { useTimesync } from '../../../../hooks/useTimesync';
 
@@ -1769,7 +1768,7 @@ export default function SetlistPerformanceRoomPage() {
         playZeroLatencyAudio(
           clickKey,
           localClickVolumeRef.current,
-          audioAnchor.audioTime + (localClickOffsetMsRef.current / 1000)
+          audioAnchor.audioTime + ((localClickOffsetMsRef.current - audioLatencyOffsetMs) / 1000)
         );
       }
     } catch (error) {
@@ -1839,7 +1838,8 @@ export default function SetlistPerformanceRoomPage() {
   const {
     youtubeVideoId,
     isYtPlayerReady,
-    ytPlayerRef, isYtPlayerReadyRef
+    ytPlayerRef, isYtPlayerReadyRef,
+    isYtBufferingRef
   } = useYouTubeSync({
     activeSong,
     youtubeVolumeRef,
@@ -1938,11 +1938,22 @@ export default function SetlistPerformanceRoomPage() {
     currentSectionIndexRef, setCurrentSectionIndex, beatMapRef, astTreeRef, mdSectionStartTimeRef,
     audioLatencyOffsetMs, localClickOffsetMsRef, isYtBackingTrackStartRef,
     backdropProgressRef, accentProgressBarRef, simplifiedProgressBarRef, hasPlayedCueRef,
-    queuedSectionIndexRef, queuedTrackIndexRef,
+    queuedSectionIndexRef, queuedTrackIndexRef, isYtBufferingRef,
     isDoubleMetronomeEnabledRef, metronomeSpeedRef: clickSpeedRef, metronomePatternRef: clickPatternRef,
     onMidiBeat: setMidiBeatLight, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime: getPlaybackTime,
-    playGuideCue, getAudioContext, audioContextStartTimeRef,
+    getYoutubeTime: () => {
+      if (
+        ytPlayerRef.current &&
+        typeof ytPlayerRef.current.getCurrentTime === "function" &&
+        !isYtBufferingRef.current &&
+        ytPlayerRef.current.getPlayerState?.() === 1
+      ) {
+        return ytPlayerRef.current.getCurrentTime();
+      }
+      return null;
+    },
+    playGuideCue, cancelFutureAudio, getAudioContext, audioContextStartTimeRef,
     pendingAudioClockCorrectionRef,
 
     triggerMetronomeSound: (beatPulse, time) => {
@@ -2165,7 +2176,7 @@ export default function SetlistPerformanceRoomPage() {
         const beatSpeedSecs = 60 / (activeSongRef.current?.tempo || 75);
         if (audioAnchor) {
           audioContextStartTimeRef.current =
-            audioAnchor.audioTime + (audioLatencyOffsetMs / 1000) - (audioAnchor.absoluteBeat * beatSpeedSecs);
+            audioAnchor.audioTime - (audioAnchor.absoluteBeat * beatSpeedSecs);
         } else {
           const timeUntilJumpMs = jumpTime - getGlobalTime();
           const absoluteHardwareTimeAtJump = audioCtx.currentTime + (timeUntilJumpMs / 1000);
@@ -2280,6 +2291,7 @@ export default function SetlistPerformanceRoomPage() {
       setActiveLineIndex(0);
     }
     lastBeatRef.current = 0;
+    lastAudioBeatRef.current = 0;
     updateMetronomeUI(1, false);
     setQueuedTrackIndex(null); setQueuedSectionIndex(null); setCurrentDriftMs(null);
     setShowSyncBack(false);
@@ -2383,7 +2395,11 @@ export default function SetlistPerformanceRoomPage() {
       handleResetFlowTrigger();
       return;
     }
+    initAudioContext();
     if (pendingYoutubeStartRef.current) {
+      pendingYoutubeStartRef.current = null;
+      isYtBackingTrackStartRef.current = false;
+      ytPlayerRef.current?.pauseVideo?.();
       handleResetFlowTrigger();
       return;
     }
@@ -3010,11 +3026,12 @@ export default function SetlistPerformanceRoomPage() {
 
   return (
     <div className="absolute inset-0 flex flex-col bg-[#f8f9fa] overflow-hidden select-none">
-      <div className="relative z-50 flex items-center justify-center gap-2 bg-zinc-900 p-2 text-white">
-        <OfflineSetlistButton id={setlistId} name={setlistName} eventName={setlistEventName} teamId={setlistTeamId} tracks={tracksList} />
-        {localMode && <span role="status" className="text-xs font-bold">Local playback · Live sync unavailable{isOnline ? " — reload to reconnect" : ""}</span>}
-        {!isOnline && <button type="button" onClick={() => openNoConnectionModal("YouTube")} className="rounded-lg bg-zinc-700 px-3 py-2 text-xs font-bold">YouTube unavailable</button>}
-      </div>
+      {(localMode || !isOnline) && (
+        <div className="relative z-50 flex items-center justify-center gap-2 bg-zinc-900 p-2 text-white">
+          {localMode && <span role="status" className="text-xs font-bold">Local playback · Live sync unavailable{isOnline ? " — reload to reconnect" : ""}</span>}
+          {!isOnline && <button type="button" onClick={() => openNoConnectionModal("YouTube")} className="rounded-lg bg-zinc-700 px-3 py-2 text-xs font-bold">YouTube unavailable</button>}
+        </div>
+      )}
       {localAudioError && <p role="alert" className="relative z-40 bg-red-900 px-3 py-2 text-sm text-white">{localAudioError}</p>}
 
       {/* ========================================================================= */}
@@ -3586,7 +3603,7 @@ export default function SetlistPerformanceRoomPage() {
         trackTitles={setlistTrackTitles}
       />
 
-      <div className="absolute opacity-0 pointer-events-none w-[1px] h-[1px] overflow-hidden -z-50"><div id="yt-live-player-container"></div></div>
+      <div className="fixed bottom-0 right-0 w-[200px] h-[200px] opacity-[0.001] pointer-events-none -z-50 overflow-hidden"><div id="yt-live-player-container"></div></div>
 
     </div>
   );

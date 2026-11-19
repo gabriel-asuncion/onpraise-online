@@ -6,7 +6,7 @@ import {
   findSongAudioFiles, findSongAudioFilesFromFileList, getSavedAudioFolderHandle,
   getSongAudioStems, inferStemRole, isDirectoryHandlePickerSupported,
   pickAndSaveRootAudioFolder, removeSongAudioStem, resolveSongAudioStems,
-  saveFilesToDeviceDownloads, saveSongAudioStem, verifyFolderPermission,
+  saveStemsZipToDeviceDownloads, saveSongAudioStem, verifyFolderPermission,
   type AudioDirectoryHandle, type StoredAudioStem,
 } from "../../../../../lib/offline-audio";
 import { expandAndFilterStemFiles } from "../../../../../lib/zip-audio";
@@ -413,7 +413,7 @@ export function VolumeMixerModal({
           downloaded.push(file);
         }
 
-        setDriveStatus("Extracting & saving stems to Downloads...");
+        setDriveStatus("Extracting stems & saving ZIP to Downloads...");
         setDriveProgress({
           percent: 100,
           loadedBytes: completedBytes,
@@ -422,7 +422,7 @@ export function VolumeMixerModal({
         });
         const importedStems = await importFiles(downloaded, signal);
         if (!signal.aborted && importedStems.length > 0) {
-          await saveFilesToDeviceDownloads(importedStems, songTitle);
+          await saveStemsZipToDeviceDownloads(downloaded, importedStems, songTitle);
         }
         setIsDriveOpen(false);
       } finally {

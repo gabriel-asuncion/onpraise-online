@@ -36,7 +36,6 @@ export function isAccountSetupComplete(
 ): boolean {
   return Boolean(profile && (hasProfileMembership(profile) || hasTeamMembership));
 }
-
 export function getAccountLandingPath(
   profile: AccountProfileSummary | null,
   hasTeamMembership = false,

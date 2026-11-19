@@ -1,5 +1,5 @@
 import { captureOfflineGeneration, isCurrentOfflineGeneration, openOfflineDatabase } from "./offline-db";
-import { extractAudioFilesFromZip, isInstrumentalAudioFile, isZipFile } from "./zip-audio";
+import { createZipFromFiles, extractAudioFilesFromZip, isInstrumentalAudioFile, isZipFile } from "./zip-audio";
 
 export type StemRole = "track" | "drums" | "bass" | "keys" | "guitars" | "vocals" | "guide" | "other";
 
@@ -185,6 +185,31 @@ export async function saveFilesToDeviceDownloads(files: File[], songTitle?: stri
       await new Promise((resolve) => window.setTimeout(resolve, 180));
     }
   }
+}
+
+export async function saveStemsZipToDeviceDownloads(
+  sourceFiles: File[],
+  extractedStems: File[],
+  songTitle?: string,
+): Promise<void> {
+  if (typeof document === "undefined" || extractedStems.length === 0) return;
+
+  const cleanTitle = (songTitle ?? "").trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "").trim();
+  const archiveFile =
+    sourceFiles.length === 1 && isZipFile(sourceFiles[0])
+      ? sourceFiles[0]
+      : await createZipFromFiles(extractedStems, `${cleanTitle || "stems"}.zip`);
+
+  const downloadName = formatStemDownloadFileName(archiveFile.name, songTitle);
+  const url = URL.createObjectURL(archiveFile);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = downloadName;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export async function syncFolderFilesToSongStems(

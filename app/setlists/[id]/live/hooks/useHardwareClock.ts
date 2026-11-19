@@ -64,6 +64,7 @@ export interface HardwareClockConfig {
   playingTrackIndexRef: React.MutableRefObject<number>;
 
   playGuideCue?: (name: string) => void;
+  cancelFutureAudio?: () => void;
   getAudioContext?: () => AudioContext | null;
   triggerMetronomeSound?: (beat: number, time: number) => void;
   audioContextStartTimeRef?: React.MutableRefObject<number | null>;
@@ -116,6 +117,8 @@ export function useHardwareClock(config: HardwareClockConfig) {
     let lastMidiBeat: number | null = null;
     let lastHeartbeatTime = 0;
     let lastYoutubeResyncTime = 0;
+    let lastObservedYtTime = -1;
+    let ytCalibrationSamples = 0;
     const clockExecutionTick = () => {
       if (!isActive) return;
       const c = configRef.current;
@@ -239,13 +242,51 @@ export function useHardwareClock(config: HardwareClockConfig) {
 
       const audioCtx = c.getAudioContext ? c.getAudioContext() : null;
       const clickSpeed = c.metronomeSpeedRef?.current ?? (c.isDoubleMetronomeEnabledRef.current ? "double" : "default");
+
+      if (
+        c.isYtBackingTrackStartRef.current &&
+        !c.isYtBufferingRef?.current &&
+        c.audioContextStartTimeRef &&
+        c.audioContextStartTimeRef.current !== null &&
+        audioCtx &&
+        audioCtx.state === "running"
+      ) {
+        const ytTimeSecs = c.getYoutubeTime?.() ?? null;
+        if (ytTimeSecs !== null && ytTimeSecs > 0 && Math.abs(ytTimeSecs - lastObservedYtTime) > 0.0005) {
+          lastObservedYtTime = ytTimeSecs;
+          ytCalibrationSamples++;
+          const offsetSecs = (song.youtube_sync_offset_ms || 0) / 1000;
+          const targetAudioStart =
+            audioCtx.currentTime - (ytTimeSecs - offsetSecs);
+          const driftSecs = targetAudioStart - c.audioContextStartTimeRef.current;
+
+          if ((ytCalibrationSamples <= 12 && Math.abs(driftSecs) > 0.012) || Math.abs(driftSecs) > 0.12) {
+            c.audioContextStartTimeRef.current = targetAudioStart;
+            const beatSpeedSecs = beatSpeedMsCurrent / 1000;
+            const beatUnitQuarter = meter.unitQuarterBeats * getMetronomeStep(clickSpeed);
+            const actualAbsoluteBeat = (ytTimeSecs - offsetSecs) / beatSpeedSecs;
+            const sectionElapsedMs = (actualAbsoluteBeat - sectionStartBeat) * beatSpeedMsCurrent;
+            c.mdSectionStartTimeRef.current = globalNow - sectionElapsedMs;
+            elapsedMs = sectionElapsedMs;
+            c.cancelFutureAudio?.();
+            c.lastAudioBeatRef.current =
+              Math.max(0, Math.ceil((actualAbsoluteBeat - 0.0001) / beatUnitQuarter)) * beatUnitQuarter;
+          } else {
+            const stepSecs = driftSecs * 0.25;
+            c.audioContextStartTimeRef.current += stepSecs;
+            c.mdSectionStartTimeRef.current += stepSecs * 1000;
+            elapsedMs = globalNow - c.mdSectionStartTimeRef.current;
+          }
+        }
+      }
+
       if (c.audioContextStartTimeRef && c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
         const lookaheadSecs = 0.200;
         const beatSpeedSecs = beatSpeedMsCurrent / 1000;
         const beatUnitQuarter = meter.unitQuarterBeats * getMetronomeStep(clickSpeed);
         const currentAudioTime = audioCtx.currentTime;
 
-        const audioOffsetSecs = (c.localClickOffsetMsRef?.current ?? 0) / 1000;
+        const audioOffsetSecs = ((c.localClickOffsetMsRef?.current ?? 0) - c.audioLatencyOffsetMs) / 1000;
 
         // ✅ SURGICAL FIX: Use Math.floor to ensure we catch the exact beat boundary (0-indexed timeline)
         // instead of aggressively rounding up to the next beat.
