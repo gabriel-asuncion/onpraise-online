@@ -73,7 +73,10 @@ export class MultitrackEngine {
     this.context = context;
     this.master = context.createGain();
     this.analyser = context.createAnalyser();
-    this.analyser.fftSize = 256;
+    this.analyser.fftSize = 1024;
+    this.analyser.minDecibels = -70;
+    this.analyser.maxDecibels = -14;
+    this.analyser.smoothingTimeConstant = 0;
     this.master.connect(this.analyser);
     this.analyser.connect(context.destination);
   }
@@ -295,14 +298,31 @@ export class MultitrackEngine {
   }
 
   getFrequencyBands(): number[] {
+    if (!this.isPlaying) return [0, 0, 0, 0, 0, 0, 0, 0];
     const bins = new Uint8Array(this.analyser.frequencyBinCount);
     this.analyser.getByteFrequencyData(bins);
-    const boundaries = [0, 1, 2, 4, 8, 16, 32, 64, bins.length];
-    return boundaries.slice(0, -1).map((start, i) => {
-      const end = Math.min(bins.length, boundaries[i + 1]);
+    const hzPerBin = this.context.sampleRate / this.analyser.fftSize;
+    // 8 strips: Sub, Bass, Low-Mid, Mid (4), High-Mid (5), Upper High-Mid (6), Highs (7), Air (8)
+    const hzEdges = [40, 110, 250, 550, 1200, 2600, 5000, 9500, 18000];
+    const bandGain = [0.88, 0.95, 1.04, 1.16, 1.32, 1.56, 2.15, 3.05];
+    const peakWeight = [0.25, 0.25, 0.3, 0.35, 0.42, 0.5, 0.62, 0.72];
+    return hzEdges.slice(0, -1).map((lowHz, i) => {
+      const highHz = hzEdges[i + 1];
+      const start = Math.max(1, Math.floor(lowHz / hzPerBin));
+      const end = Math.min(bins.length, Math.max(start + 1, Math.ceil(highHz / hzPerBin)));
       let total = 0;
-      for (let bin = start; bin < end; bin++) total += bins[bin];
-      return end > start ? total / (end - start) / 255 : 0;
+      let maxBin = 0;
+      for (let bin = start; bin < end; bin++) {
+        const value = bins[bin];
+        total += value;
+        if (value > maxBin) maxBin = value;
+      }
+      const avg = end > start ? total / (end - start) / 255 : 0;
+      const peak = maxBin / 255;
+      const pw = peakWeight[i] ?? 0.35;
+      const blended = (avg * (1 - pw) + peak * pw) * (bandGain[i] ?? 1);
+      const gated = Math.max(0, (blended - 0.12) / 0.88);
+      return Math.min(1, Math.pow(gated, 1.15));
     });
   }
 

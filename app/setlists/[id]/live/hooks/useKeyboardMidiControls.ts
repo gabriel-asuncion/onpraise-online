@@ -3,7 +3,7 @@ import { createClient } from "../../../../../utils/supabase/client";
 import { useEngine } from "../../../../context/EngineContext";
 import { useOnlineStatus } from "../../../../context/NetworkContext";
 import { decodeMcuVpot, createMcuBeatControls } from "../../../../songs/[id]/edit/mcuProtocol";
-import { buildFeedbackScene, createBeatControls, getConfiguredBeatControls, getMidiOutputs, parseBeatLightSettings, syncFeedbackOutputs, type FeedbackScene } from "../../../../songs/[id]/edit/midiFeedback";
+import { buildFeedbackScene, createBeatControls, getConfiguredBeatControls, getMidiOutputs, parseBeatLightSettings, syncFaderFeedbackOutputs, syncFeedbackOutputs, type FaderFeedbackItem, type FeedbackScene } from "../../../../songs/[id]/edit/midiFeedback";
 import { getMidiFaderValue, isMidiActionAllowedInEq, matchesPairedMidiMapping, shouldTriggerMidiButton } from "./midiInput";
 import { clearEqualizerOutputs, clearQueuedMidiOutputs } from "./equalizer";
 import { useLightShow, type LightShowPlayback } from "./useLightShow";
@@ -56,6 +56,27 @@ export type ControlActionId =
   | "youtubeVolume" | "beatLightFirst" | StemMidiActionId;
 
 export type ControlCategory = "Playback" | "Audio" | "Display" | "Visuals / Hardware";
+export type MixerLedActionId =
+  | StemMidiActionId
+  | "clickMute"
+  | "clickSolo"
+  | "guideMute"
+  | "guideSolo"
+  | "youtubeMute"
+  | "youtubeSolo"
+  | "youtubeSync";
+
+const MIXER_TOGGLE_LED_ACTIONS = new Set<ControlActionId>([
+  "clickMute",
+  "clickSolo",
+  "guideMute",
+  "guideSolo",
+  "youtubeMute",
+  "youtubeSolo",
+  "youtubeSync",
+  ...STEM_MIDI_ACTION_GROUPS.flatMap((group) => [group.mute, group.solo]),
+]);
+
 export type MidiAudioScope = "shared" | "youtube" | "stems";
 export type MidiMessageType = "note" | "cc" | "pitchbend";
 
@@ -266,7 +287,8 @@ export function useKeyboardMidiControls(
   page: Extract<MidiProfilePage, "live" | "solo"> = "live",
   playback: LightShowPlayback = { isPlaying: false, beat: 0, tempo: 75, quarterBeatsPerMeasure: 4, unitQuarterBeats: 1 },
   audioSource: "youtube" | "local" = "youtube",
-  stemLedStates: Partial<Record<StemMidiActionId, boolean>> = {},
+  mixerLedStates: Partial<Record<MixerLedActionId, boolean>> = {},
+  faderValues: Partial<Record<ControlActionId, number>> = {},
 ) {
   const { realUserId } = useEngine();
   const { isOnline } = useOnlineStatus();
@@ -300,8 +322,13 @@ export function useKeyboardMidiControls(
   const profileDocumentRef = useRef(profileDocument);
   const activeProfileIdRef = useRef(activeProfileId);
   const setupOpenRef = useRef(isSetupOpen);
-  const feedbackRef = useRef<Map<MIDIOutput, FeedbackScene>>(new Map());
+  const feedbackRef = useRef(new Map());
+  const faderValuesRef = useRef(faderValues);
+  const faderFeedbackRef = useRef(new Map());
+  const faderPickupStateRef = useRef(new Map());
   const [outputRevision, setOutputRevision] = useState(0);
+  const [ledRefreshRevision, setLedRefreshRevision] = useState(0);
+  const [faderRefreshRevision, setFaderRefreshRevision] = useState(0);
   const portSnapshotRef = useRef("");
   const monitorTimeRef = useRef(0);
   const eqRetryAfterRef = useRef(0);
@@ -351,7 +378,8 @@ export function useKeyboardMidiControls(
     profileDocumentRef.current = profileDocument;
     activeProfileIdRef.current = activeProfileId;
     setupOpenRef.current = isSetupOpen;
-  }, [actions, activeProfileId, audioSource, isSetupOpen, learningAction, preferences, profileDocument]);
+    faderValuesRef.current = faderValues;
+  }, [actions, activeProfileId, audioSource, faderValues, isSetupOpen, learningAction, preferences, profileDocument]);
 
   useEffect(() => {
     let active = true;
@@ -535,6 +563,19 @@ export function useKeyboardMidiControls(
     const access = accessRef.current;
     if (!access) return;
     const previousHandlers = new Map<MidiInputLike, MidiInputLike["onmidimessage"]>();
+    const releaseTimers = new Set<ReturnType<typeof setTimeout>>();
+
+    const reassertReleasedControlLed = (type: "note" | "cc", channel: number, noteOrCcNumber: number) => {
+      const key = feedbackKey({ type, channel, noteOrCcNumber });
+      feedbackRef.current.forEach((sent) => sent.delete(key));
+      setLedRefreshRevision((rev) => rev + 1);
+      const timer = setTimeout(() => {
+        releaseTimers.delete(timer);
+        feedbackRef.current.forEach((sent) => sent.delete(key));
+        setLedRefreshRevision((rev) => rev + 1);
+      }, 45);
+      releaseTimers.add(timer);
+    };
 
     access.inputs.forEach((input) => {
       previousHandlers.set(input, input.onmidimessage);
@@ -620,7 +661,12 @@ export function useKeyboardMidiControls(
           : candidateEntries[0];
         if (!mapping) {
           if ((messageType === "note" && (command === 0x80 || velocity === 0)) ||
-              (messageType === "cc" && velocity < 64)) pressedMidiInputsRef.current.delete(`${input.id}:${channel}:${messageType}:${number}`);
+              (messageType === "cc" && velocity < 64)) {
+            pressedMidiInputsRef.current.delete(`${input.id}:${channel}:${messageType}:${number}`);
+            if (messageType === "note" || messageType === "cc") {
+              reassertReleasedControlLed(messageType, channel, number);
+            }
+          }
           return;
         }
 
@@ -633,6 +679,7 @@ export function useKeyboardMidiControls(
           const pressKey = `${input.id}:${channel}:${messageType}:${number}`;
           if (!isPressed) {
             pressedMidiInputsRef.current.delete(pressKey);
+            reassertReleasedControlLed("note", channel, number);
             return;
           }
           if (!shouldTriggerMidiButton(actionId, isPressed, pressedMidiInputsRef.current.has(pressKey))) return;
@@ -645,7 +692,29 @@ export function useKeyboardMidiControls(
           else actionsRef.current[actionId]?.();
         } else if (CONTROL_ACTIONS.some((action) => action.id === actionId && action.isFader)) {
           const value = getMidiFaderValue(messageType, event.data);
-          if (value !== null) actionsRef.current[actionId]?.(value);
+          if (value !== null) {
+            const currentSw = faderValuesRef.current[actionId];
+            if (typeof currentSw === "number" && Number.isFinite(currentSw)) {
+              const pickupMap = faderPickupStateRef.current;
+              const state = pickupMap.get(actionId) ?? { pickedUp: false, lastHw: null, lastSw: currentSw };
+              const withinTolerance = Math.abs(value - currentSw) <= 0.035;
+              const crossedTarget = state.lastHw !== null &&
+                ((state.lastHw < currentSw && value >= currentSw) || (state.lastHw > currentSw && value <= currentSw));
+              if (state.pickedUp || withinTolerance || crossedTarget) {
+                pickupMap.set(actionId, { pickedUp: true, lastHw: value, lastSw: value });
+                faderValuesRef.current = { ...faderValuesRef.current, [actionId]: value };
+                actionsRef.current[actionId]?.(value);
+                faderFeedbackRef.current.forEach((sent: Map<string, number>) => sent.delete(actionId));
+                setFaderRefreshRevision((rev) => rev + 1);
+              } else {
+                pickupMap.set(actionId, { pickedUp: false, lastHw: value, lastSw: currentSw });
+                faderFeedbackRef.current.forEach((sent: Map<string, number>) => sent.delete(actionId));
+                setFaderRefreshRevision((rev) => rev + 1);
+              }
+            } else {
+              actionsRef.current[actionId]?.(value);
+            }
+          }
         } else if (["jogScrub", "clickOffset", "cycleLightShowPreset", "transpose", "timelineZoom", "clickSound"].includes(actionId) && messageType === "cc") {
           const delta = decodeMcuVpot(velocity);
           if (delta) {
@@ -660,6 +729,7 @@ export function useKeyboardMidiControls(
           const isPressed = velocity >= 64;
           if (!isPressed) {
             pressedMidiInputsRef.current.delete(pressKey);
+            if (messageType === "cc") reassertReleasedControlLed("cc", channel, number);
             return;
           }
           if (!shouldTriggerMidiButton(actionId, isPressed, pressedMidiInputsRef.current.has(pressKey))) return;
@@ -675,6 +745,8 @@ export function useKeyboardMidiControls(
     });
 
     return () => {
+      releaseTimers.forEach((timer) => clearTimeout(timer));
+      releaseTimers.clear();
       previousHandlers.forEach((handler, input) => {
         input.onmidimessage = handler;
       });
@@ -694,9 +766,8 @@ export function useKeyboardMidiControls(
       if (!mapping || mapping.messageType === "pitchbend" || ["jogScrub", "clickOffset", "cycleLightShowPreset", "transpose", "timelineZoom", "clickSound"].includes(actionId) ||
         CONTROL_ACTIONS.find((action) => action.id === actionId)?.isFader) return [];
       if (!isControlActionActiveForSource(actionId as ControlActionId, audioSource)) return [];
-      const isStemToggle = actionId.startsWith("STEM_") && (actionId.endsWith("_MUTE") || actionId.endsWith("_SOLO"));
-      const active = isStemToggle
-        ? !isSetupOpen && Boolean(stemLedStates[actionId as StemMidiActionId])
+      const active = MIXER_TOGGLE_LED_ACTIONS.has(actionId as ControlActionId)
+        ? !isSetupOpen && Boolean(mixerLedStates[actionId as MixerLedActionId])
         : !isSetupOpen && actionId !== "toggleEqMode";
       return [{ control: { type: mapping.messageType, channel: mapping.channel, noteOrCcNumber: mapping.number }, active }];
     });
@@ -713,7 +784,52 @@ export function useKeyboardMidiControls(
       console.error("Could not send live MIDI light feedback.", errors);
       setMidiError("Could not send MIDI light feedback to one or more outputs.");
     }
-  }, [preferences, profileDocument, activeProfileId, isSetupOpen, beat, outputRevision, isEqModeActive, sendEqFrame, stemLedStates, audioSource]);
+  }, [preferences, profileDocument, activeProfileId, isSetupOpen, beat, outputRevision, ledRefreshRevision, isEqModeActive, sendEqFrame, mixerLedStates, audioSource]);
+
+  useEffect(() => {
+    faderPickupStateRef.current.clear();
+    faderFeedbackRef.current.clear();
+    setFaderRefreshRevision((rev) => rev + 1);
+  }, [activeProfileId, audioSource]);
+
+  useEffect(() => {
+    const access = accessRef.current;
+    const outputs = access ? getMidiOutputs(access, preferences.pairedDeviceName) : [];
+    const pickupMap = faderPickupStateRef.current;
+    const faders: FaderFeedbackItem[] = [];
+
+    for (const [actionId, mapping] of Object.entries(preferences.mappings)) {
+      if (!mapping || (mapping.messageType !== "pitchbend" && mapping.messageType !== "cc")) continue;
+      if (!CONTROL_ACTIONS.some((action) => action.id === actionId && action.isFader)) continue;
+      if (!isControlActionActiveForSource(actionId as ControlActionId, audioSource)) continue;
+      const rawValue = faderValues[actionId as ControlActionId];
+      if (typeof rawValue !== "number" || !Number.isFinite(rawValue)) continue;
+      const value = Math.max(0, Math.min(1, rawValue));
+
+      const existing = pickupMap.get(actionId);
+      if (existing && Math.abs(value - existing.lastSw) > 0.002) {
+        const stillMatched = existing.lastHw !== null && Math.abs(existing.lastHw - value) <= 0.035;
+        pickupMap.set(actionId, {
+          pickedUp: stillMatched,
+          lastHw: existing.lastHw,
+          lastSw: value,
+        });
+      }
+
+      faders.push({
+        key: actionId,
+        messageType: mapping.messageType,
+        channel: mapping.channel,
+        number: mapping.number,
+        value,
+      });
+    }
+
+    const errors = syncFaderFeedbackOutputs(outputs, faders, faderFeedbackRef.current);
+    if (errors.length) {
+      console.error("Could not send fader MIDI position feedback.", errors);
+    }
+  }, [preferences, audioSource, faderValues, outputRevision, faderRefreshRevision, isSetupOpen]);
 
   useEffect(() => () => {
     const outputs = [...feedbackRef.current.keys()];

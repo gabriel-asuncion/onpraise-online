@@ -18,7 +18,7 @@ import { useWebAudioEngine } from "../../setlists/[id]/live/hooks/useWebAudioEng
 import { useLocalPreferences } from "../../setlists/[id]/live/hooks/useLocalPreferences";
 import { useYouTubeSync } from "../../setlists/[id]/live/hooks/useYouTubeSync";
 import { useHardwareClock } from "../../setlists/[id]/live/hooks/useHardwareClock";
-import { useKeyboardMidiControls, type ControlActions } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
+import { useKeyboardMidiControls, type ControlActions, type MixerLedActionId } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
 import { STEM_MIDI_ACTION_GROUPS } from "../../setlists/[id]/live/hooks/midiProfiles";
 import { useLocalClickOffset } from "../../setlists/[id]/live/hooks/useLocalClickOffset";
 import { useControlFeedback } from "../../setlists/[id]/live/hooks/useControlFeedback";
@@ -128,9 +128,20 @@ export default function SoloPracticeRoomPage() {
     guideVolume, setGuideVolume, guideVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
     mixerMutes, setMixerMutes, mixerSolos, setMixerSolos,
+    toggleMixerMute, toggleMixerSolo,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
     isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   } = useLocalPreferences();
+
+  const activeMixerBusChannels = audioSource === "local"
+    ? (["click", "guide"] as const)
+    : (["click", "guide", "yt"] as const);
+
+  useEffect(() => {
+    if (audioSource === "local" && mixerSolos.yt) {
+      toggleMixerSolo("yt", ["click", "guide", "yt"]);
+    }
+  }, [audioSource, mixerSolos.yt, toggleMixerSolo]);
 
   useEffect(() => {
     setAudioPanRight(isClickGuideHardPannedRight);
@@ -1410,7 +1421,15 @@ export default function SoloPracticeRoomPage() {
   }
 
   const stemLedStates = useMemo(() => {
-    const states: Partial<Record<typeof STEM_MIDI_ACTION_GROUPS[number]["mute" | "solo"], boolean>> = {};
+    const states: Partial<Record<MixerLedActionId, boolean>> = {
+      clickMute: mixerMutes.click,
+      clickSolo: mixerSolos.click,
+      guideMute: mixerMutes.guide,
+      guideSolo: mixerSolos.guide,
+      youtubeMute: mixerMutes.yt,
+      youtubeSolo: mixerSolos.yt,
+      youtubeSync: isYoutubeSyncEnabled,
+    };
     if (audioSource !== "local") return states;
     const grouped = groupStemSlots(storedStems);
     for (const group of STEM_MIDI_ACTION_GROUPS) {
@@ -1420,7 +1439,24 @@ export default function SoloPracticeRoomPage() {
       states[group.solo] = Boolean(mix?.solo);
     }
     return states;
-  }, [audioSource, storedStems, multitrack.mixes]);
+  }, [audioSource, storedStems, multitrack.mixes, mixerMutes, mixerSolos, isYoutubeSyncEnabled]);
+
+  const faderValues = useMemo(() => {
+    const values: Partial<Record<ControlActionId, number>> = {
+      clickVolume: localClickVolume,
+      guideVolume: guideVolume,
+      ...(audioSource === "youtube" ? { youtubeVolume } : {}),
+    };
+    if (audioSource === "local") {
+      const grouped = groupStemSlots(storedStems);
+      for (const group of STEM_MIDI_ACTION_GROUPS) {
+        const stem = grouped[group.slot].length === 1 ? grouped[group.slot][0] : undefined;
+        const mix = stem ? multitrack.mixes.find((m) => m.id === stem.stemId) : undefined;
+        if (mix) values[group.vol] = mix.volume;
+      }
+    }
+    return values;
+  }, [audioSource, localClickVolume, guideVolume, youtubeVolume, storedStems, multitrack.mixes]);
 
   const soloStackAst = useMemo(() => activeSong ? [{
     trackId: activeSong.id, trackIndex: 0, title: activeSong.title, tempo: activeSong.tempo, displayKey: activeDisplayKey, ast: memoizedSongAstTree,
@@ -1466,19 +1502,24 @@ export default function SoloPracticeRoomPage() {
     lineSpacing: () => setLineSpacing(lineSpacing === 16 ? 24 : lineSpacing === 24 ? 32 : 16),
     lyricsSize: () => setLyricsFontSize(lyricsFontSize === 14 ? 16 : lyricsFontSize === 16 ? 20 : lyricsFontSize === 20 ? 24 : 14),
     youtubeSync: () => isOnline ? setIsYoutubeSyncEnabled(!isYoutubeSyncEnabled) : openNoConnectionModal("YouTube sync"),
-    clickMute: () => setMixerMutes((current) => ({ ...current, click: !current.click })),
-    clickSolo: () => setMixerSolos((current) => ({ ...current, click: !current.click })),
-    guideMute: () => setMixerMutes((current) => ({ ...current, guide: !current.guide })),
-    guideSolo: () => setMixerSolos((current) => ({ ...current, guide: !current.guide })),
-    youtubeMute: () => setMixerMutes((current) => ({ ...current, yt: !current.yt })),
-    youtubeSolo: () => setMixerSolos((current) => ({ ...current, yt: !current.yt })),
+    clickMute: () => toggleMixerMute("click", activeMixerBusChannels),
+    clickSolo: () => toggleMixerSolo("click", activeMixerBusChannels),
+    guideMute: () => toggleMixerMute("guide", activeMixerBusChannels),
+    guideSolo: () => toggleMixerSolo("guide", activeMixerBusChannels),
+    youtubeMute: () => toggleMixerMute("yt", activeMixerBusChannels),
+    youtubeSolo: () => toggleMixerSolo("yt", activeMixerBusChannels),
     clickVolume: (value) => { if (typeof value === "number") setLocalClickVolume(value); },
     guideVolume: (value) => { if (typeof value === "number") setGuideVolume(value); },
     youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
   }, isPlayingFlow ? midiBeatLight : null, "solo", {
     isPlaying: isPlayingFlow, beat: tracksPlayheadBeat, tempo: activeSong?.tempo || 75,
     ...getTimelineMeter(activeSong?.section_timings),
-  }, audioSource, stemLedStates);
+    getFrequencyBands: () => {
+      if (audioSourceRef.current !== "local") return null;
+      try { return multitrack.getEngine().getFrequencyBands(); }
+      catch { return [0, 0, 0, 0, 0, 0, 0, 0]; }
+    },
+  }, audioSource, stemLedStates, faderValues);
 
   if (loading) return <PageSkeleton message="LOADING SONG..." variant="live" />;
 
@@ -1624,6 +1665,8 @@ export default function SoloPracticeRoomPage() {
         guideVolume={guideVolume} setGuideVolume={setGuideVolume}
         mixerMutes={mixerMutes} setMixerMutes={setMixerMutes}
         mixerSolos={mixerSolos} setMixerSolos={setMixerSolos}
+        onToggleMixerMute={(channel) => toggleMixerMute(channel, activeMixerBusChannels)}
+        onToggleMixerSolo={(channel) => toggleMixerSolo(channel, activeMixerBusChannels)}
         audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
         isYoutubeSyncEnabled={isYoutubeSyncEnabled} setIsYoutubeSyncEnabled={setIsYoutubeSyncEnabled} youtubeVolume={youtubeVolume} setYoutubeVolume={setYoutubeVolume}

@@ -35,7 +35,7 @@ import { resolveSongAudioStems, type StoredAudioStem } from "../../../../lib/off
 import { groupStemSlots, type StemSlot } from "../../../../lib/stem-slots";
 import { STEM_MIDI_ACTION_GROUPS } from "./hooks/midiProfiles";
 import { useHardwareClock } from "./hooks/useHardwareClock";
-import { useKeyboardMidiControls } from "./hooks/useKeyboardMidiControls";
+import { useKeyboardMidiControls, type ControlActionId, type MixerLedActionId } from "./hooks/useKeyboardMidiControls";
 import { useLocalClickOffset } from "./hooks/useLocalClickOffset";
 import { useControlFeedback } from "./hooks/useControlFeedback";
 import { getMetronomePulse, getMetronomeStep, isClickVolumeMuted, METRONOME_PATTERNS, METRONOME_SPEEDS, type MetronomePattern, type MetronomeSpeed } from "../../../../lib/metronome";
@@ -222,9 +222,20 @@ export default function SetlistPerformanceRoomPage() {
     guideVolume, setGuideVolume, guideVolumeRef,
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
     mixerMutes, setMixerMutes, mixerSolos, setMixerSolos,
+    toggleMixerMute, toggleMixerSolo, setMixerChannelMute,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
     isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   } = useLocalPreferences();
+
+  const activeMixerBusChannels = audioSource === "local"
+    ? (["click", "guide"] as const)
+    : (["click", "guide", "yt"] as const);
+
+  useEffect(() => {
+    if (audioSource === "local" && mixerSolos.yt) {
+      toggleMixerSolo("yt", ["click", "guide", "yt"]);
+    }
+  }, [audioSource, mixerSolos.yt, toggleMixerSolo]);
 
   useEffect(() => {
     setAudioPanRight(isClickGuideHardPannedRight);
@@ -2929,7 +2940,15 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   const stemLedStates = useMemo(() => {
-    const states: Partial<Record<typeof STEM_MIDI_ACTION_GROUPS[number]["mute" | "solo"], boolean>> = {};
+    const states: Partial<Record<MixerLedActionId, boolean>> = {
+      clickMute: mixerMutes.click,
+      clickSolo: mixerSolos.click,
+      guideMute: mixerMutes.guide,
+      guideSolo: mixerSolos.guide,
+      youtubeMute: mixerMutes.yt,
+      youtubeSolo: mixerSolos.yt,
+      youtubeSync: isYoutubeSyncEnabled,
+    };
     if (audioSource !== "local") return states;
     const grouped = groupStemSlots(storedStems);
     for (const group of STEM_MIDI_ACTION_GROUPS) {
@@ -2939,7 +2958,24 @@ export default function SetlistPerformanceRoomPage() {
       states[group.solo] = Boolean(mix?.solo);
     }
     return states;
-  }, [audioSource, storedStems, multitrack.mixes]);
+  }, [audioSource, storedStems, multitrack.mixes, mixerMutes, mixerSolos, isYoutubeSyncEnabled]);
+
+  const faderValues = useMemo(() => {
+    const values: Partial<Record<ControlActionId, number>> = {
+      clickVolume: localClickVolume,
+      guideVolume: guideVolume,
+      ...(audioSource === "youtube" ? { youtubeVolume } : {}),
+    };
+    if (audioSource === "local") {
+      const grouped = groupStemSlots(storedStems);
+      for (const group of STEM_MIDI_ACTION_GROUPS) {
+        const stem = grouped[group.slot].length === 1 ? grouped[group.slot][0] : undefined;
+        const mix = stem ? multitrack.mixes.find((m) => m.id === stem.stemId) : undefined;
+        if (mix) values[group.vol] = mix.volume;
+      }
+    }
+    return values;
+  }, [audioSource, localClickVolume, guideVolume, youtubeVolume, storedStems, multitrack.mixes]);
 
   const keyboardMidiControls = useKeyboardMidiControls(supabase, {
     ...stemMidiActions as any,
@@ -2957,14 +2993,14 @@ export default function SetlistPerformanceRoomPage() {
     lineSpacing: () => setLineSpacing(lineSpacing === 16 ? 24 : lineSpacing === 24 ? 32 : 16),
     lyricsSize: () => setLyricsFontSize(lyricsFontSize === 14 ? 16 : lyricsFontSize === 16 ? 20 : lyricsFontSize === 20 ? 24 : 14),
     youtubeSync: () => handleSetYoutubeSync(!isYoutubeSyncEnabled),
-    clickMute: () => setMixerMutes((current) => ({ ...current, click: !current.click })),
-    clickSolo: () => setMixerSolos((current) => ({ ...current, click: !current.click })),
-    guideMute: () => setMixerMutes((current) => ({ ...current, guide: !current.guide })),
-    guideSolo: () => setMixerSolos((current) => ({ ...current, guide: !current.guide })),
-    youtubeMute: () => setMixerMutes((current) => ({ ...current, yt: !current.yt })),
-    youtubeSolo: () => setMixerSolos((current) => ({ ...current, yt: !current.yt })),
+    clickMute: () => toggleMixerMute("click", activeMixerBusChannels),
+    clickSolo: () => toggleMixerSolo("click", activeMixerBusChannels),
+    guideMute: () => toggleMixerMute("guide", activeMixerBusChannels),
+    guideSolo: () => toggleMixerSolo("guide", activeMixerBusChannels),
+    youtubeMute: () => toggleMixerMute("yt", activeMixerBusChannels),
+    youtubeSolo: () => toggleMixerSolo("yt", activeMixerBusChannels),
     mdTakeover: handleTogglePlaybackAuthority,
-    clickVolume: (value) => { if (typeof value === "number") { setLocalClickVolume(value); setMixerMutes((current) => ({ ...current, click: isClickVolumeMuted(value * 100) })); } },
+    clickVolume: (value) => { if (typeof value === "number") { setLocalClickVolume(value); setMixerChannelMute("click", isClickVolumeMuted(value * 100), activeMixerBusChannels); } },
     clickSpeed: () => setClickSpeedSelection(METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(clickSpeed) + 1) % METRONOME_SPEEDS.length]),
     clickPattern: () => setClickPattern((current) => METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(current) + 1) % METRONOME_PATTERNS.length]),
     clickOffset: (delta) => {
@@ -3010,10 +3046,11 @@ export default function SetlistPerformanceRoomPage() {
     quarterBeatsPerMeasure: getTimelineMeter(activeSong?.section_timings).quarterBeatsPerMeasure,
     unitQuarterBeats: getTimelineMeter(activeSong?.section_timings).unitQuarterBeats,
     getFrequencyBands: () => {
-      try { return audioSourceRef.current === "local" && localStemsAvailable && multitrack.getEngine().isPlaying ? multitrack.getEngine().getFrequencyBands() : null; }
-      catch { return null; }
+      if (audioSourceRef.current !== "local") return null;
+      try { return multitrack.getEngine().getFrequencyBands(); }
+      catch { return [0, 0, 0, 0, 0, 0, 0, 0]; }
     }
-  }, audioSource, stemLedStates);
+  }, audioSource, stemLedStates, faderValues);
 
   if (loading) return <PageSkeleton message="LOADING SETLIST..." variant="live" />;
   if (loadState === "error" || loadState === "empty") return (
@@ -3219,6 +3256,8 @@ export default function SetlistPerformanceRoomPage() {
         guideVolume={guideVolume} setGuideVolume={setGuideVolume}
         mixerMutes={mixerMutes} setMixerMutes={setMixerMutes}
         mixerSolos={mixerSolos} setMixerSolos={setMixerSolos}
+        onToggleMixerMute={(channel) => toggleMixerMute(channel, activeMixerBusChannels)}
+        onToggleMixerSolo={(channel) => toggleMixerSolo(channel, activeMixerBusChannels)}
         audioLatencyOffsetMs={audioLatencyOffsetMs} setAudioLatencyOffsetMs={setAudioLatencyOffsetMs}
         isTestingSync={isTestingSync} setIsTestingSync={setIsTestingSync} testVisualBeat={testVisualBeat} activeSong={activeSong}
         isYoutubeSyncEnabled={localPresenceUser?.isMD === true && isYoutubeSyncEnabled}

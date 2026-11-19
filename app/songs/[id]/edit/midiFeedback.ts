@@ -166,3 +166,46 @@ export function buildFeedbackScene(
   }
   return scene;
 }
+
+export interface FaderFeedbackItem {
+  key: string;
+  messageType: "pitchbend" | "cc";
+  channel: number;
+  number: number;
+  value: number;
+}
+
+export function syncFaderFeedbackOutputs<T extends FeedbackOutput>(
+  outputs: T[],
+  faders: readonly FaderFeedbackItem[],
+  previous: Map<T, Map<string, number>>,
+): unknown[] {
+  const errors: unknown[] = [];
+  for (const output of [...previous.keys()]) {
+    if (!outputs.includes(output)) previous.delete(output);
+  }
+  for (const output of outputs) {
+    if (output.state === "disconnected") continue;
+    const sent = previous.get(output) ?? new Map<string, number>();
+    for (const fader of faders) {
+      const clamped = Math.max(0, Math.min(1, Number.isFinite(fader.value) ? fader.value : 0));
+      const channel = Math.max(0, Math.min(15, fader.channel));
+      const quantized = fader.messageType === "pitchbend"
+        ? Math.round(clamped * 16383)
+        : Math.round(clamped * 127);
+      if (sent.get(fader.key) === quantized) continue;
+      try {
+        if (fader.messageType === "pitchbend") {
+          output.send([0xe0 | channel, quantized & 0x7f, (quantized >> 7) & 0x7f]);
+        } else {
+          output.send([0xb0 | channel, fader.number & 0x7f, quantized]);
+        }
+        sent.set(fader.key, quantized);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    previous.set(output, sent);
+  }
+  return errors;
+}

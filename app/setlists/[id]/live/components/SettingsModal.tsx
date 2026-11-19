@@ -74,6 +74,8 @@ interface SettingsModalProps {
   setMixerMutes: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
   mixerSolos: { click: boolean; guide: boolean; yt: boolean };
   setMixerSolos: React.Dispatch<React.SetStateAction<{ click: boolean; guide: boolean; yt: boolean }>>;
+  onToggleMixerMute?: (channel: "click" | "guide" | "yt") => void;
+  onToggleMixerSolo?: (channel: "click" | "guide" | "yt") => void;
   midiSetup: Omit<MidiSetupModalProps, "onClose"> & { setSetupOpen: (open: boolean) => void };
   isClickGuideHardPannedRight: boolean;
   setIsClickGuideHardPannedRight: (val: boolean) => void;
@@ -177,6 +179,7 @@ export function SettingsModal(props: SettingsModalProps) {
     metronomeSoundType, setMetronomeSoundType, 
     localClickVolume, setLocalClickVolume, guideVolume, setGuideVolume,
     mixerMutes, setMixerMutes, mixerSolos, setMixerSolos,
+    onToggleMixerMute, onToggleMixerSolo,
     audioLatencyOffsetMs, setAudioLatencyOffsetMs,
     isTestingSync, setIsTestingSync, testVisualBeat, activeSong,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
@@ -514,6 +517,8 @@ export function SettingsModal(props: SettingsModalProps) {
         setMixerMutes={setMixerMutes}
         mixerSolos={mixerSolos}
         setMixerSolos={setMixerSolos}
+        onToggleMixerMute={onToggleMixerMute}
+        onToggleMixerSolo={onToggleMixerSolo}
         isClickGuideHardPannedRight={props.isClickGuideHardPannedRight}
         setIsClickGuideHardPannedRight={props.setIsClickGuideHardPannedRight}
         metronomeSoundType={metronomeSoundType}

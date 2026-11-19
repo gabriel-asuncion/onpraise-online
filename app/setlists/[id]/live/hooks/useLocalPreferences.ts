@@ -34,6 +34,8 @@ export function useHardPanRightPreference() {
   return [isHardPanRight, setIsHardPanRight] as const;
 }
 
+export type MixerBusChannel = "click" | "guide" | "yt";
+
 export function useLocalPreferences() {
   const [lyricsFontSize, setLyricsFontSize] = useState<number>(16);
   const [showChords, setShowChords] = useState<boolean>(true); 
@@ -58,6 +60,9 @@ export function useLocalPreferences() {
   const youtubeVolumeRef = useRef<number>(0.8);
   const [mixerMutes, setMixerMutes] = useState({ click: false, guide: false, yt: false });
   const [mixerSolos, setMixerSolos] = useState({ click: false, guide: false, yt: false });
+  const mixerMutesRef = useRef(mixerMutes);
+  const mixerSolosRef = useRef(mixerSolos);
+  const preSoloMuteSnapshotRef = useRef<Partial<Record<MixerBusChannel, boolean>> | null>(null);
 
   const [isYoutubeSyncEnabled, setIsYoutubeSyncEnabled] = useState<boolean>(false); // ✅ Added
   const [isClickGuideHardPannedRight, setIsClickGuideHardPannedRight] = useHardPanRightPreference();
@@ -91,10 +96,85 @@ export function useLocalPreferences() {
     }
   }, []);
 
+  const toggleMixerMute = useCallback((
+    channel: MixerBusChannel,
+    activeChannels: readonly MixerBusChannel[] = ["click", "guide", "yt"],
+  ) => {
+    const prevMutes = mixerMutesRef.current;
+    const prevSolos = mixerSolosRef.current;
+    const nextMuted = !prevMutes[channel];
+    const nextMutes = { ...prevMutes, [channel]: nextMuted };
+    const nextSolos = { ...prevSolos };
+
+    if (nextMuted && prevSolos[channel]) {
+      nextSolos[channel] = false;
+      const anyRemainingSolo = activeChannels.some((ch) => nextSolos[ch]);
+      if (!anyRemainingSolo && preSoloMuteSnapshotRef.current) {
+        for (const ch of activeChannels) {
+          if (ch !== channel) {
+            nextMutes[ch] = preSoloMuteSnapshotRef.current[ch] ?? false;
+          }
+        }
+        preSoloMuteSnapshotRef.current = null;
+      }
+    }
+
+    mixerMutesRef.current = nextMutes;
+    mixerSolosRef.current = nextSolos;
+    setMixerMutes(nextMutes);
+    setMixerSolos(nextSolos);
+  }, []);
+
+  const toggleMixerSolo = useCallback((
+    channel: MixerBusChannel,
+    activeChannels: readonly MixerBusChannel[] = ["click", "guide", "yt"],
+  ) => {
+    const prevMutes = mixerMutesRef.current;
+    const prevSolos = mixerSolosRef.current;
+    const nextMutes = { ...prevMutes };
+    const nextSolos = { ...prevSolos };
+
+    if (prevSolos[channel]) {
+      for (const ch of activeChannels) {
+        nextSolos[ch] = false;
+        nextMutes[ch] = preSoloMuteSnapshotRef.current?.[ch] ?? false;
+      }
+      preSoloMuteSnapshotRef.current = null;
+    } else {
+      if (!preSoloMuteSnapshotRef.current) {
+        const snapshot: Partial<Record<MixerBusChannel, boolean>> = {};
+        for (const ch of activeChannels) {
+          snapshot[ch] = prevMutes[ch];
+        }
+        preSoloMuteSnapshotRef.current = snapshot;
+      }
+      for (const ch of activeChannels) {
+        const isTarget = ch === channel;
+        nextSolos[ch] = isTarget;
+        nextMutes[ch] = !isTarget;
+      }
+    }
+
+    mixerMutesRef.current = nextMutes;
+    mixerSolosRef.current = nextSolos;
+    setMixerMutes(nextMutes);
+    setMixerSolos(nextSolos);
+  }, []);
+
+  const setMixerChannelMute = useCallback((
+    channel: MixerBusChannel,
+    muted: boolean,
+    activeChannels: readonly MixerBusChannel[] = ["click", "guide", "yt"],
+  ) => {
+    if (mixerMutesRef.current[channel] === muted) return;
+    toggleMixerMute(channel, activeChannels);
+  }, [toggleMixerMute]);
+
   useEffect(() => {
+    mixerMutesRef.current = mixerMutes;
+    mixerSolosRef.current = mixerSolos;
     isMetronomeSoundEnabledRef.current = isMetronomeSoundEnabled;
     isDoubleMetronomeEnabledRef.current = isDoubleMetronomeEnabled;
-    guideVolumeRef.current = guideVolume;
     const anySoloActive = mixerSolos.click || mixerSolos.guide || mixerSolos.yt;
     localClickVolumeRef.current = mixerMutes.click || (anySoloActive && !mixerSolos.click) ? 0 : localClickVolume;
     guideVolumeRef.current = mixerMutes.guide || (anySoloActive && !mixerSolos.guide) ? 0 : guideVolume;
@@ -130,6 +210,7 @@ export function useLocalPreferences() {
     youtubeVolume, setYoutubeVolume, youtubeVolumeRef,
     mixerMutes, setMixerMutes,
     mixerSolos, setMixerSolos,
+    toggleMixerMute, toggleMixerSolo, setMixerChannelMute,
     isYoutubeSyncEnabled, setIsYoutubeSyncEnabled,
     isClickGuideHardPannedRight, setIsClickGuideHardPannedRight
   };
