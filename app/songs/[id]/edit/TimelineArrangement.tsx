@@ -28,8 +28,74 @@ export interface MidiControlFeedback {
   value: string;
 }
 
+export interface TimelineCallout {
+  id: string;
+  cueId: string;
+  label: string;
+  startBeat: number;
+}
+
+export interface CalloutCatalogItem {
+  id: string;
+  label: string;
+  category: "count-in" | "director";
+  durationBeats: number;
+  steps: ReadonlyArray<{ beatOffset: number; fileKey: string; badge: string }>;
+}
+
+export const CALLOUT_CATALOG: readonly CalloutCatalogItem[] = [
+  {
+    id: "short_count_in",
+    label: "Short Count in",
+    category: "count-in",
+    durationBeats: 3,
+    steps: [
+      { beatOffset: 0, fileKey: "count_3", badge: "3" },
+      { beatOffset: 1, fileKey: "count_2", badge: "2" },
+      { beatOffset: 2, fileKey: "count_1", badge: "1" },
+    ],
+  },
+  {
+    id: "long_count_in",
+    label: "Long Count in",
+    category: "count-in",
+    durationBeats: 8,
+    steps: [
+      { beatOffset: 0, fileKey: "count_4", badge: "4" },
+      { beatOffset: 2, fileKey: "count_3", badge: "3" },
+      { beatOffset: 4, fileKey: "count_4", badge: "4" },
+      { beatOffset: 5, fileKey: "count_3", badge: "3" },
+      { beatOffset: 6, fileKey: "count_2", badge: "2" },
+      { beatOffset: 7, fileKey: "count_1", badge: "1" },
+    ],
+  },
+  { id: "D_All In", label: "All in", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_All In", badge: "All in" }] },
+  { id: "D_Bass", label: "Bass", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Bass", badge: "Bass" }] },
+  { id: "D_Big Ending", label: "Big Ending", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Big Ending", badge: "Big Ending" }] },
+  { id: "D_Break", label: "Break", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Break", badge: "Break" }] },
+  { id: "D_Build", label: "Build", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Build", badge: "Build" }] },
+  { id: "D_Drums In", label: "Drums in", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Drums In", badge: "Drums in" }] },
+  { id: "D_Drums", label: "Drums", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Drums", badge: "Drums" }] },
+  { id: "D_Hits", label: "Hits", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Hits", badge: "Hits" }] },
+  { id: "D_Hold", label: "Hold", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Hold", badge: "Hold" }] },
+  { id: "D_Key Change Up", label: "Key up", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Key Change Up", badge: "Key up" }] },
+  { id: "D_Key Change Down", label: "Key down", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Key Change Down", badge: "Key down" }] },
+  { id: "D_Keys", label: "Keys", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Keys", badge: "Keys" }] },
+  { id: "D_Last Time", label: "Last time", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Last Time", badge: "Last time" }] },
+  { id: "D_Slowly Build", label: "Slow Build", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Slowly Build", badge: "Slow Build" }] },
+  { id: "D_Softly", label: "Softly", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Softly", badge: "Softly" }] },
+  { id: "D_Swell", label: "Swell", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Swell", badge: "Swell" }] },
+  { id: "D_Worship Freely", label: "Worship Freely", category: "director", durationBeats: 2, steps: [{ beatOffset: 0, fileKey: "D_Worship Freely", badge: "Worship Freely" }] },
+];
+
+export const getCalloutCatalogItem = (cueId: string): CalloutCatalogItem =>
+  CALLOUT_CATALOG.find((item) => item.id === cueId) ?? CALLOUT_CATALOG[2];
+
 interface TimelineArrangementProps {
   sections: TimelineSection[];
+  callouts?: TimelineCallout[];
+  onChangeCallouts?: (nextCallouts: TimelineCallout[]) => void;
+  onPreviewCallout?: (cueId: string) => void;
   lineDurationsBySectionId: Record<string, number[]>;
   repeatCountBySectionId: Record<string, number>;
   paddingBeatsBySectionId: Record<string, number>;
@@ -80,6 +146,8 @@ interface TimelineArrangementProps {
 }
 
 type Gesture =
+  | { kind: "callout-move"; pointerId: number; calloutId: string; startX: number; initialBeat: number; hasMoved: boolean }
+  | { kind: "callout-lane-pan"; pointerId: number; startX: number; startY: number; startScrollLeft: number; clickBeat: number; hasMoved: boolean }
   | { kind: "move-pending"; pointerId: number; sectionId: string; startX: number; startY: number; grabOffsetBeats: number }
   | { kind: "move"; pointerId: number; sectionId: string; grabOffsetBeats: number }
   | { kind: "resize"; pointerId: number; sectionId: string; startBeat: number; durationBeats: number }
@@ -112,6 +180,14 @@ const CLIP_COLORS = [
 ];
 
 const snapBeat = (beat: number, step: number) => Math.max(0, Math.round(beat / step) * step);
+const snapSignedBeat = (beat: number, step: number, minBeat: number) =>
+  Math.max(minBeat, Math.round(beat / step) * step);
+const formatTimelineBarBeat = (beat: number, beatsPerBar: number) => {
+  const barIndex = Math.floor(beat / beatsPerBar);
+  const barNumber = barIndex < 0 ? barIndex : barIndex + 1;
+  const beatInBar = (((beat % beatsPerBar) + beatsPerBar) % beatsPerBar) + 1;
+  return { barNumber, beatInBar: Number(beatInBar.toFixed(2)) };
+};
 const formatMeasureBeat = (beats: number) => {
   const safeBeats = Math.max(0, beats);
   const measures = Math.floor(safeBeats / 4);
@@ -121,6 +197,9 @@ const formatMeasureBeat = (beats: number) => {
 
 export default function TimelineArrangement({
   sections,
+  callouts = [],
+  onChangeCallouts,
+  onPreviewCallout,
   lineDurationsBySectionId,
   repeatCountBySectionId,
   paddingBeatsBySectionId,
@@ -192,6 +271,9 @@ export default function TimelineArrangement({
   const followScrollFrameRef = useRef<number | null>(null);
   const draggedJustFinishedRef = useRef(false);
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
+  const [selectedCalloutId, setSelectedCalloutId] = useState<string | null>(null);
+  const [calloutDragPreview, setCalloutDragPreview] = useState<{ id: string; startBeat: number } | null>(null);
+  const [calloutPickerTargetBeat, setCalloutPickerTargetBeat] = useState<number | null>(null);
   const [selectedLaneType, setSelectedLaneType] = useState<string | null>(null);
   const [draggingSectionId, setDraggingSectionId] = useState<string | null>(null);
   const [movePreview, setMovePreview] = useState<MovePreview | null>(null);
@@ -308,6 +390,11 @@ export default function TimelineArrangement({
 
   const snapStep = SNAP_BEATS[snap];
   const quarterBeatsPerBar = 4;
+  const rawPreRollBeats = downbeatOffsetMs > 0 ? (downbeatOffsetMs / 1000) * (Math.max(1, tempo) / 60) : 0;
+  const minCalloutBeat = callouts.reduce((min, item) => Math.min(min, item.startBeat), 0);
+  const requiredPreRollBeats = Math.max(rawPreRollBeats, minCalloutBeat < 0 ? Math.abs(minCalloutBeat) : 0);
+  const preRollBars = requiredPreRollBeats > 0 ? Math.ceil(requiredPreRollBeats / quarterBeatsPerBar) : 0;
+  const preRollBeats = preRollBars * quarterBeatsPerBar;
   const pixelsPerBeat = midiPixelsPerBeat ?? 18 * zoom;
   useEffect(() => {
     onEffectiveZoomChange(pixelsPerBeat);
@@ -400,11 +487,11 @@ export default function TimelineArrangement({
     onClearMidiPixelsPerBeat();
     const viewport = viewportRef.current;
     if (viewport) {
-      const currentOffset = playheadBeat * pixelsPerBeat - viewport.scrollLeft;
+      const currentOffset = (playheadBeat + preRollBeats) * pixelsPerBeat - viewport.scrollLeft;
       pendingZoomAnchorRef.current = Math.max(8, Math.min(viewport.clientWidth - 8, currentOffset));
     }
     setZoom(Number(Math.max(MIN_PIXELS_PER_BEAT / 18, Math.min(200 / 18, nextZoom)).toFixed(3)));
-  }, [onClearMidiPixelsPerBeat, pixelsPerBeat, playheadBeat]);
+  }, [onClearMidiPixelsPerBeat, pixelsPerBeat, playheadBeat, preRollBeats]);
   const getPlayingSectionIndex = useCallback(() => sections.findIndex((section, index) =>
     playheadBeat >= starts[index] && playheadBeat < starts[index] + durations[index],
   ), [durations, playheadBeat, sections, starts]);
@@ -505,6 +592,13 @@ export default function TimelineArrangement({
         return;
       }
 
+      if (selectedCalloutId && (event.key === "Backspace" || event.key === "Delete")) {
+        event.preventDefault();
+        onChangeCallouts?.(callouts.filter((item) => item.id !== selectedCalloutId));
+        setSelectedCalloutId(null);
+        return;
+      }
+
       if (selectedSectionId && ["+", "-", "[", "]"].includes(event.key)) {
         event.preventDefault();
         const sectionIndex = sections.findIndex((section) => section.id === selectedSectionId);
@@ -569,15 +663,15 @@ export default function TimelineArrangement({
     if (playheadOffset === null || !viewport) return;
     pendingZoomAnchorRef.current = null;
     const maxScroll = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
-    const nextScroll = playheadBeat * pixelsPerBeat - playheadOffset;
+    const nextScroll = (playheadBeat + preRollBeats) * pixelsPerBeat - playheadOffset;
     viewport.scrollLeft = Math.max(0, Math.min(maxScroll, nextScroll));
-  }, [pixelsPerBeat, playheadBeat]);
+  }, [pixelsPerBeat, playheadBeat, preRollBeats]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
     const scrubRequested = handledMidiScrubFollowRef.current !== midiScrubFollowRequest;
     handledMidiScrubFollowRef.current = midiScrubFollowRequest;
-    if ((!followPlayhead && !scrubRequested) || !viewport || playheadBeat < 0) {
+    if ((!followPlayhead && !scrubRequested) || !viewport || playheadBeat < -preRollBeats) {
       if (!followPlayhead && !scrubRequested) return;
       if (followScrollFrameRef.current !== null) {
         window.cancelAnimationFrame(followScrollFrameRef.current);
@@ -587,7 +681,7 @@ export default function TimelineArrangement({
       return;
     }
     const visibleCanvasWidth = Math.max(0, viewport.clientWidth - laneColumnWidth);
-    const targetScroll = playheadBeat * pixelsPerBeat - visibleCanvasWidth / 2;
+    const targetScroll = (playheadBeat + preRollBeats) * pixelsPerBeat - visibleCanvasWidth / 2;
     const maxScroll = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
     followScrollTargetRef.current = Math.max(0, Math.min(maxScroll, targetScroll));
     if (followScrollFrameRef.current !== null) return;
@@ -606,7 +700,7 @@ export default function TimelineArrangement({
       followScrollFrameRef.current = window.requestAnimationFrame(animateScroll);
     };
     followScrollFrameRef.current = window.requestAnimationFrame(animateScroll);
-  }, [followPlayhead, laneColumnWidth, midiScrubFollowRequest, pixelsPerBeat, playheadBeat, viewportWidth]);
+  }, [followPlayhead, laneColumnWidth, midiScrubFollowRequest, pixelsPerBeat, playheadBeat, preRollBeats, viewportWidth]);
 
   useEffect(() => () => {
     if (followScrollFrameRef.current !== null) {
@@ -614,11 +708,13 @@ export default function TimelineArrangement({
     }
   }, []);
 
-  const getBeatAtX = (clientX: number) => {
+  const getRawBeatAtX = (clientX: number) => {
     const canvasRect = canvasRef.current?.getBoundingClientRect();
     if (!canvasRect) return 0;
-    return Math.max(0, (clientX - canvasRect.left) / pixelsPerBeat);
+    return Math.max(-preRollBeats, (clientX - canvasRect.left) / pixelsPerBeat - preRollBeats);
   };
+
+  const getBeatAtX = (clientX: number) => Math.max(0, getRawBeatAtX(clientX));
 
   // ✅ Swiping on the ruler navigates horizontally across the timeline
   const handleRulerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -654,8 +750,8 @@ export default function TimelineArrangement({
 
     // Only seek if the user tapped rather than swiped
     if (!hasMoved) {
-      // ✅ SURGICAL FIX: Rely on global getBeatAtX to perfectly account for horizontal scroll state
-      const beat = getBeatAtX(event.clientX);
+      // ✅ SURGICAL FIX: Allow tapping negative preroll bars as well as positive bars
+      const beat = getRawBeatAtX(event.clientX);
       onSeekTime(Math.max(0, downbeatOffsetMs / 1000 + (beat * 60) / Math.max(1, tempo)));
     }
   };
@@ -739,7 +835,8 @@ export default function TimelineArrangement({
     };
   }, [defaultDurationForType, draggingSectionId, durationOverrides, gapOverrides, movePreview, resizePreview, sections, starts, totalBeats]);
   const canvasBeats = Math.max(quarterBeatsPerBar * 16, layout.totalBeats + quarterBeatsPerBar * 16);
-  const canvasWidth = Math.max(320, canvasBeats * pixelsPerBeat + 36);
+  const totalCanvasBeats = preRollBeats + canvasBeats;
+  const canvasWidth = Math.max(320, totalCanvasBeats * pixelsPerBeat + 36);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (isSingleLaneView) {
@@ -747,6 +844,41 @@ export default function TimelineArrangement({
       return;
     }
     const target = event.target as HTMLElement;
+    const calloutId = target.closest<HTMLElement>("[data-callout-id]")?.dataset.calloutId;
+    if (calloutId) {
+      event.stopPropagation();
+      const existing = callouts.find((item) => item.id === calloutId);
+      if (!existing) return;
+      setSelectedCalloutId(calloutId);
+      setSelectedSectionId(null);
+      setSelectedLaneType("Callouts");
+      gestureRef.current = {
+        kind: "callout-move",
+        pointerId: event.pointerId,
+        calloutId,
+        startX: event.clientX,
+        initialBeat: existing.startBeat,
+        hasMoved: false,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    if (target.closest<HTMLElement>("[data-callout-lane]")) {
+      const clickBeat = snapSignedBeat(getRawBeatAtX(event.clientX), snapStep, -preRollBeats);
+      gestureRef.current = {
+        kind: "callout-lane-pan",
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startScrollLeft: viewportRef.current?.scrollLeft ?? 0,
+        clickBeat,
+        hasMoved: false,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
+
     const partitionHandle = target.closest<HTMLElement>("[data-partition-handle]");
     const sectionId = target.closest<HTMLElement>("[data-section-id]")?.dataset.sectionId;
     const resizeHandle = target.closest<HTMLElement>("[data-resize-section]")?.dataset.resizeSection;
@@ -837,6 +969,28 @@ export default function TimelineArrangement({
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
 
+    if (gesture.kind === "callout-move") {
+      const deltaX = event.clientX - gesture.startX;
+      if (!gesture.hasMoved && Math.abs(deltaX) < 4) return;
+      gesture.hasMoved = true;
+      const deltaBeats = deltaX / Math.max(1, pixelsPerBeat);
+      const nextBeat = snapSignedBeat(gesture.initialBeat + deltaBeats, snapStep, -preRollBeats);
+      setCalloutDragPreview({ id: gesture.calloutId, startBeat: nextBeat });
+      return;
+    }
+
+    if (gesture.kind === "callout-lane-pan") {
+      const deltaX = event.clientX - gesture.startX;
+      const deltaY = event.clientY - gesture.startY;
+      if (Math.abs(deltaX) > 5 || Math.abs(deltaY) > 5) {
+        gesture.hasMoved = true;
+        if (viewportRef.current) {
+          viewportRef.current.scrollLeft = gesture.startScrollLeft - deltaX;
+        }
+      }
+      return;
+    }
+
     if (gesture.kind === "move-pending") {
       if (Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < 5) return;
       gestureRef.current = { kind: "move", pointerId: gesture.pointerId, sectionId: gesture.sectionId, grabOffsetBeats: gesture.grabOffsetBeats };
@@ -919,6 +1073,31 @@ export default function TimelineArrangement({
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     if (insertHoldTimerRef.current) clearTimeout(insertHoldTimerRef.current);
 
+    if (gesture.kind === "callout-move") {
+      if (gesture.hasMoved && calloutDragPreview && calloutDragPreview.id === gesture.calloutId) {
+        draggedJustFinishedRef.current = true;
+        onChangeCallouts?.(
+          callouts.map((item) =>
+            item.id === gesture.calloutId ? { ...item, startBeat: calloutDragPreview.startBeat } : item
+          )
+        );
+      }
+      setCalloutDragPreview(null);
+      gestureRef.current = null;
+      return;
+    }
+
+    if (gesture.kind === "callout-lane-pan") {
+      if (!gesture.hasMoved) {
+        setSelectedSectionId(null);
+        setSelectedCalloutId(null);
+        setSelectedLaneType("Callouts");
+        setCalloutPickerTargetBeat(gesture.clickBeat);
+      }
+      gestureRef.current = null;
+      return;
+    }
+
     if (gesture.kind === "move") {
       draggedJustFinishedRef.current = true;
       const targetStart = snapBeat(getBeatAtX(event.clientX) - gesture.grabOffsetBeats, snapStep);
@@ -948,6 +1127,7 @@ export default function TimelineArrangement({
     setInsertionIndex(null);
     setResizePreview(null);
     setPartitionPreview(null);
+    setCalloutDragPreview(null);
   };
 
   const cancelGesture = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -960,9 +1140,10 @@ export default function TimelineArrangement({
     setInsertionIndex(null);
     setResizePreview(null);
     setPartitionPreview(null);
+    setCalloutDragPreview(null);
   };
 
-  const playheadVisible = playheadBeat >= 0 && playheadBeat <= canvasBeats;
+  const playheadVisible = playheadBeat >= -preRollBeats && playheadBeat <= canvasBeats;
   const selectedSection = sections.find((section) => section.id === selectedSectionId);
   const draggingSectionType = sections.find((section) => section.id === draggingSectionId)?.type;
   const insertionGuideType = insertionLaneType ?? draggingSectionType;
@@ -982,7 +1163,7 @@ export default function TimelineArrangement({
     const availableWidth = Math.max(1, viewport.clientWidth - laneColumnWidth - 8);
     const fitPixelsPerBeat = Math.max(
       MIN_PIXELS_PER_BEAT,
-      Math.min(200, availableWidth / Math.max(1, layout.totalBeats)),
+      Math.min(200, availableWidth / Math.max(1, preRollBeats + layout.totalBeats)),
     );
     pendingZoomAnchorRef.current = null;
     setFollowPlayhead(false);
@@ -1167,12 +1348,15 @@ export default function TimelineArrangement({
           setIsSingleLaneView(false);
           return;
         }
+        if ((event.target as HTMLElement).closest("[data-callout-id], [data-callout-lane]")) return;
         const laneType = (event.target as HTMLElement).closest<HTMLElement>("[data-lane-type]")?.dataset.laneType;
         if (laneType) {
           setSelectedLaneType(laneType);
           setSelectedSectionId(null);
+          setSelectedCalloutId(null);
         } else if (!(event.target as HTMLElement).closest("[data-section-id]")) {
           setSelectedSectionId(null);
+          setSelectedCalloutId(null);
           setSelectedLaneType(null);
         }
       }}
@@ -1180,7 +1364,72 @@ export default function TimelineArrangement({
       <div className="sticky top-0 z-40 -mx-1 space-y-2 border-b border-outline-variant/30 bg-surface/95 px-1 pt-1 shadow-sm backdrop-blur">
         {timelineToolbar}
         <div data-timeline-overlay className="flex min-h-14 items-center gap-3 rounded-xl border border-outline-variant/30 border-l-4 border-l-primary bg-surface-container-low px-4 py-2 shadow-sm" aria-live="polite">
-        {selectedSection ? (
+        {selectedCalloutId && (() => {
+          const activeCallout = callouts.find((item) => item.id === selectedCalloutId);
+          if (!activeCallout) return null;
+          const catalogItem = getCalloutCatalogItem(activeCallout.cueId);
+          const { barNumber: barNum, beatInBar } = formatTimelineBarBeat(activeCallout.startBeat, quarterBeatsPerBar);
+          return (
+            <>
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-amber-400">
+                  <span className="font-mono">
+                    {activeCallout.startBeat < 0 ? "Preroll · " : ""}Bar {barNum} · Beat {beatInBar}
+                  </span>
+                  <span>·</span>
+                  <span>{catalogItem.category === "count-in" ? "Count-in Sequence" : "Director Callout"}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-black text-on-surface">{activeCallout.label}</span>
+                  {catalogItem.category === "count-in" && (
+                    <span className="rounded bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300">
+                      {catalogItem.id === "short_count_in" ? "3, 2, 1" : "4 - 3 - 4 3 2 1"}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  title="Preview callout audio"
+                  onClick={() => onPreviewCallout?.(activeCallout.cueId)}
+                  className="flex h-8 items-center gap-1 rounded-full bg-amber-500/20 px-2.5 text-[11px] font-black text-amber-300 hover:bg-amber-500/30 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined !text-[16px]">volume_up</span>
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  title="Nudge 1 beat earlier"
+                  onClick={() => onChangeCallouts?.(callouts.map((c) => c.id === activeCallout.id ? { ...c, startBeat: Math.max(-preRollBeats, c.startBeat - 1) } : c))}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant hover:bg-surface-container-high cursor-pointer"
+                >
+                  <span className="material-symbols-outlined !text-[18px]">chevron_left</span>
+                </button>
+                <button
+                  type="button"
+                  title="Nudge 1 beat later"
+                  onClick={() => onChangeCallouts?.(callouts.map((c) => c.id === activeCallout.id ? { ...c, startBeat: c.startBeat + 1 } : c))}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant hover:bg-surface-container-high cursor-pointer"
+                >
+                  <span className="material-symbols-outlined !text-[18px]">chevron_right</span>
+                </button>
+                <button
+                  type="button"
+                  title="Remove callout"
+                  onClick={() => {
+                    onChangeCallouts?.(callouts.filter((c) => c.id !== activeCallout.id));
+                    setSelectedCalloutId(null);
+                  }}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-error hover:bg-error/10 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined !text-[18px]">delete</span>
+                </button>
+              </div>
+            </>
+          );
+        })()}
+        {!selectedCalloutId && (selectedSection ? (
           <>
             <div className="min-w-0 flex-1">
               <div className="mb-1 flex items-center gap-2 truncate text-[9px] font-black uppercase tracking-widest text-primary">
@@ -1241,7 +1490,7 @@ export default function TimelineArrangement({
           </>
         ) : (
           <span className="text-xs font-medium text-on-surface-variant">No lyric at the current playback position.</span>
-        )}
+        ))}
         </div>
 
         {/* ✅ DOCKED TIMELINE BAR RULER: Pinned to the sticky top section */}
@@ -1272,9 +1521,53 @@ export default function TimelineArrangement({
               className="relative h-full"
               style={{ width: `${canvasWidth}px` }}
             >
+              {preRollBars > 0 && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-y-0 left-0 border-r-2 border-amber-400/70 bg-amber-500/10"
+                  style={{ width: `${preRollBeats * pixelsPerBeat}px` }}
+                >
+                  {rawPreRollBeats > 0 && rawPreRollBeats < preRollBeats && (
+                    <span
+                      title="YouTube / Track 0:00 start"
+                      className="absolute bottom-0.5 border-l border-dashed border-sky-400/80 pl-1 font-mono text-[8px] font-bold text-sky-300"
+                      style={{ left: `${(preRollBeats - rawPreRollBeats) * pixelsPerBeat}px` }}
+                    >
+                      0:00
+                    </span>
+                  )}
+                </div>
+              )}
+              {Array.from({ length: preRollBars }, (_, idx) => {
+                const barNum = idx - preRollBars;
+                const leftPx = idx * quarterBeatsPerBar * pixelsPerBeat;
+                return (
+                  <div
+                    key={`preroll-bar-${barNum}`}
+                    className="absolute inset-y-0"
+                    style={{ left: `${leftPx}px`, width: `${quarterBeatsPerBar * pixelsPerBeat}px` }}
+                  >
+                    <span className="absolute inset-y-0 left-0 border-l border-amber-400/50 pl-1.5 pt-1 text-[9px] font-mono font-bold text-amber-300">
+                      {barNum}
+                    </span>
+                    {pixelsPerBeat >= 24 && Array.from({ length: 4 }, (_, beatIndex) => (
+                      <span
+                        key={beatIndex}
+                        aria-hidden="true"
+                        className="absolute bottom-0 top-0 border-l border-amber-400/20"
+                        style={{ left: `${beatIndex * meterBeatWidth}px` }}
+                      >
+                        {meterBeatWidth >= 24 && (
+                          <span className="absolute bottom-0.5 left-1 text-[8px] font-mono font-medium text-amber-300/60">{beatIndex + 1}</span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                );
+              })}
               {Array.from({ length: Math.ceil(canvasBeats / (quarterBeatsPerBar * rulerBarStride)) + 1 }, (_, index) => (
-                <div key={index} className="absolute inset-y-0" style={{ left: `${index * quarterBeatsPerBar * rulerBarStride * pixelsPerBeat}px`, width: `${quarterBeatsPerBar * rulerBarStride * pixelsPerBeat}px` }}>
-                  <span className="absolute inset-y-0 left-0 border-l border-outline-variant/60 pl-1.5 pt-1 text-[9px] font-mono font-bold text-on-surface-variant">
+                <div key={index} className="absolute inset-y-0" style={{ left: `${(preRollBeats + index * quarterBeatsPerBar * rulerBarStride) * pixelsPerBeat}px`, width: `${quarterBeatsPerBar * rulerBarStride * pixelsPerBeat}px` }}>
+                  <span className={`absolute inset-y-0 left-0 border-l pl-1.5 pt-1 text-[9px] font-mono font-bold ${index === 0 && preRollBars > 0 ? "border-amber-400 text-amber-200" : "border-outline-variant/60 text-on-surface-variant"}`}>
                     {index * rulerBarStride + 1}
                   </span>
                   {pixelsPerBeat >= 24 && Array.from({ length: 4 }, (_, beatIndex) => (
@@ -1294,7 +1587,7 @@ export default function TimelineArrangement({
               {playheadVisible && (
                 <div
                   className="pointer-events-none absolute bottom-0 top-0 z-20 w-0.75 bg-error"
-                  style={{ left: `${playheadBeat * pixelsPerBeat}px` }}
+                  style={{ left: `${(playheadBeat + preRollBeats) * pixelsPerBeat}px` }}
                 >
                   <div className="absolute -bottom-1 -left-1 h-2.5 w-2.5 rotate-45 bg-error shadow-sm" />
                 </div>
@@ -1348,6 +1641,41 @@ export default function TimelineArrangement({
                 {laneNamesCollapsed ? "+" : "Add a section to start"}
               </div>
             )}
+            <div
+              className={`flex h-11 w-full items-center justify-between border-t-2 border-amber-500/40 bg-amber-500/10 text-xs font-black uppercase tracking-wide text-amber-300 ${laneNamesCollapsed ? "justify-center px-1" : "px-3"}`}
+            >
+              {laneNamesCollapsed ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setCalloutPickerTargetBeat(snapSignedBeat(playheadBeat, snapStep, -preRollBeats));
+                  }}
+                  title="Add Guide Callout at playhead"
+                  className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-amber-500/20 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined !text-[16px]">campaign</span>
+                </button>
+              ) : (
+                <>
+                  <span className="flex items-center gap-1.5 truncate">
+                    <span className="material-symbols-outlined !text-[15px] text-amber-400">campaign</span>
+                    <span>Guides</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCalloutPickerTargetBeat(snapSignedBeat(playheadBeat, snapStep, -preRollBeats));
+                    }}
+                    title="Add Guide Callout at playhead"
+                    className="flex h-6 w-6 items-center justify-center rounded-md border border-amber-400/40 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined !text-[15px]">add</span>
+                  </button>
+                </>
+              )}
+            </div>
           </aside>
           <div ref={canvasRef} className="relative shrink-0" style={{ width: `${canvasWidth}px` }}>
             {displayLaneTypes.map((type, laneIndex) => (
@@ -1365,6 +1693,15 @@ export default function TimelineArrangement({
                   ].join(", "),
                 }}
               >
+                {preRollBars > 0 && (
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-y-0 left-0 flex items-center justify-end border-r-2 border-amber-400/50 bg-zinc-950/60 pr-2"
+                    style={{ width: `${preRollBeats * pixelsPerBeat}px` }}
+                  >
+                    <span className="text-[8px] font-black uppercase tracking-widest text-zinc-500">PREROLL</span>
+                  </div>
+                )}
                 {sections.map((section, index) => {
                   if (!isSingleLaneView && section.type !== type) return null;
                   if (movePreview?.consumedSpacerId === section.id) return null;
@@ -1381,7 +1718,7 @@ export default function TimelineArrangement({
                         <div
                           className={`absolute ${isSingleLaneView ? "top-1 h-14" : "top-1 h-8"} border-y border-dashed border-primary/60 ${movePreview?.sectionId === section.id ? "bg-primary/20" : "bg-primary/10"}`}
                           title={`${gapBefore} beat spacer`}
-                          style={{ left: `${(layout.starts[index] - gapBefore) * pixelsPerBeat}px`, width: `${gapBefore * pixelsPerBeat}px` }}
+                          style={{ left: `${(layout.starts[index] - gapBefore + preRollBeats) * pixelsPerBeat}px`, width: `${gapBefore * pixelsPerBeat}px` }}
                         />
                       )}
                       <div
@@ -1403,7 +1740,7 @@ export default function TimelineArrangement({
                         title={`${clipLabel} · ${formatMeasureBeat(durations[index])}`}
                         className={`absolute ${isSingleLaneView ? "top-1 h-14" : "top-1 h-8"} flex select-none items-center rounded-md border px-2 shadow-sm ${isDragging ? "z-20 opacity-85 shadow-xl" : "transition-[left,width,background-color] duration-200 ease-out"} ${clipColor} ${isSelected ? "ring-2 ring-white ring-offset-1 ring-offset-primary" : "hover:brightness-110"} cursor-pointer`}
                         style={{
-                          left: `${layout.starts[index] * pixelsPerBeat + 2}px`,
+                          left: `${(layout.starts[index] + preRollBeats) * pixelsPerBeat + 2}px`,
                           width: `${Math.max(20, durations[index] * pixelsPerBeat - 4)}px`,
                           touchAction: "none",
                           transition: isDragging ? "none" : undefined,
@@ -1558,7 +1895,7 @@ export default function TimelineArrangement({
                     aria-label={`Spacer preview, ${movePreview.gapBeforeBeats} beats`}
                     className="pointer-events-none absolute top-1 flex h-8 items-center justify-center rounded border border-dashed border-sky-300 bg-sky-400/20 text-[9px] font-black text-sky-100 shadow-inner"
                     style={{
-                      left: `${(layout.starts[sections.findIndex((section) => section.id === movePreview.sectionId)] - movePreview.gapBeforeBeats) * pixelsPerBeat}px`,
+                      left: `${(layout.starts[sections.findIndex((section) => section.id === movePreview.sectionId)] - movePreview.gapBeforeBeats + preRollBeats) * pixelsPerBeat}px`,
                       width: `${movePreview.gapBeforeBeats * pixelsPerBeat}px`,
                     }}
                   >
@@ -1569,12 +1906,96 @@ export default function TimelineArrangement({
                   <div
                     className="pointer-events-none absolute bottom-0 top-0 z-10 w-0.5 bg-primary shadow-[0_0_8px_rgba(59,130,246,0.8)] transition-[left] duration-150 ease-out"
                     style={{
-                      left: `${(insertionGuideBeat ?? totalBeats) * pixelsPerBeat}px`,
+                      left: `${((insertionGuideBeat ?? totalBeats) + preRollBeats) * pixelsPerBeat}px`,
                     }}
                   />
                 )}
               </div>
             ))}
+            {/* Persistent Bottom Callouts Lane */}
+            <div
+              data-callout-lane
+              className="relative h-11 border-t-2 border-b border-amber-500/40 bg-[#1b1710]"
+              style={{
+                touchAction: "pan-x pan-y",
+                backgroundImage: pixelsPerBeat < 2 ? "none" : [
+                  `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(245,158,11,0.18) ${Math.max(0, meterBeatWidth - meterBeatGridWidth)}px, rgba(245,158,11,0.18) ${meterBeatWidth}px)`,
+                  `repeating-linear-gradient(to right, transparent 0, transparent ${Math.max(0, quarterBeatsPerBar * pixelsPerBeat - barGridWidth)}px, rgba(251,191,36,0.45) ${Math.max(0, quarterBeatsPerBar * pixelsPerBeat - barGridWidth)}px, rgba(251,191,36,0.45) ${quarterBeatsPerBar * pixelsPerBeat}px)`,
+                ].join(", "),
+              }}
+            >
+              {callouts.length === 0 && (
+                <div className="pointer-events-none sticky left-4 inline-flex h-full items-center gap-1.5 text-[10px] font-bold tracking-wide text-amber-300/45">
+                  <span className="material-symbols-outlined !text-[14px]">touch_app</span>
+                  <span>Click anywhere on the Guides lane to place a callout or count-in</span>
+                </div>
+              )}
+              {preRollBars > 0 && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-y-0 left-0 border-r-2 border-amber-400/70 bg-amber-500/10"
+                  style={{ width: `${preRollBeats * pixelsPerBeat}px` }}
+                >
+                  <span className="absolute right-2 top-0.5 text-[8px] font-black uppercase tracking-widest text-amber-400/60">
+                    PREROLL
+                  </span>
+                </div>
+              )}
+              {callouts.map((callout) => {
+                const isDraggingThis = calloutDragPreview?.id === callout.id;
+                const displayBeat = isDraggingThis ? calloutDragPreview.startBeat : callout.startBeat;
+                const { barNumber: clipBar, beatInBar: clipBeat } = formatTimelineBarBeat(displayBeat, quarterBeatsPerBar);
+                const isSelected = selectedCalloutId === callout.id;
+                const catalogItem = getCalloutCatalogItem(callout.cueId);
+                const isCountIn = catalogItem.category === "count-in";
+                const clipWidth = Math.max(26, catalogItem.durationBeats * pixelsPerBeat - 3);
+                return (
+                  <div
+                    key={callout.id}
+                    data-callout-id={callout.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (draggedJustFinishedRef.current) {
+                        draggedJustFinishedRef.current = false;
+                        return;
+                      }
+                      setSelectedCalloutId(callout.id);
+                      setSelectedSectionId(null);
+                      setSelectedLaneType("Callouts");
+                    }}
+                    title={`${callout.label} · ${displayBeat < 0 ? "Preroll " : ""}Bar ${clipBar} Beat ${clipBeat} (drag to move)`}
+                    className={`absolute top-1.5 h-8 flex select-none items-center gap-1 rounded-md border px-2 shadow-sm cursor-grab active:cursor-grabbing ${
+                      isCountIn
+                        ? "border-sky-400/70 bg-sky-500/25 text-sky-100"
+                        : "border-amber-400/70 bg-amber-500/25 text-amber-100"
+                    } ${isSelected ? "z-20 ring-2 ring-white ring-offset-1 ring-offset-amber-500" : "hover:brightness-115"}`}
+                    style={{
+                      left: `${(displayBeat + preRollBeats) * pixelsPerBeat + 1}px`,
+                      width: `${clipWidth}px`,
+                      touchAction: "none",
+                    }}
+                  >
+                    <span className="material-symbols-outlined !text-[13px] shrink-0 opacity-80">
+                      {isCountIn ? "timer" : "campaign"}
+                    </span>
+                    <span className="truncate text-[10px] font-black">{callout.label}</span>
+                    {isCountIn && pixelsPerBeat >= 14 && (
+                      <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-md">
+                        {catalogItem.steps.map((step) => (
+                          <span
+                            key={step.beatOffset}
+                            className="absolute bottom-0.5 font-mono text-[8px] font-black text-sky-200/90"
+                            style={{ left: `${(step.beatOffset / catalogItem.durationBeats) * 100 + 3}%` }}
+                          >
+                            {step.badge}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
             <div
               data-timeline-overlay
               className="sticky z-40 flex h-16 items-center justify-center"
@@ -1600,7 +2021,7 @@ export default function TimelineArrangement({
                 data-timeline-overlay
                 className="pointer-events-none absolute z-30 -translate-y-full whitespace-nowrap rounded-md border border-primary/60 bg-surface-container-highest px-2 py-1 text-[10px] font-black text-on-surface shadow-lg"
                 style={{
-                  left: `${movingSectionStartBeat * pixelsPerBeat + 2}px`,
+                  left: `${(movingSectionStartBeat + preRollBeats) * pixelsPerBeat + 2}px`,
                   top: `${movingLaneIndex * 40 - 3}px`,
                 }}
               >
@@ -1610,7 +2031,7 @@ export default function TimelineArrangement({
             {playheadVisible && (
               <div
                 className="pointer-events-none absolute bottom-0 top-0 z-10 w-0.75 bg-error"
-                style={{ left: `${playheadBeat * pixelsPerBeat}px` }}
+                style={{ left: `${(playheadBeat + preRollBeats) * pixelsPerBeat}px` }}
                 aria-label="Audio playhead"
               />
             )}
@@ -1620,6 +2041,123 @@ export default function TimelineArrangement({
 
       {portalTarget && createPortal(
         <>
+          {calloutPickerTargetBeat !== null && (
+            <div
+              data-timeline-overlay
+              className="fixed inset-0 z-[250005] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+              onClick={() => setCalloutPickerTargetBeat(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Insert Callout"
+                onClick={(e) => e.stopPropagation()}
+                className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-outline-variant/30 bg-surface-container shadow-2xl"
+              >
+                <div className="flex items-center justify-between border-b border-outline-variant/30 bg-surface-container-low px-5 py-4">
+                  <div>
+                    <h3 className="text-base font-black text-on-surface">Add Timeline Callout</h3>
+                    {(() => {
+                      const { barNumber, beatInBar } = formatTimelineBarBeat(calloutPickerTargetBeat, quarterBeatsPerBar);
+                      return (
+                        <p className="text-[11px] font-bold text-amber-400 font-mono">
+                          Position: {calloutPickerTargetBeat < 0 ? "Preroll · " : ""}Bar {barNumber} · Beat {beatInBar}
+                        </p>
+                      );
+                    })()}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCalloutPickerTargetBeat(null)}
+                    className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-container-high text-on-surface-variant hover:bg-surface-bright cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined !text-[18px]">close</span>
+                  </button>
+                </div>
+
+                <div className="space-y-4 overflow-y-auto p-4 custom-scrollbar">
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-sky-400">Count-In Sequences (Beat-Synced)</div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {CALLOUT_CATALOG.filter((item) => item.category === "count-in").map((item) => (
+                        <div
+                          key={item.id}
+                          className="flex items-center justify-between gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 p-2.5"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newCallout: TimelineCallout = {
+                                id: `callout-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                cueId: item.id,
+                                label: item.label,
+                                startBeat: calloutPickerTargetBeat,
+                              };
+                              onChangeCallouts?.([...callouts, newCallout].sort((a, b) => a.startBeat - b.startBeat));
+                              setSelectedCalloutId(newCallout.id);
+                              setCalloutPickerTargetBeat(null);
+                            }}
+                            className="min-w-0 flex-1 text-left cursor-pointer"
+                          >
+                            <div className="text-xs font-black text-on-surface">{item.label}</div>
+                            <div className="font-mono text-[10px] font-bold text-sky-300">
+                              {item.id === "short_count_in" ? "3, 2, 1 (3 beats)" : "4 - 3 - 4 3 2 1 (8 beats)"}
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            title={`Preview ${item.label}`}
+                            onClick={() => onPreviewCallout?.(item.id)}
+                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/20 text-sky-200 hover:bg-sky-500/30 cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined !text-[17px]">volume_up</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-amber-400">Director Callouts</div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {CALLOUT_CATALOG.filter((item) => item.category === "director").map((item) => (
+                        <div
+                          key={item.id}
+                          className="flex items-center justify-between gap-1 rounded-xl border border-outline-variant/30 bg-surface-container-lowest p-2 hover:border-amber-400/50 hover:bg-amber-500/10 transition-colors"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newCallout: TimelineCallout = {
+                                id: `callout-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                cueId: item.id,
+                                label: item.label,
+                                startBeat: calloutPickerTargetBeat,
+                              };
+                              onChangeCallouts?.([...callouts, newCallout].sort((a, b) => a.startBeat - b.startBeat));
+                              setSelectedCalloutId(newCallout.id);
+                              setCalloutPickerTargetBeat(null);
+                            }}
+                            className="min-w-0 flex-1 truncate text-left text-xs font-black text-on-surface cursor-pointer"
+                          >
+                            {item.label}
+                          </button>
+                          <button
+                            type="button"
+                            title={`Preview ${item.label}`}
+                            onClick={() => onPreviewCallout?.(item.id)}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-amber-400 hover:bg-amber-500/20 cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined !text-[15px]">volume_up</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           {midiControlFeedback && (
             <div
               data-timeline-overlay

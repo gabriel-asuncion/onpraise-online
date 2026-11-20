@@ -5,6 +5,7 @@ export interface SongRecord {
   title: string;
   artist: string;
   original_key: string;
+  key_signature?: string;
   tempo: number;
   youtube_url?: string;
   youtube_sync_offset_ms?: number;

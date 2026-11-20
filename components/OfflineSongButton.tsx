@@ -8,7 +8,13 @@ import { cacheOfflineRoutes } from "../lib/offline-shell";
 import { getSongChordChart, getSongDetails } from "../utils/supabase/actions";
 import { createClient } from "../utils/supabase/client";
 
-export default function OfflineSongButton({ songId }: { songId: string }) {
+export default function OfflineSongButton({
+  songId,
+  variant = "default",
+}: {
+  songId: string;
+  variant?: "default" | "footer";
+}) {
   const { realUserId } = useEngine();
   const { isOnline, openNoConnectionModal } = useOnlineStatus();
   const [ready, setReady] = useState(false);
@@ -66,6 +72,42 @@ export default function OfflineSongButton({ songId }: { songId: string }) {
       setBusy(false);
     }
   };
+
+  if (variant === "footer") {
+    const isDisabled = busy || (!ready && !isOnline);
+    const label = busy ? "Saving..." : ready ? "Downloaded" : "Download";
+    const tooltip = error
+      ? error
+      : ready
+      ? "Available offline · Click to remove"
+      : "Make available offline";
+
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          void toggle();
+        }}
+        aria-disabled={isDisabled}
+        aria-label={tooltip}
+        title={tooltip}
+        className={`h-7 px-2 sm:px-2.5 rounded-md text-[10px] font-bold flex items-center justify-center gap-1 border shadow-sm shrink-0 transition-colors active:scale-95 ${
+          ready
+            ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25 cursor-pointer"
+            : "bg-surface-container-highest text-on-surface border-outline-variant/30 hover:bg-surface-bright cursor-pointer"
+        } ${isDisabled ? "opacity-50 cursor-not-allowed" : ""}`}
+      >
+        <span
+          className={`material-symbols-outlined ${busy ? "animate-spin" : ""}`}
+          style={{ fontSize: "13px" }}
+        >
+          {busy ? "progress_activity" : ready ? "download_done" : "download"}
+        </span>
+        <span className="hidden sm:inline">{label}</span>
+      </button>
+    );
+  }
 
   return (
     <div className="flex flex-col items-start gap-1">

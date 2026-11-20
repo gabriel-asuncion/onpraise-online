@@ -11,7 +11,7 @@ import { getSongChordChart } from "../../../../utils/supabase/actions";
 import { useWebAudioEngine } from "../../../setlists/[id]/live/hooks/useWebAudioEngine";
 import { getYoutubeTimeForTimeline } from "../../../setlists/[id]/live/utils/timeline";
 import { parseAllowedGeniusSongUrl } from "../../../api/lyrics/url-validation";
-import TimelineArrangement, { type TimelineSection, type TimelineLyricPreview, type TimelineSnap, type MidiControlFeedback } from "./TimelineArrangement";
+import TimelineArrangement, { CALLOUT_CATALOG, getCalloutCatalogItem, type TimelineCallout, type TimelineSection, type TimelineLyricPreview, type TimelineSnap, type MidiControlFeedback } from "./TimelineArrangement";
 import MidiMappingModal from "./MidiMappingModal";
 import { useMidiLearn, type MidiActionId } from "./useMidiLearn";
 import { adjustMidiLineBeats, getMidiScrubTime, getMidiSectionTimingValue } from "./midiTimeline";
@@ -61,11 +61,13 @@ interface SectionTimingMap {
     repeats?: number;
     head_m?: number;
     tail_m?: number;
+    transpose?: number;
   };
 }
 
 interface TimelineUndoSnapshot {
   sections: SongSectionBlock[];
+  callouts?: TimelineCallout[];
   sectionTimings: SectionTimingMap;
   durations: Record<string, number>;
   gaps: Record<string, number>;
@@ -196,11 +198,44 @@ const transposeBracketContent = (contentStr: string, semitones: number): string 
   });
 };
 
+const CHROMATIC_TO_KEY_ROOT = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+
+const clampSectionTranspose = (value: number): number => {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(-11, Math.min(11, Math.trunc(value)));
+};
+
+const transposeKeySignature = (baseKey: string, semitones: number): string => {
+  const trimmed = (baseKey || "G").trim();
+  const isMinor = trimmed.endsWith("m");
+  const rawRoot = isMinor ? trimmed.slice(0, -1) : trimmed;
+  const normalized = normalizeKeyNote(rawRoot);
+  const idx = CHROMATIC_SCALE.indexOf(normalized);
+  if (idx === -1) return trimmed || "G";
+  const nextIdx = (((idx + semitones) % 12) + 12) % 12;
+  return `${CHROMATIC_TO_KEY_ROOT[nextIdx]}${isMinor ? "m" : ""}`;
+};
+
+const getDiatonicDeckForKey = (key: string): { root: string; suffix: string }[] => {
+  if (DIATONIC_MODES_MAP[key]) return DIATONIC_MODES_MAP[key];
+  const isMinor = key.endsWith("m");
+  const rawRoot = isMinor ? key.slice(0, -1) : key;
+  const normalized = normalizeKeyNote(rawRoot);
+  const rootIdx = CHROMATIC_SCALE.indexOf(normalized);
+  if (rootIdx === -1) return DIATONIC_MODES_MAP["G"];
+  const intervals = isMinor ? [0, 2, 3, 5, 7, 8, 10] : [0, 2, 4, 5, 7, 9, 11];
+  const suffixes = isMinor ? ["m", "dim", "", "m", "m", "", ""] : ["", "m", "m", "", "", "m", "dim"];
+  return intervals.map((step, i) => ({
+    root: CHROMATIC_TO_KEY_ROOT[(rootIdx + step) % 12],
+    suffix: suffixes[i],
+  }));
+};
+
 const transposeSingleNote = (note: string, semitones: number): string => {
   const normalized = normalizeKeyNote(note);
   const idx = CHROMATIC_SCALE.indexOf(normalized);
   if (idx === -1) return note;
-  return CHROMATIC_SCALE[(idx + semitones + 12) % 12];
+  return CHROMATIC_SCALE[(((idx + semitones) % 12) + 12) % 12];
 };
 
 const ChordWheelOverlay = ({ config, deck, onSelect, onCancel }: { config: any, deck: any[], onSelect: (c: any) => void, onCancel: () => void }) => {
@@ -447,6 +482,10 @@ function SongEditContent() {
   const [songCreatorId, setSongCreatorId] = useState<string | null>(null);
   const [formThemes, setFormThemes] = useState<string[]>([]);
   const [formSections, setFormSections] = useState<SongSectionBlock[]>([]);
+  const [timelineCallouts, setTimelineCallouts] = useState<TimelineCallout[]>([]);
+  const timelineCalloutsRef = useRef<TimelineCallout[]>([]);
+  useEffect(() => { timelineCalloutsRef.current = timelineCallouts; }, [timelineCallouts]);
+  const scheduledCalloutTimestampsRef = useRef({} as Record<string, number>);
   const [sectionTimings, setSectionTimings] = useState<SectionTimingMap>({});
   const [lineOverrides, setLineOverrides] = useState<Record<string, Record<number, { measures: number; beats: number }>> | null>(null);
   const [timelineMeterNumerator, setTimelineMeterNumerator] = useState(4);
@@ -1037,7 +1076,14 @@ function SongEditContent() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  const { initAudioContext, playZeroLatencyAudio, fetchAndDecodeAudio, getAudioContext, cancelFutureAudio } = useWebAudioEngine();
+  const { initAudioContext, playZeroLatencyAudio, playScheduledGuideCue, setGuideCueVolume, fetchAndDecodeAudio, getAudioContext, cancelFutureAudio } = useWebAudioEngine();
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const savedGuideVol = window.localStorage.getItem("wm_prefs_guideVolume");
+    const parsedVol = savedGuideVol !== null ? Number(savedGuideVol) : 0.8;
+    setGuideCueVolume(Number.isFinite(parsedVol) ? parsedVol : 0.8);
+  }, [setGuideCueVolume]);
   const lastTickedBeatRef = useRef<number>(-1);
   const ytAudioAnchorRef = useRef<{
     audioTime: number;
@@ -1066,6 +1112,14 @@ function SongEditContent() {
     if (typeof window !== "undefined") {
       fetchAndDecodeAudio(`/sound_files/metronome_blip_1.wav`, `metronome_blip_1`);
       fetchAndDecodeAudio(`/sound_files/metronome_blip_2.wav`, `metronome_blip_2`);
+      ["count_1", "count_2", "count_3", "count_4"].forEach((key) => {
+        fetchAndDecodeAudio(`/sound_files/${encodeURIComponent(key)}.wav`, key);
+      });
+      CALLOUT_CATALOG.forEach((item) => {
+        if (item.category === "director") {
+          fetchAndDecodeAudio(`/sound_files/${encodeURIComponent(item.id)}.wav`, item.id);
+        }
+      });
     }
   }, [fetchAndDecodeAudio]);
 
@@ -1835,7 +1889,7 @@ function formatTimeWithMs(seconds: number) {
 
         setFormTitle(song.title || "");
         setFormTempo(song.tempo || "");
-        setFormKey(song.key_signature || song.original_key || "");
+        setFormKey(song.original_key || song.key_signature || "");
         setSongApprovalStatus(song.approval_status || null);
         setFormVisibilityScope(song.visibility_scope === "workspace" ? "workspace" : "global");
         setSelectedWorkspaceIds(assignedWorkspaceIds.length ? assignedWorkspaceIds : song.team_id ? [song.team_id] : []);
@@ -1870,6 +1924,21 @@ function formatTimeWithMs(seconds: number) {
         const savedTimelineGaps = Array.isArray(savedTimeline.gapBeforeBeats)
           ? savedTimeline.gapBeforeBeats.map((gap: unknown) => Number(gap))
           : [];
+        const savedCallouts: TimelineCallout[] = Array.isArray(savedTimeline.callouts)
+          ? savedTimeline.callouts
+              .filter((c: unknown): c is Record<string, unknown> => Boolean(c) && typeof c === "object")
+              .map((c: Record<string, unknown>, idx: number) => {
+                const cueId = typeof c.cueId === "string" ? c.cueId : "D_All In";
+                const item = getCalloutCatalogItem(cueId);
+                return {
+                  id: typeof c.id === "string" ? c.id : `callout-${idx}-${Math.random().toString(36).slice(2, 7)}`,
+                  cueId: item.id,
+                  label: typeof c.label === "string" ? c.label : item.label,
+                  startBeat: Number.isFinite(Number(c.startBeat)) ? Number(c.startBeat) : 0,
+                };
+              })
+          : [];
+        setTimelineCallouts(savedCallouts);
 
         const sectionsRaw = await getSongChordChart(editingSongId);
         if (sectionsRaw && sectionsRaw.length > 0) {
@@ -1982,7 +2051,14 @@ function formatTimeWithMs(seconds: number) {
     };
   }, [hasUnsavedChanges]);
 
-  const activeScaleDiatonicDeck = useMemo(() => DIATONIC_MODES_MAP[formKey] || DIATONIC_MODES_MAP["G"], [formKey]);
+  const activeScaleDiatonicDeck = useMemo(() => getDiatonicDeckForKey(formKey || "G"), [formKey]);
+
+  const getSectionEffectiveKey = useCallback((sectionType?: string | null): string => {
+    const baseKey = formKey || "G";
+    if (!sectionType) return baseKey;
+    const offset = clampSectionTranspose(sectionTimings[sectionType]?.transpose ?? 0);
+    return transposeKeySignature(baseKey, offset);
+  }, [formKey, sectionTimings]);
 
   useEffect(() => {
     const handleNashvilleNumberKeyInjections = (e: KeyboardEvent) => {
@@ -1990,7 +2066,8 @@ function formatTimeWithMs(seconds: number) {
       
       if (["1", "2", "3", "4", "5", "6", "7"].includes(e.key)) {
         e.preventDefault();
-        const targetedScaleChord = activeScaleDiatonicDeck[parseInt(e.key, 10) - 1];
+        const sectionDeck = getDiatonicDeckForKey(getSectionEffectiveKey(chordTargetCoordinate.sectionType));
+        const targetedScaleChord = sectionDeck[parseInt(e.key, 10) - 1];
         if (targetedScaleChord) {
           const formattedFullChordStr = `${targetedScaleChord.root}${targetedScaleChord.suffix}`;
           const { sectionType, lineIdx, wordIdx = 0 } = chordTargetCoordinate;
@@ -2047,7 +2124,7 @@ function formatTimeWithMs(seconds: number) {
     };
     window.addEventListener("keydown", handleNashvilleNumberKeyInjections);
     return () => window.removeEventListener("keydown", handleNashvilleNumberKeyInjections);
-  }, [chordMode, chordTargetCoordinate, activeScaleDiatonicDeck]);
+  }, [chordMode, chordTargetCoordinate, getSectionEffectiveKey]);
 
   // ✅ Bulletproof Play/Pause toggle that strictly waits for the player to be ready
   const handleTogglePlayback = () => {
@@ -2359,6 +2436,35 @@ function formatTimeWithMs(seconds: number) {
     handleSelectNewKeySignature(nextKeyComputedName);
   };
 
+  const handleSectionTransposeChange = (sectionType: string, rawNextTranspose: number) => {
+    const nextTranspose = clampSectionTranspose(rawNextTranspose);
+    const prevTranspose = clampSectionTranspose(sectionTimings[sectionType]?.transpose ?? 0);
+    const semitoneDelta = nextTranspose - prevTranspose;
+    if (semitoneDelta === 0) return;
+
+    setHasUnsavedChanges(true);
+    setSectionTimings((prev) => {
+      const current = prev[sectionType] || getCentralizedMetricsTuple(sectionType);
+      return {
+        ...prev,
+        [sectionType]: {
+          ...current,
+          transpose: nextTranspose,
+        },
+      };
+    });
+
+    setFormSections((prev) =>
+      prev.map((sec) => {
+        if (sec.type !== sectionType || !/\[[^\]]+\]/.test(sec.content)) return sec;
+        return {
+          ...sec,
+          content: sec.content.replace(/\[([^\]]+)\]/g, (_m, inner) => `[${transposeBracketContent(inner, semitoneDelta)}]`),
+        };
+      })
+    );
+  };
+
   const getCentralizedMetricsTuple = (sectionType: string) => {
     const savedMetrics = sectionTimings[sectionType];
     const sectionLineCount = formSections.find((section) => section.type === sectionType)?.content
@@ -2418,9 +2524,10 @@ function formatTimeWithMs(seconds: number) {
   const handleContentTimingChange = (
     sectionId: string,
     sectionType: string,
-    field: keyof SectionTimingMap[string],
+    field: Exclude<keyof SectionTimingMap[string], "transpose">,
     value: number,
   ) => {
+
     if (isLaterDuplicateOccurrence(sectionId, sectionType)) {
       setDuplicateDurationPrompt({ sectionId, sectionType, timingChange: { field, value } });
       return;
@@ -2495,6 +2602,7 @@ function formatTimeWithMs(seconds: number) {
   const recordTimelineUndo = () => {
     const snapshot: TimelineUndoSnapshot = {
       sections: formSections.map((section) => ({ ...section })),
+      callouts: timelineCallouts.map((callout) => ({ ...callout })),
       sectionTimings: { ...sectionTimings },
       durations: { ...timelineDurationOverrides },
       gaps: { ...timelineGapOverrides },
@@ -2514,6 +2622,7 @@ function formatTimeWithMs(seconds: number) {
     timelineUndoStackRef.current = timelineUndoStackRef.current.slice(0, -1);
     setTimelineUndoCount(timelineUndoStackRef.current.length);
     setFormSections(previous.sections);
+    if (previous.callouts) setTimelineCallouts(previous.callouts);
     setSectionTimings(previous.sectionTimings);
     setTimelineDurationOverrides(previous.durations);
     setTimelineGapOverrides(previous.gaps);
@@ -3272,12 +3381,14 @@ function formatTimeWithMs(seconds: number) {
           });
         }
 
+        const sectionTranspose = clampSectionTranspose(sectionTimings[sec.type]?.transpose ?? 0);
         updatedSectionTimings[sec.type] = {
           measures: metricsTuple.measures,
           beats: metricsTuple.beats,
           repeats: metricsTuple.repeats,
           head_m: metricsTuple.head_m,  
           tail_m: metricsTuple.tail_m,  
+          ...(sectionTranspose !== 0 ? { transpose: sectionTranspose } : {}),
           line_timings: specificRowOverrides, 
           youtube_url: formYoutubeUrl.trim(),
           youtube_sync_offset_ms: formYoutubeSyncOffset
@@ -3293,6 +3404,12 @@ function formatTimeWithMs(seconds: number) {
           timelineDurationOverrides[section.id] ?? getDefaultTimelineDuration(section.type)
         ),
         gapBeforeBeats: formSections.map((section) => timelineGapOverrides[section.id] ?? 0),
+        callouts: timelineCallouts.map((callout) => ({
+          id: callout.id,
+          cueId: callout.cueId,
+          label: callout.label,
+          startBeat: callout.startBeat,
+        })),
       };
 
       const compiledChordPro = formSections
@@ -3476,7 +3593,8 @@ function formatTimeWithMs(seconds: number) {
 
           const tempo = parseInt(formTempo, 10) || 0;
           if (tempo > 0) {
-            const beatStepSecs = (60 / tempo) * (4 / timelineMeterDenominator) * getMetronomeStep(metronomeSpeed);
+            const quarterBeatSecs = 60 / tempo;
+            const beatStepSecs = quarterBeatSecs * (4 / timelineMeterDenominator) * getMetronomeStep(metronomeSpeed);
             const offsetSecs = formYoutubeSyncOffset / 1000;
             const elapsedSecs = currentTime - offsetSecs;
 
@@ -3498,6 +3616,26 @@ function formatTimeWithMs(seconds: number) {
               if (nextClickIndexRef.current === null) {
                 const startFloat = (currentTime - offsetSecs) / beatStepSecs;
                 nextClickIndexRef.current = Math.max(0, Math.ceil(startFloat - 0.0001));
+              }
+
+              // Schedule placed timeline Callouts & beat-synced Count-in sequences on the Guide bus
+              for (const callout of timelineCalloutsRef.current) {
+                const catalogItem = getCalloutCatalogItem(callout.cueId);
+                for (const step of catalogItem.steps) {
+                  const eventId = `${callout.id}:${step.beatOffset}`;
+                  const lastPlayedAt = scheduledCalloutTimestampsRef.current[eventId];
+                  if (lastPlayedAt !== undefined && currentAudioTime - lastPlayedAt < 1.5) continue;
+                  const eventBeat = callout.startBeat + step.beatOffset;
+                  const targetYtTime = offsetSecs + eventBeat * quarterBeatSecs;
+                  const targetAudioTime = anchor.audioTime + (targetYtTime - anchor.youtubeTime);
+                  if (targetAudioTime >= currentAudioTime - 0.025 && targetAudioTime < currentAudioTime + lookaheadSecs) {
+                    scheduledCalloutTimestampsRef.current[eventId] = currentAudioTime;
+                    playScheduledGuideCue(
+                      step.fileKey,
+                      Math.max(currentAudioTime, targetAudioTime),
+                    );
+                  }
+                }
               }
 
               let scheduledSteps = 0;
@@ -3531,6 +3669,7 @@ function formatTimeWithMs(seconds: number) {
         } else {
           ytAudioAnchorRef.current = null;
           nextClickIndexRef.current = null;
+          scheduledCalloutTimestampsRef.current = {};
           setMidiBeatLight(null);
           lastTickedBeatRef.current = -1;
         }
@@ -4786,6 +4925,60 @@ function formatTimeWithMs(seconds: number) {
                           })()}
                         </div>
 
+                        {!isSpacerSection && (() => {
+                          const sectionTranspose = clampSectionTranspose(sectionTimings[sec.type]?.transpose ?? 0);
+                          const effectiveSectionKey = getSectionEffectiveKey(sec.type);
+                          return (
+                            <div
+                              className={`flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[10px] font-bold shadow-inner transition-colors ${
+                                sectionTranspose !== 0
+                                  ? "border-primary/40 bg-primary/10 text-primary"
+                                  : "border-outline-variant/30 bg-surface-container text-on-surface-variant"
+                              }`}
+                              title={`Section Transpose (-11 to +11 semitones). Effective key: ${effectiveSectionKey}`}
+                            >
+                              <span className="text-[8px] font-black uppercase opacity-70">Tr:</span>
+                              <button
+                                type="button"
+                                aria-label={`Decrease transpose for ${sec.type}`}
+                                disabled={sectionTranspose <= -11}
+                                onClick={() => handleSectionTransposeChange(sec.type, sectionTranspose - 1)}
+                                className="px-1 font-black hover:text-primary disabled:opacity-30 cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <input
+                                type="number"
+                                min={-11}
+                                max={11}
+                                aria-label={`Transpose semitones for ${sec.type}`}
+                                value={sectionTranspose}
+                                onChange={(e) => {
+                                  const raw = e.target.value;
+                                  if (raw === "" || raw === "-") return;
+                                  const parsed = parseInt(raw, 10);
+                                  if (!Number.isNaN(parsed)) handleSectionTransposeChange(sec.type, parsed);
+                                }}
+                                className="w-7 bg-transparent text-center font-mono font-black text-on-surface outline-none"
+                              />
+                              <button
+                                type="button"
+                                aria-label={`Increase transpose for ${sec.type}`}
+                                disabled={sectionTranspose >= 11}
+                                onClick={() => handleSectionTransposeChange(sec.type, sectionTranspose + 1)}
+                                className="px-1 font-black hover:text-primary disabled:opacity-30 cursor-pointer"
+                              >
+                                +
+                              </button>
+                              {sectionTranspose !== 0 && (
+                                <span className="ml-0.5 rounded bg-primary/20 px-1.5 py-0.2 font-mono text-[9px] font-black text-primary">
+                                  {effectiveSectionKey}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
+
                         {isSpacerSection ? (
                           <div className="flex items-center gap-1 rounded-lg border border-outline-variant/30 bg-surface-container px-2 py-1 text-[10px] font-bold text-on-surface-variant shadow-inner">
                             <span className="text-[8px] font-black uppercase opacity-60">Duration:</span>
@@ -4993,6 +5186,25 @@ function formatTimeWithMs(seconds: number) {
           <TimelineArrangement
             key={editingSongId}
             sections={formSections}
+            callouts={timelineCallouts}
+            onChangeCallouts={(nextCallouts) => {
+              recordTimelineUndo();
+              scheduledCalloutTimestampsRef.current = {};
+              setTimelineCallouts(nextCallouts);
+              setHasUnsavedChanges(true);
+            }}
+            onPreviewCallout={(cueId) => {
+              initAudioContext();
+              cancelFutureAudio();
+              const ctx = getAudioContext();
+              const bpm = parseInt(formTempo, 10) || 75;
+              const beatSecs = 60 / bpm;
+              const item = getCalloutCatalogItem(cueId);
+              const baseTime = ctx ? ctx.currentTime + 0.02 : 0;
+              item.steps.forEach((step) => {
+                playScheduledGuideCue(step.fileKey, baseTime + step.beatOffset * beatSecs);
+              });
+            }}
             lineDurationsBySectionId={timelineLineDurationsBySectionId}
             repeatCountBySectionId={timelineRepeatCountBySectionId}
             paddingBeatsBySectionId={timelinePaddingBeatsBySectionId}
@@ -6012,7 +6224,7 @@ function formatTimeWithMs(seconds: number) {
               </div>
 
               <div className="flex items-center justify-between mt-3 text-xs font-black text-on-surface-variant select-none">
-                <span>{pickerLayoutView === "family" ? `Key of ${formKey} Family` : "Manual Key Mode"}</span>
+                <span>{pickerLayoutView === "family" ? `Key of ${getSectionEffectiveKey(chordPickerConfig.sectionType)} Family` : "Manual Key Mode"}</span>
                 <button type="button" onClick={() => setPickerLayoutView(pickerLayoutView === "family" ? "manual" : "family")} className="text-primary flex items-center gap-1.5 hover:opacity-80 transition-opacity cursor-pointer">
                   <span className="material-symbols-outlined !text-[14px]">{pickerLayoutView === "family" ? "keyboard" : "auto_awesome"}</span>
                   <span>{pickerLayoutView === "family" ? "Manual Input" : "Key Family"}</span>
@@ -6023,7 +6235,7 @@ function formatTimeWithMs(seconds: number) {
             <div className="p-4 space-y-3 flex-1 overflow-y-auto max-h-[45vh] bg-surface-container-low custom-scrollbar">
               {pickerLayoutView === "family" ? (
                 <div className="grid grid-cols-4 gap-2">
-                  {activeScaleDiatonicDeck.map((opt, i) => {
+                  {getDiatonicDeckForKey(getSectionEffectiveKey(chordPickerConfig.sectionType)).map((opt, i) => {
                     const fullLabel = `${opt.root}${opt.suffix}`;
                     return (
                       <button key={i} type="button" onClick={() => handlePickerChordTap(fullLabel)} className="h-12 bg-surface-container hover:bg-surface-container-high active:bg-surface-bright rounded-xl font-bold text-xs shadow-sm flex items-center justify-center border border-outline-variant/30 text-on-surface transition-all cursor-pointer">
@@ -6557,7 +6769,7 @@ function formatTimeWithMs(seconds: number) {
       {wheelState && (
         <ChordWheelOverlay 
           config={wheelState} 
-          deck={activeScaleDiatonicDeck} 
+          deck={getDiatonicDeckForKey(getSectionEffectiveKey(wheelState.sectionType))} 
           onSelect={handleWheelSelect} 
           onCancel={() => { setWheelState(null); justClosedWheelRef.current = Date.now(); }} 
         />

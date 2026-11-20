@@ -110,9 +110,19 @@ export default function SongsListPage() {
     visibility_scope?: "workspace" | "global";
   };
 
+  const resolveSongDisplayKey = (song: SongRecordSummary): string => {
+    const orig = song.original_key?.trim();
+    if (orig) return orig;
+    const sig = song.key_signature?.trim();
+    if (sig) return sig;
+    const directiveMatch = song.chordpro_content?.match(/\{\s*(?:key|k)\s*:\s*([A-G][#b]?m?)\s*\}/i);
+    if (directiveMatch?.[1]) return directiveMatch[1];
+    return "";
+  };
+
   const [loading, setLoading] = useState(true);
   const [allDatabaseSongs, setAllDatabaseSongs] = useState<SongRecordSummary[]>([]);
-  const [songUsageData, setSongUsageData] = useState<Record<string, { activeEventTitle?: string; pastEventCount: number }>>({});
+  const [songUsageData, setSongUsageData] = useState<Record<string, { activeEventTitle?: string; lastEventTitle?: string; lastEventDate?: string; pastEventCount: number }>>({});
   
   // Filtering States
   const [songSearchQuery, setSongSearchQuery] = useState("");
@@ -299,7 +309,7 @@ export default function SongsListPage() {
       setAvailableUsers(Array.from(uniqueUsers));
       setAvailableRoles(Array.from(uniqueRoles));
 
-      const usageMap: Record<string, { activeEventTitle?: string; pastEventCount: number; participants: {userName: string, role: string}[] }> = {};
+      const usageMap: Record<string, { activeEventTitle?: string; lastEventTitle?: string; lastEventDate?: string; pastEventCount: number; participants: {userName: string, role: string}[] }> = {};
       
       if (evts && sls && slSongs) {
         const todayString = new Date().toISOString().split("T")[0];
@@ -317,11 +327,16 @@ export default function SongsListPage() {
           if (!usageMap[songId]) usageMap[songId] = { pastEventCount: 0, participants: [] };
           
           if (event) {
-            const isFuture = (event.event_date ? event.event_date.split('T')[0] : "2026-06-12") >= todayString;
+            const eventDateStr = event.event_date ? event.event_date.split('T')[0] : "";
+            const isFuture = (eventDateStr || "2026-06-12") >= todayString;
             if (isFuture) {
               usageMap[songId].activeEventTitle = event.title;
             } else {
               usageMap[songId].pastEventCount += 1;
+              if (event.title && (!usageMap[songId].lastEventTitle || eventDateStr >= (usageMap[songId].lastEventDate || ""))) {
+                usageMap[songId].lastEventTitle = event.title;
+                usageMap[songId].lastEventDate = eventDateStr;
+              }
             }
             // ✅ Append event participants to this song's historical matrix
             if (eventRosterMap[event.id]) {
@@ -864,11 +879,32 @@ export default function SongsListPage() {
           );
           
           const ytId = song.youtube_url ? extractYouTubeVideoId(song.youtube_url) : null;
+          const handleCardSelect = () => {
+            if (song.approval_status === "pending") {
+              if (!isOnline && !offlineSongIds.includes(song.id)) {
+                openNoConnectionModal("This song");
+              } else {
+                setPendingWarningSongId(song.id);
+              }
+              return;
+            }
+            openSong(song.id);
+          };
 
           return (
             <article 
               key={song.id} 
-              className={`relative overflow-hidden z-0 bg-surface-container-low rounded-2xl p-4 shadow-sm flex flex-col h-full transition-all duration-200 border border-outline-variant/30 hover:border-outline-variant/50 ${!isOnline && !offlineSongIds.includes(song.id) ? "opacity-50" : ""}`}
+              role="link"
+              tabIndex={0}
+              aria-label={`Open ${song.title || "song"}`}
+              onClick={handleCardSelect}
+              onKeyDown={(e) => {
+                if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  handleCardSelect();
+                }
+              }}
+              className={`relative overflow-hidden z-0 bg-surface-container-low rounded-2xl p-4 shadow-sm flex flex-col h-full transition-all duration-200 border border-outline-variant/30 hover:border-primary/50 cursor-pointer ${!isOnline && !offlineSongIds.includes(song.id) ? "opacity-50" : ""}`}
             >
               {/* YouTube Background Overlay */}
               {ytId && (
@@ -919,7 +955,6 @@ export default function SongsListPage() {
                    </span>
                 )}
               </div>
-              <OfflineSongButton songId={song.id} />
 
               {/* Title & Artist Row */}
               <div className="flex flex-col mb-4 relative z-10 pr-8">
@@ -934,7 +969,7 @@ export default function SongsListPage() {
               <div className="flex items-center gap-2.5 mb-5 relative z-10">
                 <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-outline-variant/30 text-primary font-medium text-[11px] shadow-sm">
                   <span className="material-symbols-outlined leading-none" style={{ fontSize: '12px' }}>music_note</span>
-                  <span>Key: <span className="text-on-surface ml-0.5">{song.key_signature || song.original_key || "G"}</span></span>
+                  <span>Key: <span className="text-on-surface ml-0.5">{resolveSongDisplayKey(song) || "--"}</span></span>
                 </div>
                 <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-outline-variant/30 text-on-surface-variant font-medium text-[11px] shadow-sm tnum">
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-80">
@@ -949,13 +984,13 @@ export default function SongsListPage() {
               <div className="mt-auto shrink-0 flex items-center justify-between bg-surface-container/75 backdrop-blur-md -mx-4 -mb-4 px-4 py-3 rounded-b-2xl border-t border-outline-variant/20 relative z-10 gap-2">
                 {song.approval_status === 'pending' ? (
                   <>
-                    <span className="text-[9px] font-bold text-error uppercase tracking-widest shrink-0 pr-2 truncate">
+                    <span className="text-[9px] font-bold text-error uppercase tracking-widest min-w-0 flex-1 pr-2 truncate">
                       For Review
                     </span>
-                    <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
+                    <div className="flex items-center gap-1.5 justify-end shrink-0">
                       {canEditThisSong && (
                         <button 
-                          onClick={() => editSong(song.id)}
+                          onClick={(e) => { e.stopPropagation(); editSong(song.id); }}
                           aria-disabled={!isOnline}
                           className={`h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold hover:bg-surface-bright flex items-center justify-center gap-1 cursor-pointer border border-outline-variant/30 shadow-sm shrink-0 transition-colors active:scale-95 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                         >
@@ -963,8 +998,13 @@ export default function SongsListPage() {
                           <span className="hidden sm:inline">Edit</span>
                         </button>
                       )}
+                      <OfflineSongButton songId={song.id} variant="footer" />
                       <button 
-                        onClick={() => !isOnline && !offlineSongIds.includes(song.id) ? openNoConnectionModal("This song") : setPendingWarningSongId(song.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!isOnline && !offlineSongIds.includes(song.id)) openNoConnectionModal("This song");
+                          else setPendingWarningSongId(song.id);
+                        }}
                         className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-colors flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_music</span>
@@ -974,28 +1014,44 @@ export default function SongsListPage() {
                   </>
                 ) : (
                   <>
-                    <span className="text-[9px] font-bold flex items-center gap-1 shrink-0 pr-2 truncate">
+                    <span
+                      title={
+                        usageInfo.activeEventTitle
+                          ? `In ${usageInfo.activeEventTitle}`
+                          : usageInfo.lastEventTitle
+                          ? `Used in ${usageInfo.lastEventTitle}`
+                          : usageInfo.pastEventCount > 0
+                          ? `Used in ${usageInfo.pastEventCount} event${usageInfo.pastEventCount !== 1 ? "s" : ""}`
+                          : "Newly Added"
+                      }
+                      className="text-[9px] font-bold flex items-center gap-1 min-w-0 flex-1 pr-2 truncate"
+                    >
                       {usageInfo.activeEventTitle ? (
                         <>
-                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>event_available</span>
+                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: '12px' }}>event_available</span>
                           <span className="text-secondary truncate">In {usageInfo.activeEventTitle}</span>
+                        </>
+                      ) : usageInfo.lastEventTitle ? (
+                        <>
+                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: '12px' }}>history</span>
+                          <span className="text-on-surface-variant truncate">Used in {usageInfo.lastEventTitle}</span>
                         </>
                       ) : usageInfo.pastEventCount > 0 ? (
                         <>
-                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>history</span>
-                          <span className="text-on-surface-variant">Used in {usageInfo.pastEventCount} event{usageInfo.pastEventCount !== 1 && 's'}</span>
+                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: '12px' }}>history</span>
+                          <span className="text-on-surface-variant truncate">Used in {usageInfo.pastEventCount} event{usageInfo.pastEventCount !== 1 && 's'}</span>
                         </>
                       ) : (
                         <>
-                          <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_add</span>
-                          <span className="text-on-surface-variant">Newly Added</span>
+                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: '12px' }}>library_add</span>
+                          <span className="text-on-surface-variant truncate">Newly Added</span>
                         </>
                       )}
                     </span>
-                    <div className="flex items-center gap-1.5 overflow-hidden justify-end w-full">
+                    <div className="flex items-center gap-1.5 justify-end shrink-0">
                       {canEditThisSong && (
                         <button 
-                          onClick={() => editSong(song.id)}
+                          onClick={(e) => { e.stopPropagation(); editSong(song.id); }}
                           aria-disabled={!isOnline}
                           className={`h-7 px-2.5 rounded-md bg-surface-container-highest text-on-surface text-[10px] font-bold active:bg-surface-bright transition-colors cursor-pointer border border-outline-variant/30 shadow-sm flex items-center justify-center gap-1 shrink-0 ${!isOnline ? "opacity-50 cursor-not-allowed" : ""}`}
                         >
@@ -1003,8 +1059,9 @@ export default function SongsListPage() {
                           <span className="hidden sm:inline">Edit</span>
                         </button>
                       )}
+                      <OfflineSongButton songId={song.id} variant="footer" />
                       <button 
-                        onClick={() => openSong(song.id)}
+                        onClick={(e) => { e.stopPropagation(); openSong(song.id); }}
                         className="h-7 px-2.5 rounded-md bg-primary text-on-primary text-[10px] font-bold shadow-sm active:scale-95 transition-transform flex items-center justify-center gap-1 cursor-pointer border border-primary/20 hover:bg-primary/90 shrink-0"
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>library_music</span>

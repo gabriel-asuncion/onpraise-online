@@ -18,7 +18,7 @@ import { useWebAudioEngine } from "../../setlists/[id]/live/hooks/useWebAudioEng
 import { useLocalPreferences } from "../../setlists/[id]/live/hooks/useLocalPreferences";
 import { useYouTubeSync } from "../../setlists/[id]/live/hooks/useYouTubeSync";
 import { useHardwareClock } from "../../setlists/[id]/live/hooks/useHardwareClock";
-import { useKeyboardMidiControls, type ControlActions, type MixerLedActionId } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
+import { useKeyboardMidiControls, type ControlActionId, type ControlActions, type MixerLedActionId } from "../../setlists/[id]/live/hooks/useKeyboardMidiControls";
 import { STEM_MIDI_ACTION_GROUPS } from "../../setlists/[id]/live/hooks/midiProfiles";
 import { useLocalClickOffset } from "../../setlists/[id]/live/hooks/useLocalClickOffset";
 import { useControlFeedback } from "../../setlists/[id]/live/hooks/useControlFeedback";
@@ -39,6 +39,7 @@ import { CompiledSectionToken, CompiledBeatMap, ArrangementSection, SongRecord, 
 import {
   compileTimelineBeatMap,
   getNextTimelineBeat,
+  getTimelineCalloutEvents,
   getTimelineLineStartBeat,
   getTimelinePosition,
   getTimelineMeasureBeat,
@@ -89,7 +90,7 @@ export default function SoloPracticeRoomPage() {
   const { isOnline, openNoConnectionModal } = useOnlineStatus();
   useWakeLock();
   
-  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, getAudioContext, cancelFutureAudio, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
+  const { initAudioContext, fetchAndDecodeAudio, playZeroLatencyAudio, playGuideCue, playScheduledGuideCue, getAudioContext, cancelFutureAudio, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
   const getLocalAudioContext = useCallback(() => {
     if (!getAudioContext()) initAudioContext();
     return getAudioContext();
@@ -210,6 +211,10 @@ export default function SoloPracticeRoomPage() {
   const zenOverlayRef = useRef<HTMLDivElement | null>(null);
 
   const [isPlayingFlow, setIsPlayingFlow] = useState(false);
+  useEffect(() => {
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: isPlayingFlow }));
+    return () => { if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("onpraise-playmode", { detail: false })); };
+  }, [isPlayingFlow]);
   const [midiBeatLight, setMidiBeatLight] = useState<number | null>(null);
   const [currentSectionIndex, setCurrentSectionIndex] = useState<number>(0);
   const [currentBeat, setCurrentBeat] = useState<number>(1);
@@ -304,7 +309,7 @@ export default function SoloPracticeRoomPage() {
         
       if (song) {
         setActiveSong(song);
-        setActiveDisplayKey(song.original_key);
+        setActiveDisplayKey(song.original_key || song.key_signature || "C");
         activeSongRef.current = song;
 
         let parsedSections: any[] = [];
@@ -361,7 +366,10 @@ export default function SoloPracticeRoomPage() {
           const fileName = normalizeSectionNameToAudioFile(section.section_name);
           if (fileName) uniqueFiles.add(fileName);
         });
-        uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${fileName}.wav`, fileName));
+        getTimelineCalloutEvents(song.section_timings).forEach((event) => {
+          if (event.fileKey) uniqueFiles.add(event.fileKey);
+        });
+        uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${encodeURIComponent(fileName)}.wav`, fileName));
 
         if (isOnline && song.youtube_url && song.youtube_url.trim() !== "") {
           setIsYoutubeSyncEnabled(true);
@@ -491,14 +499,20 @@ export default function SoloPracticeRoomPage() {
 
   function executeStartSequence(isYtSource: boolean = false) {
     if (isPlayingRef.current || pendingYoutubeStartRef.current) return;
+    let activeYtSource = isYtSource;
     if (audioSourceRef.current === "local" && !localStemsAvailable) {
-      setLocalAudioError("Add or reconnect audio stems before starting local playback.");
-      return;
+      if (isOnline && isYoutubeSyncEnabled && !!youtubeVideoId) {
+        activeYtSource = true;
+        applyEffectiveSource("youtube");
+      } else {
+        setLocalAudioError("Add or reconnect audio stems before starting local playback.");
+        return;
+      }
     }
     const revision = ++startRevisionRef.current;
     setLocalAudioError(null);
     const audioReady = resumeAudioContextForPlayback();
-    isYtBackingTrackStartRef.current = isYtSource; 
+    isYtBackingTrackStartRef.current = activeYtSource; 
     playingTrackIndexRef.current = 0;
     setPlayingTrackIndex(0);
     playingSongRef.current = activeSongRef.current;
@@ -514,7 +528,7 @@ export default function SoloPracticeRoomPage() {
     const beatDurationMs = 60000 / (songForStart?.tempo || 75);
     setExplicitScrubBeat(null);
 
-    if (isYtSource) {
+    if (activeYtSource) {
       pendingYoutubeStartRef.current = {
         sectionIndex,
         exactBeat,
@@ -816,7 +830,7 @@ export default function SoloPracticeRoomPage() {
     queuedSectionIndexRef, queuedTrackIndexRef, isYtBufferingRef,
     isDoubleMetronomeEnabledRef, onMidiBeat: setMidiBeatLight, lastAudioBeatRef, lastVisualBeatRef, lastBeatRef, lastVisualMeasureLengthRef, setCurrentMeasureLength,
     pendingQuantizedJumpRef, getGlobalTime, 
-    playGuideCue, cancelFutureAudio, getAudioContext, audioContextStartTimeRef,
+    playGuideCue, triggerCalloutSound: playScheduledGuideCue, cancelFutureAudio, getAudioContext, audioContextStartTimeRef,
 
     // 👇 ADD THIS EXACT BLOCK 👇
     triggerMetronomeSound: (beatPulse, time) => {
@@ -1363,10 +1377,17 @@ export default function SoloPracticeRoomPage() {
     void resolveSongAudioStems(realUserId, songId, activeSong?.title ?? "", controller.signal).then(async (stems) => {
       if (controller.signal.aborted) return;
       setStoredStems(stems);
-      if (stems.length && !await loadWhilePaused(stems.map((stem) => ({
-        id: stem.stemId, blob: stem.blob, role: stem.role, sourceVersion: stem.updatedAt,
-      })), controller.signal) && !controller.signal.aborted) {
-        throw new Error("Local audio loading was interrupted.");
+      if (stems.length > 0) {
+        if (!await loadWhilePaused(stems.map((stem) => ({
+          id: stem.stemId, blob: stem.blob, role: stem.role, sourceVersion: stem.updatedAt,
+        })), controller.signal) && !controller.signal.aborted) {
+          throw new Error("Local audio loading was interrupted.");
+        }
+        if (!controller.signal.aborted && savedAudioSourceRef.current === "local" && audioSourceRef.current !== "local") {
+          applyEffectiveSource("local");
+        }
+      } else if (audioSourceRef.current === "local" && isOnline) {
+        applyEffectiveSource("youtube");
       }
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;
@@ -1374,7 +1395,7 @@ export default function SoloPracticeRoomPage() {
       setLocalAudioError(error instanceof Error ? error.message : "Could not load local stems.");
     }).finally(() => { if (!controller.signal.aborted) setIsStemsLoading(false); });
     return () => { controller.abort(); };
-  }, [realUserId, songId, activeSong?.id, clearStems, loadWhilePaused]);
+  }, [realUserId, songId, activeSong?.id, isOnline, clearStems, loadWhilePaused]);
 
   function selectAudioSource(source: AudioSourceMode) {
     if (source === "youtube" && !isOnline) {
@@ -1652,7 +1673,9 @@ export default function SoloPracticeRoomPage() {
       <SettingsModal
         audioSource={audioSource} onAudioSourceChange={selectAudioSource} isOnline={isOnline} openNoConnectionModal={openNoConnectionModal}
         multitrack={multitrack} songId={activeSong?.id} songTitle={activeSong?.title} userId={realUserId}
-        onStemsChanged={setStoredStems} isStemsLoading={isStemsLoading}
+        onStemsChanged={setStoredStems}
+        onNoStemsFallbackToYoutube={() => { if (isOnline) changeAudioSource("youtube"); }}
+        isStemsLoading={isStemsLoading}
         midiBindings={keyboardMidiControls.preferences.mappings} learningActionId={keyboardMidiControls.learningAction}
         onStartMidiLearn={keyboardMidiControls.learnMidiAction} onClearMidiBinding={keyboardMidiControls.clearMidiMapping}
         onApplySmcStemPreset={keyboardMidiControls.applySmcStemPreset} midiError={keyboardMidiControls.midiError}

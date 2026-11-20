@@ -3,6 +3,7 @@ import { SongRecord, ArrangementSection, CompiledBeatMap, CompiledSectionToken }
 import { getMetronomePulse, getMetronomeStep, getMissedClickSteps, type MetronomePattern, type MetronomeSpeed } from "../../../../../lib/metronome";
 import { getOffsetMidiBeat } from "./midiInput";
 import {
+  getTimelineCalloutEvents,
   getTimelineDurationBeats,
   getTimelineMeasureBeat,
   getTimelineMeter,
@@ -64,6 +65,7 @@ export interface HardwareClockConfig {
   playingTrackIndexRef: React.MutableRefObject<number>;
 
   playGuideCue?: (name: string) => void;
+  triggerCalloutSound?: (fileKey: string, time: number) => void;
   cancelFutureAudio?: () => void;
   getAudioContext?: () => AudioContext | null;
   triggerMetronomeSound?: (beat: number, time: number) => void;
@@ -115,6 +117,8 @@ export function useHardwareClock(config: HardwareClockConfig) {
     config.lastBeatRef.current = 0;
     let previousClickStep: number | null = null;
     let lastMidiBeat: number | null = null;
+    const scheduledCalloutTimestamps = new Map<string, number>();
+    let lastCalloutResetSignature = "";
     let lastHeartbeatTime = 0;
     let lastYoutubeResyncTime = 0;
     let lastObservedYtTime = -1;
@@ -285,6 +289,27 @@ export function useHardwareClock(config: HardwareClockConfig) {
         const beatSpeedSecs = beatSpeedMsCurrent / 1000;
         const beatUnitQuarter = meter.unitQuarterBeats * getMetronomeStep(clickSpeed);
         const currentAudioTime = audioCtx.currentTime;
+
+        const calloutSignature = `${song.id}:${idx}:${Math.round(c.mdSectionStartTimeRef.current / 500)}`;
+        if (calloutSignature !== lastCalloutResetSignature) {
+          lastCalloutResetSignature = calloutSignature;
+          for (const [id, playedAt] of scheduledCalloutTimestamps.entries()) {
+            if (currentAudioTime - playedAt > 1.5) scheduledCalloutTimestamps.delete(id);
+          }
+        }
+
+        if (c.triggerCalloutSound) {
+          const calloutEvents = getTimelineCalloutEvents(song.section_timings);
+          for (const event of calloutEvents) {
+            const lastPlayedAt = scheduledCalloutTimestamps.get(event.eventId);
+            if (lastPlayedAt !== undefined && currentAudioTime - lastPlayedAt < 1.5) continue;
+            const targetAudioTime = c.audioContextStartTimeRef.current + (event.beat * beatSpeedSecs);
+            if (targetAudioTime >= currentAudioTime - 0.025 && targetAudioTime < currentAudioTime + lookaheadSecs) {
+              scheduledCalloutTimestamps.set(event.eventId, currentAudioTime);
+              c.triggerCalloutSound(event.fileKey, Math.max(currentAudioTime, targetAudioTime));
+            }
+          }
+        }
 
         const audioOffsetSecs = ((c.localClickOffsetMsRef?.current ?? 0) - c.audioLatencyOffsetMs) / 1000;
 

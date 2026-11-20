@@ -1,4 +1,4 @@
-import { captureOfflineGeneration, isCurrentOfflineGeneration, openOfflineDatabase } from "./offline-db";
+import { captureOfflineGeneration, getSongIndex, isCurrentOfflineGeneration, openOfflineDatabase } from "./offline-db";
 import { createZipFromFiles, extractAudioFilesFromZip, isInstrumentalAudioFile, isZipFile } from "./zip-audio";
 
 export type StemRole = "track" | "drums" | "bass" | "keys" | "guitars" | "vocals" | "guide" | "other";
@@ -62,6 +62,26 @@ export function isDirectoryHandlePickerSupported(): boolean {
     typeof (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker === "function";
 }
 
+const LINKED_FALLBACK_FOLDER_KEY_PREFIX = "onpraise_linked_folder_name:";
+
+export function saveLinkedFallbackFolderName(ownerId: string, folderName: string): void {
+  if (typeof window === "undefined" || !ownerId) return;
+  try {
+    window.localStorage.setItem(`${LINKED_FALLBACK_FOLDER_KEY_PREFIX}${ownerId}`, folderName);
+  } catch {
+    // Ignore storage quota / privacy errors
+  }
+}
+
+export function getLinkedFallbackFolderName(ownerId: string): string | null {
+  if (typeof window === "undefined" || !ownerId) return null;
+  try {
+    return window.localStorage.getItem(`${LINKED_FALLBACK_FOLDER_KEY_PREFIX}${ownerId}`);
+  } catch {
+    return null;
+  }
+}
+
 export async function pickAndSaveRootAudioFolder(ownerId: string): Promise<SavedDirectory> {
   const generation = assertOwner(ownerId);
   const picker = (window as Window & { showDirectoryPicker?: (options: { mode: "read" }) => Promise<AudioDirectoryHandle> }).showDirectoryPicker;
@@ -70,6 +90,7 @@ export async function pickAndSaveRootAudioFolder(ownerId: string): Promise<Saved
   const directory: SavedDirectory = { id: "root_stems_folder", ownerId, handle, folderName: handle.name, updatedAt: new Date().toISOString() };
   const saved = await operation("audio_directory_handles", "readwrite", (store) => store.put(directory), generation);
   if (saved === undefined) throw new Error("The account changed while linking the folder.");
+  saveLinkedFallbackFolderName(ownerId, handle.name);
   return directory;
 }
 
@@ -100,6 +121,23 @@ export function normalizeAudioName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function matchesNormalizedSongPrefix(rawName: string, normalizedTarget: string): boolean {
+  if (!normalizedTarget) return false;
+  const normalized = normalizeAudioName(rawName);
+  if (!normalized.startsWith(normalizedTarget)) return false;
+  let consumed = 0;
+  for (let i = 0; i < rawName.length; i++) {
+    if (/[a-z0-9]/i.test(rawName[i])) {
+      consumed += 1;
+      if (consumed === normalizedTarget.length) {
+        const nextChar = rawName[i + 1];
+        return !nextChar || !/[a-z]/i.test(nextChar);
+      }
+    }
+  }
+  return true;
+}
+
 export async function findSongAudioFiles(handle: AudioDirectoryHandle, songId: string, title: string): Promise<File[]> {
   const id = normalizeAudioName(songId);
   const normalizedTitle = normalizeAudioName(title);
@@ -115,8 +153,9 @@ export async function findSongAudioFiles(handle: AudioDirectoryHandle, songId: s
     }
   };
   for await (const entry of handle.values()) {
-    const normalized = normalizeAudioName(entry.name);
-    const matches = Boolean((id && normalized.startsWith(id)) || (normalizedTitle && normalized.startsWith(normalizedTitle)));
+    const matches = Boolean(
+      matchesNormalizedSongPrefix(entry.name, id) || matchesNormalizedSongPrefix(entry.name, normalizedTitle),
+    );
     if (!matches) continue;
     if (entry.kind === "file") {
       await collectFile(await (entry as FileSystemFileHandle).getFile());
@@ -139,10 +178,9 @@ export async function findSongAudioFilesFromFileList(files: File[], songId: stri
     const relativeSegments = (file.webkitRelativePath || file.name).split(/[\\/]/).filter(Boolean);
     const folderSegments = relativeSegments.length > 2 ? relativeSegments.slice(1, -1) : [];
     const candidateNames = [file.name, ...folderSegments];
-    const isMatch = candidateNames.some((candidate) => {
-      const normalized = normalizeAudioName(candidate);
-      return Boolean((id && normalized.startsWith(id)) || (normalizedTitle && normalized.startsWith(normalizedTitle)));
-    });
+    const isMatch = candidateNames.some((candidate) =>
+      Boolean(matchesNormalizedSongPrefix(candidate, id) || matchesNormalizedSongPrefix(candidate, normalizedTitle)),
+    );
     if (!isMatch) continue;
 
     if (isZipFile(file)) {
@@ -156,6 +194,158 @@ export async function findSongAudioFilesFromFileList(files: File[], songId: stri
   }
 
   return matched.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+interface SongMatchCandidate {
+  id: string;
+  normId: string;
+  normTitle: string;
+}
+
+async function buildSongMatchCandidates(
+  ownerId: string,
+  currentSong?: { id: string; title: string },
+): Promise<SongMatchCandidate[]> {
+  const indexed = await getSongIndex(ownerId).catch(() => []);
+  const byId = new Map<string, SongMatchCandidate>();
+
+  for (const song of indexed) {
+    if (!song?.id) continue;
+    byId.set(song.id, {
+      id: song.id,
+      normId: normalizeAudioName(song.id),
+      normTitle: normalizeAudioName(song.title ?? ""),
+    });
+  }
+
+  if (currentSong?.id && !byId.has(currentSong.id)) {
+    byId.set(currentSong.id, {
+      id: currentSong.id,
+      normId: normalizeAudioName(currentSong.id),
+      normTitle: normalizeAudioName(currentSong.title ?? ""),
+    });
+  }
+
+  return Array.from(byId.values()).filter((c) => Boolean(c.normId || c.normTitle));
+}
+
+export async function preloadLibraryStemsFromFileList(
+  ownerId: string,
+  files: File[],
+  currentSong?: { id: string; title: string },
+  signal?: AbortSignal,
+): Promise<{ matchedSongCount: number; currentSongStems: StoredAudioStem[] }> {
+  assertOwner(ownerId);
+  const candidates = await buildSongMatchCandidates(ownerId, currentSong);
+  if (signal?.aborted) return { matchedSongCount: 0, currentSongStems: [] };
+
+  const filesBySongId = new Map<string, File[]>();
+
+  for (const file of files) {
+    if (signal?.aborted) return { matchedSongCount: 0, currentSongStems: [] };
+    const isArchive = isZipFile(file);
+    const isStemAudio =
+      !isArchive &&
+      !isInstrumentalAudioFile(file.name) &&
+      (file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac|aiff?|opus)$/i.test(file.name));
+    if (!isArchive && !isStemAudio) continue;
+
+    const relativeSegments = (file.webkitRelativePath || file.name).split(/[\\/]/).filter(Boolean);
+    const folderSegments = relativeSegments.length > 2 ? relativeSegments.slice(1, -1) : [];
+    const candidateNames = [file.name, ...folderSegments].filter(Boolean);
+
+    const matchedSongs = candidates.filter((song) =>
+      candidateNames.some(
+        (candidate) =>
+          Boolean(matchesNormalizedSongPrefix(candidate, song.normId) || matchesNormalizedSongPrefix(candidate, song.normTitle)),
+      ),
+    );
+    if (matchedSongs.length === 0) continue;
+
+    const extracted = isArchive ? await extractAudioFilesFromZip(file) : [file];
+    if (extracted.length === 0) continue;
+
+    for (const song of matchedSongs) {
+      const bucket = filesBySongId.get(song.id) ?? [];
+      bucket.push(...extracted);
+      filesBySongId.set(song.id, bucket);
+    }
+  }
+
+  let matchedSongCount = 0;
+  for (const [targetSongId, songFiles] of filesBySongId.entries()) {
+    if (signal?.aborted) break;
+    const sorted = songFiles.sort((a, b) => a.name.localeCompare(b.name));
+    const saved = await syncFolderFilesToSongStems(ownerId, targetSongId, sorted, signal);
+    if (saved.length > 0) matchedSongCount += 1;
+  }
+
+  const currentSongStems =
+    currentSong?.id && !signal?.aborted ? await getSongAudioStems(ownerId, currentSong.id) : [];
+
+  return { matchedSongCount, currentSongStems };
+}
+
+export async function preloadLibraryStemsFromDirectoryHandle(
+  ownerId: string,
+  handle: AudioDirectoryHandle,
+  currentSong?: { id: string; title: string },
+  signal?: AbortSignal,
+): Promise<{ matchedSongCount: number; currentSongStems: StoredAudioStem[] }> {
+  assertOwner(ownerId);
+  const candidates = await buildSongMatchCandidates(ownerId, currentSong);
+  if (signal?.aborted) return { matchedSongCount: 0, currentSongStems: [] };
+
+  const filesBySongId = new Map<string, File[]>();
+  const collectFile = async (file: File, targetSongIds: string[]) => {
+    if (isZipFile(file)) {
+      const extracted = await extractAudioFilesFromZip(file);
+      for (const id of targetSongIds) {
+        const bucket = filesBySongId.get(id) ?? [];
+        bucket.push(...extracted);
+        filesBySongId.set(id, bucket);
+      }
+    } else if (
+      !isInstrumentalAudioFile(file.name) &&
+      (file.type.startsWith("audio/") || /\.(wav|mp3|m4a|aac|ogg|flac|aiff?|opus)$/i.test(file.name))
+    ) {
+      for (const id of targetSongIds) {
+        const bucket = filesBySongId.get(id) ?? [];
+        bucket.push(file);
+        filesBySongId.set(id, bucket);
+      }
+    }
+  };
+
+  for await (const entry of handle.values()) {
+    if (signal?.aborted) break;
+    const matchedSongIds = candidates
+      .filter((song) => Boolean(matchesNormalizedSongPrefix(entry.name, song.normId) || matchesNormalizedSongPrefix(entry.name, song.normTitle)))
+      .map((song) => song.id);
+    if (matchedSongIds.length === 0) continue;
+
+    if (entry.kind === "file") {
+      await collectFile(await (entry as FileSystemFileHandle).getFile(), matchedSongIds);
+    } else {
+      for await (const child of (entry as AudioDirectoryHandle).values()) {
+        if (child.kind !== "file") continue;
+        await collectFile(await (child as FileSystemFileHandle).getFile(), matchedSongIds);
+      }
+    }
+  }
+
+  let matchedSongCount = 0;
+  for (const [targetSongId, songFiles] of filesBySongId.entries()) {
+    if (signal?.aborted) break;
+    const sorted = songFiles.sort((a, b) => a.name.localeCompare(b.name));
+    const saved = await syncFolderFilesToSongStems(ownerId, targetSongId, sorted, signal);
+    if (saved.length > 0) matchedSongCount += 1;
+  }
+
+  const currentSongStems =
+    currentSong?.id && !signal?.aborted ? await getSongAudioStems(ownerId, currentSong.id) : [];
+
+  return { matchedSongCount, currentSongStems };
 }
 
 export function formatStemDownloadFileName(fileName: string, songTitle?: string): string {

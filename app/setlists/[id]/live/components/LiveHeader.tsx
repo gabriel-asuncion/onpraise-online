@@ -57,11 +57,20 @@ export function LiveHeader({
   
   const [isExpanded, setIsExpanded] = useState(false);
   const [isNavVisible, setIsNavVisible] = useState(true);
+  const [isSidebarHidden, setIsSidebarHidden] = useState(false);
   
   const [mounted, setMounted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [hasInitiallyMounted, setHasInitiallyMounted] = useState(false);
   const [telemetryNow, setTelemetryNow] = useState(() => getGlobalTime?.() ?? Date.now());
+
+  useEffect(() => {
+    const handlePlaymode = (e: Event) => {
+      setIsSidebarHidden(Boolean((e as CustomEvent<boolean>).detail));
+    };
+    window.addEventListener("onpraise-playmode", handlePlaymode);
+    return () => window.removeEventListener("onpraise-playmode", handlePlaymode);
+  }, []);
 
   useEffect(() => {
     if (!isRecordingTelemetry || isTelemetryPaused || !recordingStartTime) return;
@@ -398,12 +407,15 @@ export function LiveHeader({
   );
 
   // =========================================
-  // 3. DESKTOP VIEW (Fixed Top Bar)
+  // 3. DESKTOP VIEW (Bottom-Docked Transport Bar)
   // =========================================
+  const isFullWidthDesktop = isSidebarHidden || isPlayingFlow;
   const renderDesktopHeader = () => (
-    <header className="fixed top-0 left-20 right-0 bg-surface/90 backdrop-blur-xl z-50 overflow-hidden border-b border-outline-variant/30 select-none hidden md:block">
-      {/* ✅ SURGICAL FIX: Callback ref ensures inline scaling works reliably after DOM swaps */}
-      <div className="absolute top-0 left-0 w-full h-[2px] bg-surface-container-highest z-0">
+    <header
+      className={`fixed bottom-0 ${isFullWidthDesktop ? "left-0" : "left-20"} right-0 bg-[#18181A]/95 backdrop-blur-xl z-50 overflow-hidden border-t border-outline-variant/20 shadow-[0_-8px_32px_rgba(0,0,0,0.65)] select-none hidden md:block transition-[left] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]`}
+    >
+      {/* Top accent progress bar along the docked transport */}
+      <div className="absolute top-0 left-0 w-full h-[2px] bg-surface-container-highest z-20">
         <div 
           ref={(el) => { if (accentProgressBarRef) accentProgressBarRef.current = el; }} 
           className="h-full bg-primary origin-left transition-transform duration-100 ease-linear" 
@@ -411,25 +423,25 @@ export function LiveHeader({
         />
       </div>
 
-      <div className="flex items-center justify-between h-[72px] px-6 relative z-10 w-full max-w-5xl mx-auto">
-        <div className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer" onClick={() => setIsSettingsModalOpen?.(true)}>
+      <div className={`flex items-center justify-between h-[72px] px-6 relative z-10 w-full mx-auto transition-[max-width] duration-300 ${isFullWidthDesktop ? "max-w-6xl" : "max-w-5xl"}`}>
+        <div className="flex items-center gap-3.5 min-w-0 flex-1 cursor-pointer group" onClick={() => setIsSettingsModalOpen?.(true)}>
           <div className="w-11 h-11 rounded-lg bg-surface-container flex items-center justify-center border border-outline-variant/30 shadow-sm shrink-0 overflow-hidden">
             {activeSong?.youtube_url ? (
-              <img src={`https://img.youtube.com/vi/${activeSong.youtube_url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/)?.[1]}/default.jpg`} alt="thumbnail" className="w-full h-full object-cover opacity-80" />
+              <img src={`https://img.youtube.com/vi/${activeSong.youtube_url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/)?.[1]}/default.jpg`} alt="thumbnail" className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" />
             ) : (
               <span className="material-symbols-outlined text-outline-variant text-[20px]">music_note</span>
             )}
           </div>
           
           <div className="flex flex-col min-w-0 pr-2">
-            <h2 className="font-extrabold text-[18px] text-on-surface truncate tracking-tight leading-tight">
+            <h2 className="font-extrabold text-[17px] text-white truncate tracking-tight leading-tight group-hover:text-primary transition-colors">
               {activeSong?.title || "No Track Selected"}
             </h2>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-[11px] font-bold text-on-surface-variant truncate max-w-[120px]">
+              <span className="text-[11px] font-bold text-zinc-400 truncate max-w-[180px]">
                 {activeSong?.artist || "Unknown Artist"}
               </span>
-              <span className="w-1 h-1 rounded-full bg-outline-variant"></span>
+              <span className="w-1 h-1 rounded-full bg-zinc-600"></span>
               <span className="text-[10px] font-black text-primary bg-primary-container/20 px-1.5 rounded uppercase tracking-widest border border-primary/20">
                 {activeDisplayKey || activeSong?.original_key || "C"}
               </span>
@@ -437,7 +449,7 @@ export function LiveHeader({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
           {showSyncBack && handleSyncBack && (
             <button onClick={handleSyncBack} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-amber-500/50 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 active:scale-95 transition-all cursor-pointer animate-in fade-in">
               <span className="w-1.5 h-1.5 rounded-full border border-amber-500 bg-transparent"></span>
@@ -445,35 +457,44 @@ export function LiveHeader({
             </button>
           )}
 
-          {/* ✅ SURGICAL FIX: Desktop Lobby Button with Badge */}
           {!isSoloMode && (
             <button 
               onClick={() => setIsUserLobbyOpen?.(true)}
-              className="relative w-10 h-10 rounded-full flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors cursor-pointer border border-outline-variant/30"
+              className="relative w-10 h-10 rounded-full flex items-center justify-center text-zinc-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer border border-white/10"
               title="View Lobby"
             >
               <span className="material-symbols-outlined text-[20px]">group</span>
               {unreadMessageCount > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-black text-white shadow-sm border border-surface">
+                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-black text-white shadow-sm border border-[#18181A]">
                   {unreadMessageCount > 9 ? '9+' : unreadMessageCount}
                 </span>
               )}
             </button>
           )}
 
-          {/* ✅ SURGICAL ADDITION: Desktop Chapters Button */}
           <button 
             onClick={() => setIsChaptersModalOpen?.(true)}
-            className="w-10 h-10 rounded-full flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors cursor-pointer border border-outline-variant/30"
+            className="w-10 h-10 rounded-full flex items-center justify-center text-zinc-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer border border-white/10"
             title="Chapters"
           >
             <span className="material-symbols-outlined text-[20px]">format_list_bulleted</span>
           </button>
 
           <button 
-            onClick={handleToggleFlowPlaybackState}
-            // ✅ SURGICAL FIX: MD is Blue, non-MD is transparent/white
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-transform active:scale-90 cursor-pointer shadow-sm ${isPlayingFlow ? 'bg-primary-container text-primary' : (localPresenceUser?.isMD ? 'bg-primary text-on-primary shadow-md' : 'bg-transparent text-on-surface')}`}
+            onClick={() => setIsSettingsModalOpen?.(true)}
+            className="w-10 h-10 rounded-full flex items-center justify-center text-zinc-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer border border-white/10"
+            title="Settings & Mixer"
+          >
+            <span className="material-symbols-outlined text-[20px]">settings</span>
+          </button>
+
+          <button 
+            onClick={(e) => {
+              e.stopPropagation();
+              if (wakeUpAudioEngine) wakeUpAudioEngine();
+              handleToggleFlowPlaybackState();
+            }}
+            className={`w-12 h-12 rounded-full flex items-center justify-center transition-transform active:scale-90 cursor-pointer shadow-sm ${isPlayingFlow ? 'bg-primary-container text-primary' : (localPresenceUser?.isMD ? 'bg-primary text-on-primary shadow-md' : 'bg-white/10 text-white hover:bg-white/15')}`}
           >
             {isPlayingFlow ? <StopIcon /> : <PlayIcon />}
           </button>

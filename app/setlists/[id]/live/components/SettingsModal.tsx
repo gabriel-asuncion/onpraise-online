@@ -79,6 +79,7 @@ interface SettingsModalProps {
   midiSetup: Omit<MidiSetupModalProps, "onClose"> & { setSetupOpen: (open: boolean) => void };
   isClickGuideHardPannedRight: boolean;
   setIsClickGuideHardPannedRight: (val: boolean) => void;
+  onNoStemsFallbackToYoutube?: () => void;
   canEditSong: boolean;
   isPlayingFlow: boolean;
   router: AppRouterInstance;
@@ -521,6 +522,7 @@ export function SettingsModal(props: SettingsModalProps) {
         onToggleMixerSolo={onToggleMixerSolo}
         isClickGuideHardPannedRight={props.isClickGuideHardPannedRight}
         setIsClickGuideHardPannedRight={props.setIsClickGuideHardPannedRight}
+        onNoStemsFallbackToYoutube={props.onNoStemsFallbackToYoutube}
         metronomeSoundType={metronomeSoundType}
         setMetronomeSoundType={setMetronomeSoundType}
       />

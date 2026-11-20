@@ -14,6 +14,7 @@ import { normalizeSectionNameToAudioFile } from "./utils/setlist-helpers";
 import {
   compileTimelineBeatMap,
   getNextTimelineBeat,
+  getTimelineCalloutEvents,
   getTimelineDurationBeats,
   getTimelineMeasureBeat,
   getTimelineLineStartBeat,
@@ -176,7 +177,7 @@ export default function SetlistPerformanceRoomPage() {
   useWakeLock();
 
   // ✅ SURGICAL FIX: Bring back fetchAndDecodeAudio
-  const { initAudioContext, playZeroLatencyAudio, playGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
+  const { initAudioContext, playZeroLatencyAudio, playGuideCue, playScheduledGuideCue, getAudioContext, fetchAndDecodeAudio, cancelFutureAudio, setAudioPanRight, setGuideCueVolume } = useWebAudioEngine();
   const getLocalAudioContext = useCallback(() => {
     if (!getAudioContext()) initAudioContext();
     return getAudioContext();
@@ -262,7 +263,7 @@ export default function SetlistPerformanceRoomPage() {
   useEffect(() => {
     if (typeof window === "undefined" || tracksList.length === 0) return;
 
-    // 1. Preload Guide Cues
+    // 1. Preload Guide Cues & Saved Timeline Callouts
     const uniqueFiles = new Set<string>();
     tracksList.forEach(track => {
       const structure = track.custom_structure || [];
@@ -270,8 +271,11 @@ export default function SetlistPerformanceRoomPage() {
         const fileName = normalizeSectionNameToAudioFile(section.section_name);
         if (fileName) uniqueFiles.add(fileName);
       });
+      getTimelineCalloutEvents(track.songs?.section_timings).forEach((event) => {
+        if (event.fileKey) uniqueFiles.add(event.fileKey);
+      });
     });
-    uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${fileName}.wav`, fileName));
+    uniqueFiles.forEach(fileName => fetchAndDecodeAudio(`/sound_files/${encodeURIComponent(fileName)}.wav`, fileName));
 
     // 2. ✅ SURGICAL FIX: Explicitly Preload the Metronome Sounds!
     const metronomeTypes = ["blip", "bell", "block", "glass"];
@@ -347,10 +351,17 @@ export default function SetlistPerformanceRoomPage() {
     void resolveSongAudioStems(stemUserId, activeSong.id, activeSong.title ?? "", controller.signal).then(async (stems) => {
       if (controller.signal.aborted) return;
       setStoredStems(stems);
-      if (stems.length && !await loadWhilePaused(stems.map((stem) => ({
-        id: stem.stemId, blob: stem.blob, role: stem.role, sourceVersion: stem.updatedAt,
-      })), controller.signal) && !controller.signal.aborted) {
-        throw new Error("Local audio loading was interrupted.");
+      if (stems.length > 0) {
+        if (!await loadWhilePaused(stems.map((stem) => ({
+          id: stem.stemId, blob: stem.blob, role: stem.role, sourceVersion: stem.updatedAt,
+        })), controller.signal) && !controller.signal.aborted) {
+          throw new Error("Local audio loading was interrupted.");
+        }
+        if (!controller.signal.aborted && savedAudioSourceRef.current === "local" && audioSourceRef.current !== "local") {
+          changeAudioSource("local");
+        }
+      } else if (audioSourceRef.current === "local" && !localMode) {
+        changeAudioSource("youtube");
       }
     }).catch((e) => {
       if (!controller.signal.aborted) {
@@ -360,7 +371,7 @@ export default function SetlistPerformanceRoomPage() {
     }).finally(() => { if (!controller.signal.aborted) setIsStemsLoading(false); });
     return () => { controller.abort(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stemUserId, activeSong?.id, clearStems, loadWhilePaused]);
+  }, [stemUserId, activeSong?.id, localMode, clearStems, loadWhilePaused]);
 
   function selectAudioSource(source: AudioSourceMode) {
     if (source === "youtube" && localMode) {
@@ -1562,12 +1573,17 @@ export default function SetlistPerformanceRoomPage() {
     if (isPlayingRef.current || pendingYoutubeStartRef.current) return;
     if (!hasCurrentPlaybackAuthority()) { setPlaybackClockNotice("Waiting for Music Director authority to synchronize."); return; }
     if (!isSyncedRef.current) { setPlaybackClockNotice("Waiting for clock synchronization before starting the setlist."); return; }
+    let ytSource = audioSourceRef.current === "local" ? false : isYtSource;
     if (audioSourceRef.current === "local" && !localStemsAvailable) {
-      setLocalAudioError("Add or reconnect audio stems in Stage Mixer before starting local playback.");
-      return;
+      if (!localMode && localPresenceUserRef.current?.isMD === true && isYoutubeSyncEnabled && !!youtubeVideoId) {
+        ytSource = true;
+        changeAudioSource("youtube");
+      } else {
+        setLocalAudioError("Add or reconnect audio stems in Stage Mixer before starting local playback.");
+        return;
+      }
     }
 
-    const ytSource = audioSourceRef.current === "local" ? false : isYtSource;
     setLocalAudioError(null);
     const commandRevision = ++playbackCommandRevisionRef.current;
     if (autoAdvanceTimeoutRef.current) {
@@ -1964,7 +1980,7 @@ export default function SetlistPerformanceRoomPage() {
       }
       return null;
     },
-    playGuideCue, cancelFutureAudio, getAudioContext, audioContextStartTimeRef,
+    playGuideCue, triggerCalloutSound: playScheduledGuideCue, cancelFutureAudio, getAudioContext, audioContextStartTimeRef,
     pendingAudioClockCorrectionRef,
 
     triggerMetronomeSound: (beatPulse, time) => {
@@ -3241,7 +3257,9 @@ export default function SetlistPerformanceRoomPage() {
         songId={(isPlayingRef.current ? playingSongRef.current : activeSongRef.current)?.id}
         songTitle={(isPlayingRef.current ? playingSongRef.current : activeSongRef.current)?.title}
         userId={stemUserId}
-        onStemsChanged={setStoredStems} isStemsLoading={isStemsLoading}
+        onStemsChanged={setStoredStems}
+        onNoStemsFallbackToYoutube={() => { if (!localMode) changeAudioSource("youtube"); }}
+        isStemsLoading={isStemsLoading}
         midiBindings={keyboardMidiControls.preferences.mappings} learningActionId={keyboardMidiControls.learningAction}
         onStartMidiLearn={keyboardMidiControls.learnMidiAction} onClearMidiBinding={keyboardMidiControls.clearMidiMapping}
         onApplySmcStemPreset={keyboardMidiControls.applySmcStemPreset} midiError={keyboardMidiControls.midiError}

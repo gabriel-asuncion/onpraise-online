@@ -7,8 +7,8 @@ let isHardPanRightEnabled = false;
 let guideCueVolume = 0.8;
 const activePanners = new Set<StereoPannerNode>();
 
-// ✅ SURGICAL FIX: Track scheduled nodes so we can kill ghost beats on jumps
-let scheduledNodes: { source: AudioBufferSourceNode; time: number }[] = [];
+// ✅ SURGICAL FIX: Track scheduled nodes so we can kill ghost beats & in-flight callouts on jumps
+let scheduledNodes: { source: AudioBufferSourceNode; time: number; endTime: number }[] = [];
 
 export const setAudioPanRight = (enabled: boolean) => {
   isHardPanRightEnabled = enabled;
@@ -57,24 +57,30 @@ export const playZeroLatencyAudio = (key: string, volume: number = 1.0, time: nu
 
     const gainNode = ctx.createGain();
     gainNode.gain.value = volume;
-    const pannerNode = ctx.createStereoPanner();
-    pannerNode.pan.value = isHardPanRightEnabled ? 1 : 0;
-    activePanners.add(pannerNode);
-    source.onended = () => activePanners.delete(pannerNode);
-
-    source.connect(gainNode);
-    gainNode.connect(pannerNode);
-    pannerNode.connect(ctx.destination);
+    if (isHardPanRightEnabled) {
+      const pannerNode = ctx.createStereoPanner();
+      pannerNode.pan.value = 1;
+      activePanners.add(pannerNode);
+      source.onended = () => activePanners.delete(pannerNode);
+      source.connect(gainNode);
+      gainNode.connect(pannerNode);
+      pannerNode.connect(ctx.destination);
+    } else {
+      source.connect(gainNode);
+      gainNode.connect(ctx.destination);
+    }
 
     // ✅ SURGICAL FIX: Clamp time to 0 to prevent RangeError crashes on deep section jumps
     const safeTime = Math.max(0, time);
+    const effectiveStart = safeTime > 0 ? safeTime : ctx.currentTime;
+    const duration = audioBufferCache[key]?.duration ?? 0;
     source.start(safeTime); 
 
     // Track the scheduled sound in memory
-    scheduledNodes.push({ source, time: safeTime });
+    scheduledNodes.push({ source, time: safeTime, endTime: effectiveStart + duration });
     
     // Memory cleanup: remove nodes that already finished playing
-    scheduledNodes = scheduledNodes.filter(n => n.time >= ctx.currentTime - 0.5);
+    scheduledNodes = scheduledNodes.filter(n => n.endTime >= ctx.currentTime - 0.25);
 
     return source;
 };
@@ -85,6 +91,11 @@ export const playGuideCue = (rawSectionName: string) => {
   if (cleanName) playZeroLatencyAudio(cleanName, guideCueVolume);
 };
 
+export const playScheduledGuideCue = (fileKey: string, time: number = 0) => {
+  if (!fileKey) return;
+  playZeroLatencyAudio(fileKey, guideCueVolume, time);
+};
+
 export const getAudioContext = () => globalAudioContext;
 
 // ✅ SURGICAL FIX: Function to sweep and kill any clicks scheduled in the future
@@ -93,8 +104,8 @@ export const cancelFutureAudio = () => {
   if (!ctx) return;
   const now = ctx.currentTime;
   scheduledNodes.forEach(node => {
-      // If the node is scheduled to play right now or in the future, stop it!
-      if (node.time >= now) {
+      // Stop nodes scheduled in the future OR still actively playing (e.g. callouts)
+      if (node.time >= now || node.endTime > now) {
           try { node.source.stop(); } catch(e) {}
       }
   });
@@ -106,7 +117,8 @@ export function useWebAudioEngine() {
     initAudioContext, 
     fetchAndDecodeAudio, 
     playZeroLatencyAudio, 
-    playGuideCue, 
+    playGuideCue,
+    playScheduledGuideCue,
     getAudioContext,
     setAudioPanRight,
     setGuideCueVolume,

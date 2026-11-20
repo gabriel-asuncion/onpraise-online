@@ -3,11 +3,12 @@
 import React, { useCallback, useState, useRef, useEffect } from "react";
 import type { useMultitrackEngine } from "../../../../../hooks/useMultitrackEngine";
 import {
-  findSongAudioFiles, findSongAudioFilesFromFileList, getSavedAudioFolderHandle,
+  findSongAudioFiles, getLinkedFallbackFolderName, getSavedAudioFolderHandle,
   getSongAudioStems, inferStemRole, isDirectoryHandlePickerSupported,
-  pickAndSaveRootAudioFolder, removeSongAudioStem, resolveSongAudioStems,
-  saveStemsZipToDeviceDownloads, saveSongAudioStem, verifyFolderPermission,
-  type AudioDirectoryHandle, type StoredAudioStem,
+  pickAndSaveRootAudioFolder, preloadLibraryStemsFromDirectoryHandle,
+  preloadLibraryStemsFromFileList, removeSongAudioStem, resolveSongAudioStems,
+  saveLinkedFallbackFolderName, saveStemsZipToDeviceDownloads, saveSongAudioStem,
+  verifyFolderPermission, type AudioDirectoryHandle, type StoredAudioStem,
 } from "../../../../../lib/offline-audio";
 import { expandAndFilterStemFiles } from "../../../../../lib/zip-audio";
 import {
@@ -35,6 +36,7 @@ interface VolumeMixerModalProps {
   onClearMidiBinding?: (actionId: ControlActionId) => void;
   onApplySmcStemPreset?: () => void;
   onStemsChanged?: (stems: StoredAudioStem[]) => void;
+  onNoStemsFallbackToYoutube?: () => void;
   isStemsLoading?: boolean;
   midiError?: string | null;
   isOpen: boolean;
@@ -192,7 +194,7 @@ export function VolumeMixerModal({
   isClickGuideHardPannedRight, setIsClickGuideHardPannedRight,
   metronomeSoundType, setMetronomeSoundType, audioSource = "youtube", multitrack,
   songId, songTitle, userId, midiBindings, learningActionId, onStartMidiLearn,
-  onClearMidiBinding, onApplySmcStemPreset, onStemsChanged, isStemsLoading = false, midiError,
+  onClearMidiBinding, onApplySmcStemPreset, onStemsChanged, onNoStemsFallbackToYoutube, isStemsLoading = false, midiError,
 }: VolumeMixerModalProps) {
   const [stems, setStems] = useState<StoredAudioStem[]>([]);
   const [mixes, setMixes] = useState<ReturnType<MultitrackEngine["getStemMixes"]>>([]);
@@ -205,6 +207,7 @@ export function VolumeMixerModal({
   const [loadedKey, setLoadedKey] = useState("");
   const [linkedFolderName, setLinkedFolderName] = useState<string | null>(null);
   const [folderNeedsPermission, setFolderNeedsPermission] = useState(false);
+  const [preloadStatus, setPreloadStatus] = useState<string | null>(null);
   const [isDriveOpen, setIsDriveOpen] = useState(false);
   const [driveFiles, setDriveFiles] = useState<DriveStemFile[]>([]);
   const [driveLoading, setDriveLoading] = useState(false);
@@ -233,6 +236,7 @@ export function VolumeMixerModal({
   }, []);
 
   useEffect(() => {
+    setPreloadStatus(null);
     if (!isOpen || audioSource !== "local" || !userId || !songId) return;
     const current = ++revision.current;
     const controller = new AbortController();
@@ -247,8 +251,10 @@ export function VolumeMixerModal({
         setStems(saved);
         onStemsChanged?.(saved);
         setLoadedKey(`${userId}:${songId}`);
-        setHasFolder(Boolean(folder));
-        setLinkedFolderName(folder?.folderName ?? null);
+        const fallbackName = getLinkedFallbackFolderName(userId);
+        const resolvedFolderName = folder?.folderName ?? fallbackName;
+        setHasFolder(Boolean(folder || fallbackName));
+        setLinkedFolderName(resolvedFolderName);
         folderRef.current = folder?.handle ?? null;
         if (folder?.handle) {
           const perm = await folder.handle.queryPermission({ mode: "read" });
@@ -259,7 +265,7 @@ export function VolumeMixerModal({
         if (onStemsChanged || !getEngine || !loadWhilePaused || saved.length === 0) return;
         const engine = getEngine();
         if (engine.getStemMixes().length === 0 && !engine.isPlaying) {
-          await loadWhilePaused(saved.map((stem) => ({ id: stem.stemId, blob: stem.blob, sourceVersion: stem.updatedAt })), controller.signal);
+          await loadWhilePaused(saved.map((stem) => ({ id: stem.stemId, blob: stem.blob, role: stem.role, sourceVersion: stem.updatedAt })), controller.signal);
         }
       } catch (reason) {
         if (current === revision.current) reportError(reason);
@@ -521,16 +527,36 @@ export function VolumeMixerModal({
               const files = Array.from(event.currentTarget.files ?? []);
               event.currentTarget.value = "";
               if (!files.length) return;
-              const pickedFolderName = files[0]?.webkitRelativePath?.split(/[\\/]/)[0] || "Selected Folder";
+              const pickedFolderName = files[0]?.webkitRelativePath?.split(/[\\/]/)[0] || "Downloads";
               void run(async (signal) => {
                 if (!userId || !songId) throw new Error("Select a song and sign in first.");
-                const matched = await findSongAudioFilesFromFileList(files, songId, songTitle ?? "");
-                if (signal.aborted) return;
-                if (!matched.length) {
-                  throw new Error(`No matching stem files for "${songTitle || songId}" were found in "${pickedFolderName}".`);
-                }
+                setPreloadStatus(`Scanning "${pickedFolderName}" & preloading stems...`);
+                saveLinkedFallbackFolderName(userId, pickedFolderName);
+                setHasFolder(true);
                 setLinkedFolderName(pickedFolderName);
-                await importFiles(matched, signal);
+                setFolderNeedsPermission(false);
+                const { matchedSongCount, currentSongStems } = await preloadLibraryStemsFromFileList(
+                  userId,
+                  files,
+                  { id: songId, title: songTitle ?? "" },
+                  signal,
+                );
+                if (signal.aborted) return;
+                if (currentSongStems.length > 0) {
+                  await reload(signal);
+                  setPreloadStatus(
+                    `Preloaded stems for ${matchedSongCount} song${matchedSongCount === 1 ? "" : "s"} from "${pickedFolderName}".`,
+                  );
+                } else {
+                  setStems([]);
+                  onStemsChanged?.([]);
+                  setPreloadStatus(
+                    matchedSongCount > 0
+                      ? `Preloaded ${matchedSongCount} other song${matchedSongCount === 1 ? "" : "s"}, but no stems matched "${songTitle || songId}". Switched to YouTube audio.`
+                      : `No stems found for "${songTitle || songId}" in "${pickedFolderName}". Switched to YouTube audio.`,
+                  );
+                  onNoStemsFallbackToYoutube?.();
+                }
               });
             }}
           />
@@ -752,22 +778,65 @@ export function VolumeMixerModal({
                 return;
               }
               void run(async (signal) => {
-                const saved = await pickAndSaveRootAudioFolder(userId);
+                let saved;
+                try {
+                  saved = await pickAndSaveRootAudioFolder(userId);
+                } catch (err) {
+                  if (err instanceof DOMException && err.name === "SecurityError") {
+                    folderFallbackInput.current?.click();
+                    return;
+                  }
+                  throw err;
+                }
                 const handle = saved.handle;
                 if (!await verifyFolderPermission(handle)) throw new Error("Folder permission was not granted.");
                 if (signal.aborted) return;
+                setPreloadStatus(`Scanning "${saved.folderName}" & preloading stems...`);
                 folderRef.current = handle;
                 setHasFolder(true);
                 setLinkedFolderName(saved.folderName);
                 setFolderNeedsPermission(false);
-                const files = await findSongAudioFiles(handle, songId, songTitle ?? "");
-                if (files.length) {
-                  await importFiles(files, signal);
+                const { matchedSongCount, currentSongStems } = await preloadLibraryStemsFromDirectoryHandle(
+                  userId,
+                  handle,
+                  { id: songId, title: songTitle ?? "" },
+                  signal,
+                );
+                if (signal.aborted) return;
+                if (currentSongStems.length > 0) {
+                  await reload(signal);
+                  setPreloadStatus(
+                    `Preloaded stems for ${matchedSongCount} song${matchedSongCount === 1 ? "" : "s"} from "${saved.folderName}".`,
+                  );
+                } else {
+                  setStems([]);
+                  onStemsChanged?.([]);
+                  setPreloadStatus(
+                    matchedSongCount > 0
+                      ? `Preloaded ${matchedSongCount} other song${matchedSongCount === 1 ? "" : "s"}, but no stems matched "${songTitle || songId}". Switched to YouTube audio.`
+                      : `No stems found for "${songTitle || songId}" in "${saved.folderName}". Switched to YouTube audio.`,
+                  );
+                  onNoStemsFallbackToYoutube?.();
                 }
               });
             }}
           >
             {hasFolder ? `Folder: ${linkedFolderName || "Linked"}` : "Link Folder"}
+          </button>
+          <button
+            type="button"
+            className="rounded-lg border border-emerald-400/35 bg-emerald-500/15 px-3 py-1.5 text-emerald-200 transition-colors hover:bg-emerald-500/25 disabled:opacity-40"
+            disabled={busy || playing || !userId || !songId || !multitrack}
+            title="Select your system Downloads folder (or any folder) to preload stems across your library"
+            onClick={() => {
+              if (!userId || !songId) {
+                reportError(new Error("Select a song and sign in first."));
+                return;
+              }
+              folderFallbackInput.current?.click();
+            }}
+          >
+            Link Downloads
           </button>
           <div className="ml-auto flex items-center gap-2">
             {assignMode && <button type="button" disabled={!onApplySmcStemPreset} className="rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-400/30 hover:bg-cyan-500/25 px-3 py-1.5 transition-colors disabled:opacity-40" onClick={onApplySmcStemPreset}>Auto-Map Strips 3–8</button>}
@@ -778,6 +847,7 @@ export function VolumeMixerModal({
           {isStemsLoading && <span className="w-full text-zinc-400 pt-1">Loading stems...</span>}
           {playing && <span className="w-full text-zinc-400 pt-1">Pause playback to import or replace stems.</span>}
           {(!multitrack || !userId || !songId) && <span className="w-full text-zinc-400 pt-1">Select a song to manage local stems.</span>}
+          {preloadStatus && !error && <span className="w-full text-emerald-300 pt-1" role="status">{preloadStatus}</span>}
           {multitrack && stems.some((stem) => stem.ownerId === userId && stem.songId === songId && !mixes.some((mix) => mix.id === stem.stemId && mix.sourceVersion === stem.updatedAt)) &&
             <div className="w-full text-amber-300 pt-1">Some saved stems are not loaded. <button type="button" disabled={busy || playing} className="underline disabled:opacity-50" onClick={() => void run(reload)}>Reload stems</button></div>}
           {error && <span className="w-full text-red-300 pt-1" role="alert">{error}</span>}

@@ -365,7 +365,7 @@ export function TracksView(props: TracksViewProps) {
   const totalRenderMeasures = preRollMeasures + totalMeasures;
 
   return (
-    <div className="flex-1 flex flex-col bg-[#09090b] h-full relative overflow-hidden font-sans">
+    <div className="flex-1 flex flex-col bg-[#09090b] h-full relative overflow-hidden font-sans md:pb-[72px]">
 
       {/* --- TELEPROMPTER LYRIC GLIDER --- */}
       <div className="flex-1 flex flex-col justify-center px-4 md:px-8 relative z-10 overflow-hidden">

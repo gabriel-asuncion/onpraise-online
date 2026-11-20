@@ -271,6 +271,13 @@ function getNonNegativeNumber(record: Record<string, unknown>, key: string, fall
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
 }
 
+function getSignedNumber(record: Record<string, unknown>, key: string, fallback: number) {
+  const value = record[key];
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 export function getTimelineDurationBeats(
   sectionTimings: unknown,
   sectionIndex: number,
@@ -322,4 +329,55 @@ export function getTimelineDurationBeats(
 
   const duration = Number(durations[durationIndex]);
   return Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
+export interface TimelineCalloutAudioEvent {
+  eventId: string;
+  calloutId: string;
+  cueId: string;
+  fileKey: string;
+  beat: number;
+}
+
+const CALLOUT_SEQUENCE_STEPS: Record<string, ReadonlyArray<{ beatOffset: number; fileKey: string }>> = {
+  short_count_in: [
+    { beatOffset: 0, fileKey: "count_3" },
+    { beatOffset: 1, fileKey: "count_2" },
+    { beatOffset: 2, fileKey: "count_1" },
+  ],
+  long_count_in: [
+    { beatOffset: 0, fileKey: "count_4" },
+    { beatOffset: 2, fileKey: "count_3" },
+    { beatOffset: 4, fileKey: "count_4" },
+    { beatOffset: 5, fileKey: "count_3" },
+    { beatOffset: 6, fileKey: "count_2" },
+    { beatOffset: 7, fileKey: "count_1" },
+  ],
+};
+
+export function getTimelineCalloutEvents(sectionTimings: unknown): TimelineCalloutAudioEvent[] {
+  const timingRoot = parseRecord(sectionTimings);
+  const timeline = parseRecord(timingRoot.__timeline);
+  const rawCallouts = timeline.callouts;
+  if (!Array.isArray(rawCallouts)) return [];
+
+  const events: TimelineCalloutAudioEvent[] = [];
+  rawCallouts.forEach((raw, idx) => {
+    const item = parseRecord(raw);
+    const cueId = typeof item.cueId === "string" ? item.cueId.trim() : "";
+    if (!cueId) return;
+    const calloutId = typeof item.id === "string" && item.id ? item.id : `callout-${idx}`;
+    const startBeat = getSignedNumber(item, "startBeat", 0);
+    const steps = CALLOUT_SEQUENCE_STEPS[cueId] ?? [{ beatOffset: 0, fileKey: cueId }];
+    for (const step of steps) {
+      events.push({
+        eventId: `${calloutId}:${step.beatOffset}`,
+        calloutId,
+        cueId,
+        fileKey: step.fileKey,
+        beat: startBeat + step.beatOffset,
+      });
+    }
+  });
+  return events;
 }
