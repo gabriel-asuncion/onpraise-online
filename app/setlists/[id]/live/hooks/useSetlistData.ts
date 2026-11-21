@@ -252,7 +252,7 @@ export function useSetlistData(setlistId: string, supabase: ReturnType<typeof cr
     setSections(newSections);
     sectionsRef.current = newSections; 
 
-    return newSections; 
+    return { sections: newSections, song: targetTrackItem.songs }; 
   };
 
   return {

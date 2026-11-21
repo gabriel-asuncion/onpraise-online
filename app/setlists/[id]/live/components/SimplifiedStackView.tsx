@@ -88,7 +88,7 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
       });
     }
 
-    if (activeIdx !== currentTrackIndex) {
+    if (activeIdx !== currentTrackIndex && !isPlayingFlow) {
       handleUserSelectTrackBadge(activeIdx);
     }
   };

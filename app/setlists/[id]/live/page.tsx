@@ -189,6 +189,7 @@ export default function SetlistPerformanceRoomPage() {
   const [isStemsLoading, setIsStemsLoading] = useState(false);
   const [localAudioError, setLocalAudioError] = useState<string | null>(null);
   const localStemsAvailable = multitrack.durationSeconds > 0;
+  const isStemsLoadingRef = useRef(false);
   const savedAudioSourceRef = useRef<AudioSourceMode>("youtube");
   const audioSourceRef = useRef<"youtube" | "local">("youtube");
   const localClockRef = useRef<{
@@ -340,10 +341,21 @@ export default function SetlistPerformanceRoomPage() {
   const { clear: clearStems, loadWhilePaused } = multitrack;
   useEffect(() => {
     const controller = new AbortController();
-    executeLocalResetSequence();
+    const wasPlaying = isPlayingRef.current;
+    isStemsLoadingRef.current = true;
+    
+    // ✅ SURGICAL FIX: Do not kill the metronome or playback state if we are seamlessly switching songs!
+    if (!wasPlaying) {
+      executeLocalResetSequence();
+    } else if (audioSourceRef.current === "local") {
+      try { multitrack.getEngine().stop(); } catch(e) {}
+    }
+    
     clearStems();
     setStoredStems([]);
+    
     if (!stemUserId || !activeSong?.id) {
+      isStemsLoadingRef.current = false;
       setIsStemsLoading(false);
       return () => controller.abort();
     }
@@ -357,18 +369,51 @@ export default function SetlistPerformanceRoomPage() {
         })), controller.signal) && !controller.signal.aborted) {
           throw new Error("Local audio loading was interrupted.");
         }
-        if (!controller.signal.aborted && savedAudioSourceRef.current === "local" && audioSourceRef.current !== "local") {
+        if (controller.signal.aborted) return;
+        isStemsLoadingRef.current = false;
+        if (savedAudioSourceRef.current === "local" && audioSourceRef.current !== "local") {
           changeAudioSource("local");
         }
-      } else if (audioSourceRef.current === "local" && !localMode) {
-        changeAudioSource("youtube");
+        
+        // ✅ SURGICAL FIX: Resume audio automatically aligned with the active metronome clock
+        if (isPlayingRef.current && audioSourceRef.current === "local") {
+          const song = activeSongRef.current;
+          const audioCtx = getAudioContext();
+          if (song && audioCtx) {
+            const beatSpeedSecs = 60 / (song.tempo || 75);
+            const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
+            const now = getPlaybackTime();
+            const startAt = audioCtx.currentTime + 0.050;
+            const elapsedMs = now + (startAt - audioCtx.currentTime) * 1000 - (mdSectionStartTimeRef.current || now);
+            const rawTime = (sectionStartBeat * beatSpeedSecs * 1000 + elapsedMs + (song.youtube_sync_offset_ms || 0)) / 1000;
+            const sourceStartAt = startAt + Math.max(0, -rawTime);
+            const sourceOffset = Math.max(0, rawTime);
+            const sourceGlobalTime = now + (sourceStartAt - audioCtx.currentTime) * 1000;
+            try {
+              multitrack.getEngine().play(sourceOffset, sourceStartAt);
+              localClockRef.current = { audioTime: audioCtx.currentTime, globalTime: now, sourceStartAt, sourceOffset, sourceGlobalTime };
+            } catch(e) {}
+          }
+        }
+      } else {
+        isStemsLoadingRef.current = false;
+        if (audioSourceRef.current === "local" && !localMode) {
+          changeAudioSource("youtube");
+        }
       }
     }).catch((e) => {
       if (!controller.signal.aborted) {
+        isStemsLoadingRef.current = false;
         console.error("Could not load local stems.", e);
         setLocalAudioError(e instanceof Error ? e.message : "Could not load local stems.");
       }
-    }).finally(() => { if (!controller.signal.aborted) setIsStemsLoading(false); });
+    }).finally(() => {
+      if (!controller.signal.aborted) {
+        isStemsLoadingRef.current = false;
+        setIsStemsLoading(false);
+      }
+    });
+    
     return () => { controller.abort(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stemUserId, activeSong?.id, localMode, clearStems, loadWhilePaused]);
@@ -620,6 +665,22 @@ export default function SetlistPerformanceRoomPage() {
   const [playingTrackIndex, setPlayingTrackIndex] = useState<number>(0);
   const [queuedTrackIndex, setQueuedTrackIndex] = useState<number | null>(null);
   const [queuedSectionIndex, setQueuedSectionIndex] = useState<number | null>(null);
+
+  // Pre-warm upcoming/queued track stems in local cache for fast cross-song transitions
+  useEffect(() => {
+    if (!stemUserId || tracksList.length === 0) return;
+    const controller = new AbortController();
+    const candidateIndices = new Set<number>();
+    if (currentTrackIndex + 1 < tracksList.length) candidateIndices.add(currentTrackIndex + 1);
+    if (queuedTrackIndex !== null && queuedTrackIndex !== currentTrackIndex) candidateIndices.add(queuedTrackIndex);
+    candidateIndices.forEach((idx) => {
+      const upcomingSong = tracksList[idx]?.songs;
+      if (upcomingSong?.id) {
+        void resolveSongAudioStems(stemUserId, upcomingSong.id, upcomingSong.title ?? "", controller.signal).catch(() => {});
+      }
+    });
+    return () => controller.abort();
+  }, [stemUserId, currentTrackIndex, queuedTrackIndex, tracksList]);
 
   const lastAudioBeatRef = useRef<number>(1);
   const lastVisualBeatRef = useRef<number>(1);
@@ -1220,7 +1281,8 @@ export default function SetlistPerformanceRoomPage() {
 
     if (isTrackMismatch || isSectionMismatch || isPlaybackMismatch || isSourceMismatch) {
       const revision = ++playbackSyncRevisionRef.current;
-      const mountedSections = mountTargetSetlistTrackIndex(trackIndex);
+      const mountResult = mountTargetSetlistTrackIndex(trackIndex);
+      const mountedSections = mountResult?.sections;
       if (!mountedSections || sectionIndex >= mountedSections.length) {
         console.error("Ignoring playback state with a section outside the target track:", payload);
         return;
@@ -1971,8 +2033,20 @@ export default function SetlistPerformanceRoomPage() {
         pendingSync.sectionStartTime,
         pendingSync.mode
       );
+    } else if (
+      isYtPlayerReady &&
+      youtubeVideoId &&
+      isPlayingRef.current &&
+      isYtBackingTrackStartRef.current &&
+      audioSourceRef.current === "youtube"
+    ) {
+      syncYoutubeToTimeline(
+        currentSectionIndexRef.current,
+        mdSectionStartTimeRef.current || getGlobalTime(),
+        "start"
+      );
     }
-  }, [isYtPlayerReady, syncYoutubeToTimeline]);
+  }, [isYtPlayerReady, syncYoutubeToTimeline, youtubeVideoId]);
 
   useHardwareClock({
     isPlayingFlow, playbackSessionId, isPlayingRef, activeSongRef, playingSongRef, sectionsRef, playingSectionsRef,
@@ -2200,8 +2274,18 @@ export default function SetlistPerformanceRoomPage() {
     if (cancelFutureAudio) cancelFutureAudio();
     pendingAudioClockCorrectionRef.current = null;
 
-    if (targetTrackIdx !== undefined && targetTrackIdx !== playingTrackIndexRef.current) {
-      mountTargetSetlistTrackIndex(targetTrackIdx);
+    const isCrossTrackJump = targetTrackIdx !== undefined && targetTrackIdx !== playingTrackIndexRef.current;
+    if (isCrossTrackJump) {
+      const mountResult = mountTargetSetlistTrackIndex(targetTrackIdx);
+      if (mountResult) {
+        const targetAst = memoizedSetlistAst[targetTrackIdx]?.ast;
+        beatMapRef.current = compileTimelineBeatMap(
+          mountResult.sections,
+          mountResult.song.section_timings,
+          targetAst ? targetAst.map((section) => section.lines.length) : mountResult.sections.map(() => 0),
+          mountResult.song.default_structure
+        );
+      }
     }
 
     playingTrackIndexRef.current = targetTrackIdx !== undefined ? targetTrackIdx : currentTrackIndexRef.current;
@@ -2224,7 +2308,9 @@ export default function SetlistPerformanceRoomPage() {
           const targetAbsoluteBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
           audioContextStartTimeRef.current = absoluteHardwareTimeAtJump - (targetAbsoluteBeat * beatSpeedSecs);
         }
-        if (audioSourceRef.current === "local" && isPlayingRef.current && activeSongRef.current) {
+        const engine = multitrack.getEngine();
+        const canPlayLoadedStems = !isCrossTrackJump && !isStemsLoadingRef.current && engine.durationSeconds > 0;
+        if (audioSourceRef.current === "local" && isPlayingRef.current && activeSongRef.current && canPlayLoadedStems) {
           cancelFutureAudio?.();
           const song = activeSongRef.current;
           const now = getPlaybackTime();
@@ -2240,7 +2326,7 @@ export default function SetlistPerformanceRoomPage() {
             const sourceStartAt = startAt + Math.max(0, -rawTime);
             const sourceOffset = Math.max(0, rawTime);
             const sourceGlobalTime = now + (sourceStartAt - audioCtx.currentTime) * 1000;
-            multitrack.getEngine().play(sourceOffset, sourceStartAt);
+            engine.play(sourceOffset, sourceStartAt);
             localClockRef.current = { audioTime: audioCtx.currentTime, globalTime: now, sourceStartAt, sourceOffset, sourceGlobalTime };
           } catch (e) {
             console.error("Could not start local stems.", e);
@@ -2250,8 +2336,9 @@ export default function SetlistPerformanceRoomPage() {
           }
         }
       }
-      if (youtubeSyncMode) {
-        syncYoutubeToTimeline(targetSectionIdx, jumpTime, youtubeSyncMode);
+      const effectiveYoutubeMode = youtubeSyncMode ?? (isCrossTrackJump && isYtBackingTrackStartRef.current ? "start" : undefined);
+      if (effectiveYoutubeMode) {
+        syncYoutubeToTimeline(targetSectionIdx, jumpTime, effectiveYoutubeMode);
       }
     }
 
@@ -2398,9 +2485,13 @@ export default function SetlistPerformanceRoomPage() {
   }
 
   function handleUserSelectTrackBadge(trackIdx: number) {
-    mountTargetSetlistTrackIndex(trackIdx);
-    if (!isPlayingFlow && localPresenceUser?.isMD) {
-      sendSupabaseBroadcast({ action: "TRACK_CHANGE", trackIndex: trackIdx });
+    if (isPlayingFlow && hasCurrentPlaybackAuthority()) {
+      handleSectionInteractiveSelection(0, trackIdx);
+    } else {
+      mountTargetSetlistTrackIndex(trackIdx);
+      if (localPresenceUser?.isMD) {
+        sendSupabaseBroadcast({ action: "TRACK_CHANGE", trackIndex: trackIdx });
+      }
     }
   }
 
@@ -2417,25 +2508,20 @@ export default function SetlistPerformanceRoomPage() {
       return;
     }
 
-    isPlayingRef.current = false;
-    setIsPlayingFlow(false);
-    mountTargetSetlistTrackIndex(nextTrackIndex);
-
     const commandRevision = ++playbackCommandRevisionRef.current;
-    autoAdvanceTimeoutRef.current = setTimeout(() => {
-      autoAdvanceTimeoutRef.current = null;
-      if (
-        playbackCommandRevisionRef.current !== commandRevision ||
-        !localPresenceUserRef.current?.isMD ||
-        currentTrackIndexRef.current !== nextTrackIndex
-      ) return;
-      const jumpTime = getGlobalTime();
-      mdSectionStartTimeRef.current = jumpTime;
-      isPlayingRef.current = true;
-      setIsPlayingFlow(true);
-      executeJumpNow(nextTrackIndex, 0, jumpTime, true);
-      sendSupabaseBroadcast({ action: "START", trackIndex: nextTrackIndex, sectionIndex: 0, mdSectionStartTime: jumpTime, isYtSource: false });
-    }, 120);
+    const result = mountTargetSetlistTrackIndex(nextTrackIndex);
+    if (!result) return;
+    
+    // Compile the incoming beatmap instantly so audio anchors land accurately
+    beatMapRef.current = compileTimelineBeatMap(result.sections, result.song.section_timings, result.sections.map(() => 0), result.song.default_structure);
+
+    const jumpTime = getGlobalTime();
+    const keepYtSource = audioSourceRef.current === "youtube" && isYtBackingTrackStartRef.current;
+    mdSectionStartTimeRef.current = jumpTime;
+    isPlayingRef.current = true;
+    setIsPlayingFlow(true);
+    executeJumpNow(nextTrackIndex, 0, jumpTime, true, keepYtSource ? "start" : undefined);
+    sendSupabaseBroadcast({ action: "START", trackIndex: nextTrackIndex, sectionIndex: 0, mdSectionStartTime: jumpTime, isYtSource: keepYtSource });
   }
 
   function handleToggleFlowPlaybackState() {
@@ -2488,18 +2574,38 @@ export default function SetlistPerformanceRoomPage() {
     const targetTrackIndex = overrideTrackIndex !== undefined ? overrideTrackIndex : currentTrackIndex;
     jumpReasonRef.current = isPlayingFlow ? "Queued" : "Quick Play";
 
-    if (targetTrackIndex !== currentTrackIndex) {
-      mountTargetSetlistTrackIndex(targetTrackIndex);
-    }
-
     let timeOffsetMs = 0;
-    if (exactBeat !== undefined && activeSongRef.current) {
-      const sectionStartBeat = beatMapRef.current.sectionStartBeats[index] || 0;
-      const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
-      timeOffsetMs = (exactBeat - sectionStartBeat) * beatDurationMs;
-      setExplicitScrubBeat(exactBeat);
+    const shouldMountImmediately = !isPlayingFlow || exactBeat !== undefined;
+    if (targetTrackIndex !== currentTrackIndex) {
+      const targetTrack = tracksListRef.current[targetTrackIndex];
+      const targetSong = targetTrack?.songs;
+      const targetSections = targetTrack?.custom_structure || [];
+      if (shouldMountImmediately) {
+        const result = mountTargetSetlistTrackIndex(targetTrackIndex);
+        if (result) {
+          beatMapRef.current = compileTimelineBeatMap(result.sections, result.song.section_timings, result.sections.map(() => 0), result.song.default_structure);
+        }
+      }
+      if (exactBeat !== undefined && targetSong) {
+        const targetMap = shouldMountImmediately
+          ? beatMapRef.current
+          : compileTimelineBeatMap(targetSections, targetSong.section_timings, targetSections.map(() => 0), targetSong.default_structure);
+        const sectionStartBeat = targetMap.sectionStartBeats[index] || 0;
+        const beatDurationMs = (60 / (targetSong.tempo || 75)) * 1000;
+        timeOffsetMs = (exactBeat - sectionStartBeat) * beatDurationMs;
+        setExplicitScrubBeat(exactBeat);
+      } else {
+        setExplicitScrubBeat(null);
+      }
     } else {
-      setExplicitScrubBeat(null);
+      if (exactBeat !== undefined && activeSongRef.current) {
+        const sectionStartBeat = beatMapRef.current.sectionStartBeats[index] || 0;
+        const beatDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 1000;
+        timeOffsetMs = (exactBeat - sectionStartBeat) * beatDurationMs;
+        setExplicitScrubBeat(exactBeat);
+      } else {
+        setExplicitScrubBeat(null);
+      }
     }
 
     if (!isPlayingFlow) {
@@ -2920,7 +3026,7 @@ export default function SetlistPerformanceRoomPage() {
       const mounted = mountTargetSetlistTrackIndex(trackIndex);
       if (!mounted) return;
       astTreeRef.current = ast;
-      beatMapRef.current = compileTimelineBeatMap(mounted, target.songs.section_timings,
+      beatMapRef.current = compileTimelineBeatMap(mounted.sections, target.songs.section_timings,
         ast.map((section) => section.lines.length), target.songs.default_structure);
     }
     const song = activeSongRef.current;

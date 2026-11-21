@@ -90,8 +90,7 @@ export function StandardSheetView(props: StandardSheetViewProps) {
               key={section.id}
               ref={(el) => { sectionRefs.current[section.id] = el; }}
               onClick={() => {
-                if (!isInteractive) {
-                  // If MD swiped ahead to a future song, focus the carousel on it first, then queue it!
+                if (!isInteractive && !isPlayingFlow) {
                   handleUserSelectTrackBadge(currentTrackIndex);
                   setTimeout(() => handleSectionInteractiveSelection(idx, currentTrackIndex), 150);
                 } else {
