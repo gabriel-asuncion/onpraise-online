@@ -99,9 +99,9 @@ export function StandardSheetView(props: StandardSheetViewProps) {
               }}
               className={`rounded-xl md:rounded-2xl px-4 pb-3 pt-5 md:px-5 md:pb-4 md:pt-6 shadow-sm transition-all duration-300 relative cursor-pointer ${
                 isThisSectionActivePlayback 
-                  ? "bg-surface-container-high shadow-[0_0_24px_rgba(37,99,235,0.22)] scale-[1.02] z-20" 
+                  ? `bg-surface-container-high shadow-[0_0_24px_rgba(37,99,235,0.22)] scale-[1.02] z-20 ${isThisSectionQueuedNext ? "border border-[#9333ea]/70 ring-1 ring-[#9333ea]/40" : ""}` 
                   : isThisSectionQueuedNext
-                  ? "bg-surface-container shadow-[0_0_12px_rgba(147,51,234,0.15)] scale-[1.001] z-10"
+                  ? "bg-surface-container border border-[#9333ea]/70 ring-1 ring-[#9333ea]/40 shadow-[0_0_16px_rgba(147,51,234,0.25)] scale-[1.005] z-10"
                   : isEmptyChordOnlySection
                   ? "bg-surface-container-lowest border border-outline-variant/20 hover:bg-surface-container-low"
                   : "bg-surface-container-low border border-outline-variant/20 opacity-85 hover:opacity-100 hover:border-primary/50"
@@ -115,9 +115,10 @@ export function StandardSheetView(props: StandardSheetViewProps) {
 
               <div className="absolute -top-3.5 left-4 flex items-center justify-between w-[calc(100%-2rem)] z-10">
                 {isThisSectionActivePlayback ? (
-                   <div className="flex items-center gap-2 pl-2 bg-surface-container-high rounded-full shadow-sm">
+                   <div className="flex items-center gap-2 pl-2 pr-2 bg-surface-container-high rounded-full shadow-sm">
                      <span className="px-1.5 py-0.5 rounded text-[9px] bg-primary text-on-primary font-black uppercase tracking-widest shadow-sm">LIVE</span>
                      <span className="font-section-heading text-[15px] font-extrabold text-on-surface uppercase tracking-tight">{section.section_name}</span>
+                     {isThisSectionQueuedNext && (<span className="ml-1 text-[8px] font-black bg-[#9333ea] text-white uppercase tracking-widest px-1.5 py-0.5 rounded shadow-sm border border-[#7e22ce]">⚡ QUEUED</span>)}
                    </div>
                 ) : (
                    <div className="flex items-center gap-1.5">

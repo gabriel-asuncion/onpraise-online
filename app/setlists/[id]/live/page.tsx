@@ -1480,7 +1480,7 @@ export default function SetlistPerformanceRoomPage() {
       }
     }
     else if (payload.action === "TRACK_CHANGE") { playbackSyncRevisionRef.current++; mountTargetSetlistTrackIndex(payload.trackIndex); }
-    else if (payload.action === "QUEUE") { setQueuedTrackIndex(payload.trackIndex); setQueuedSectionIndex(payload.sectionIndex); }
+    else if (payload.action === "QUEUE") { pendingQuantizedJumpRef.current = null; setQueuedTrackIndex(payload.trackIndex); setQueuedSectionIndex(payload.sectionIndex); }
     else if (payload.action === "HEARTBEAT" && !localPresenceUserRef.current?.isMD) {
       applySharedPlaybackState(payload);
     }
@@ -2559,6 +2559,8 @@ export default function SetlistPerformanceRoomPage() {
     if (localPresenceUserRef.current?.isMD) sendSupabaseBroadcast({ action: "STOP" });
   }
 
+  const lastSectionClickRef = useRef<{ trackIndex: number; sectionIndex: number; time: number } | null>(null);
+
   function handleSectionInteractiveSelection(index: number, overrideTrackIndex?: number, exactBeat?: number) {
     if (autoAdvanceTimeoutRef.current) {
       clearTimeout(autoAdvanceTimeoutRef.current);
@@ -2620,11 +2622,27 @@ export default function SetlistPerformanceRoomPage() {
       return;
     }
 
-    if (clickTimeoutRef.current && exactBeat === undefined) {
-      clearTimeout(clickTimeoutRef.current); clickTimeoutRef.current = null;
-      setQueuedTrackIndex(targetTrackIndex); setQueuedSectionIndex(index); pendingQuantizedJumpRef.current = null;
+    const nowMs = Date.now();
+    const prevClick = lastSectionClickRef.current;
+    const isDoubleClick =
+      exactBeat === undefined &&
+      prevClick !== null &&
+      prevClick.trackIndex === targetTrackIndex &&
+      prevClick.sectionIndex === index &&
+      nowMs - prevClick.time <= 450;
+
+    if ((clickTimeoutRef.current || isDoubleClick) && exactBeat === undefined) {
+      if (clickTimeoutRef.current) {
+        clearTimeout(clickTimeoutRef.current);
+        clickTimeoutRef.current = null;
+      }
+      lastSectionClickRef.current = null;
+      pendingQuantizedJumpRef.current = null;
+      setQueuedTrackIndex(targetTrackIndex);
+      setQueuedSectionIndex(index);
       sendSupabaseBroadcast({ action: "QUEUE", trackIndex: targetTrackIndex, sectionIndex: index });
     } else {
+      lastSectionClickRef.current = exactBeat === undefined ? { trackIndex: targetTrackIndex, sectionIndex: index, time: nowMs } : null;
       if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
       clickTimeoutRef.current = setTimeout(() => {
         clickTimeoutRef.current = null;
@@ -2645,7 +2663,7 @@ export default function SetlistPerformanceRoomPage() {
           executeJumpNow(targetTrackIndex, index, effectiveStartTime, false, "explicit-jump", exactBeat);
         }
         sendSupabaseBroadcast({ action: "JUMP", trackIndex: targetTrackIndex, sectionIndex: index, mdSectionStartTime: effectiveStartTime });
-      }, exactBeat !== undefined ? 0 : 250);
+      }, exactBeat !== undefined ? 0 : 320);
     }
   }
 
@@ -3383,8 +3401,8 @@ export default function SetlistPerformanceRoomPage() {
                     playingTrackIndex={playingTrackIndex}
                     currentTrackIndex={idx}
                     currentSectionIndex={isActive ? currentSectionIndex : 0}
-                    queuedTrackIndex={isActive ? queuedTrackIndex : null}
-                    queuedSectionIndex={isActive ? queuedSectionIndex : null}
+                    queuedTrackIndex={queuedTrackIndex}
+                    queuedSectionIndex={queuedSectionIndex}
                     getSectionDurationString={getSectionDurationString}
                     handleSectionInteractiveSelection={handleSectionInteractiveSelection}
                     activeLineIndex={isActive ? activeLineIndex : 0}

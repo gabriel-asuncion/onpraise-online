@@ -143,7 +143,7 @@ function getSectionColor(label: string) {
 export function TracksView(props: TracksViewProps) {
   const {
     activeSong, sections, songAst, sectionStarts, sectionDurations, totalBeats, quarterBeatsPerMeasure,
-    activeSectionIndex, activeLineIndex, playheadBeat, isPlaying, tempo, showChords, lyricsFontSize,
+    activeSectionIndex, queuedSectionIndex, activeLineIndex, playheadBeat, isPlaying, tempo, showChords, lyricsFontSize,
     lineSpacing, chordFormat, activeDisplayKey, handleSectionInteractiveSelection, isMD, midiZoomSteps = 0,
     audioSource = "youtube", storedStems = [], stemMixes = [], stemWaveforms = [],
     onToggleStemMute, onToggleStemSolo,
@@ -565,6 +565,7 @@ export function TracksView(props: TracksViewProps) {
                       if (durationBeats <= 0) return null;
 
                       const isSecActive = idx === activeSectionIndex;
+                      const isSecQueued = idx === queuedSectionIndex;
                       const leftPx = (startBeat + offsetBeats) * pixelsPerBeat;
                       const widthPx = durationBeats * pixelsPerBeat;
                       const bgColor = getSectionColor(sec.section_name);
@@ -576,8 +577,12 @@ export function TracksView(props: TracksViewProps) {
                       return (
                         <div
                           key={`track-sec-${idx}`}
-                          className={`absolute top-1 bottom-1 rounded-md overflow-hidden transition-all duration-200 border border-white/10 ${
-                            isSecActive ? 'opacity-100 z-20 shadow-[0_0_15px_rgba(255,255,255,0.15)] scale-y-[1.05] border-white/50' : `opacity-60 z-10 ${isMD ? 'hover:opacity-80 hover:border-white/30 cursor-pointer' : ''}`
+                          className={`absolute top-1 bottom-1 rounded-md overflow-hidden transition-all duration-200 border ${
+                            isSecActive
+                              ? 'opacity-100 z-20 shadow-[0_0_15px_rgba(255,255,255,0.15)] scale-y-[1.05] border-white/50'
+                              : isSecQueued
+                              ? 'opacity-95 z-20 border-[#9333ea] ring-1 ring-[#9333ea] shadow-[0_0_14px_rgba(147,51,234,0.45)]'
+                              : `opacity-60 z-10 border-white/10 ${isMD ? 'hover:opacity-80 hover:border-white/30 cursor-pointer' : ''}`
                           } ${bgColor}`}
                           style={{
                             left: `${leftPx}px`,
@@ -596,8 +601,13 @@ export function TracksView(props: TracksViewProps) {
                             );
                           })}
 
-                          <div className="absolute top-1 left-2 font-black text-[10px] tracking-widest uppercase text-white drop-shadow-md whitespace-nowrap overflow-hidden pointer-events-none">
-                            {sec.section_name}
+                          <div className="absolute top-1 left-2 flex items-center gap-1.5 font-black text-[10px] tracking-widest uppercase text-white drop-shadow-md whitespace-nowrap overflow-hidden pointer-events-none">
+                            <span>{sec.section_name}</span>
+                            {isSecQueued && (
+                              <span className="text-[8px] font-black bg-[#9333ea] text-white uppercase tracking-widest px-1.5 py-0.5 rounded shadow-sm border border-[#7e22ce]">
+                                ⚡ QUEUED
+                              </span>
+                            )}
                           </div>
                         </div>
                       );

@@ -1027,6 +1027,8 @@ export default function SoloPracticeRoomPage() {
     executeLocalResetSequence();
   }
 
+  const lastSectionClickRef = useRef<{ sectionIndex: number; time: number } | null>(null);
+
   function resolvePlayableSectionIndex(index: number) {
     const currentSections = sectionsRef.current;
     for (let candidate = Math.max(0, index); candidate < currentSections.length; candidate += 1) {
@@ -1048,10 +1050,25 @@ export default function SoloPracticeRoomPage() {
       setStoppedSoloPosition(exactBeat ?? sectionStartBeat);
       return;
     }
-    if (clickTimeoutRef.current) {
-      clearTimeout(clickTimeoutRef.current); clickTimeoutRef.current = null;
-      setQueuedSectionIndex(playableIndex); pendingQuantizedJumpRef.current = null;
+    const nowMs = Date.now();
+    const prevClick = lastSectionClickRef.current;
+    const isDoubleClick =
+      exactBeat === undefined &&
+      prevClick !== null &&
+      prevClick.sectionIndex === playableIndex &&
+      nowMs - prevClick.time <= 450;
+
+    if ((clickTimeoutRef.current || isDoubleClick) && exactBeat === undefined) {
+      if (clickTimeoutRef.current) {
+        clearTimeout(clickTimeoutRef.current);
+        clickTimeoutRef.current = null;
+      }
+      lastSectionClickRef.current = null;
+      pendingQuantizedJumpRef.current = null;
+      setQueuedSectionIndex(playableIndex);
     } else {
+      lastSectionClickRef.current = exactBeat === undefined ? { sectionIndex: playableIndex, time: nowMs } : null;
+      if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
       clickTimeoutRef.current = setTimeout(() => {
         clickTimeoutRef.current = null;
         let jumpTime = getGlobalTime() + 150;
@@ -1059,12 +1076,11 @@ export default function SoloPracticeRoomPage() {
           const measureDurationMs = (60 / (activeSongRef.current.tempo || 75)) * 4000; 
           jumpTime = getGlobalTime() + (measureDurationMs - ((getGlobalTime() - mdSectionStartTimeRef.current) % measureDurationMs));
           pendingQuantizedJumpRef.current = { trackIndex: 0, sectionIndex: playableIndex, jumpTime };
-          const audioCtx = getAudioContext();
           setQueuedSectionIndex(playableIndex);
           if (sectionsRef.current[playableIndex]) playGuideCue(sectionsRef.current[playableIndex].section_name);
           hasPlayedCueRef.current = true; 
         } else { executeJumpNow(0, playableIndex, jumpTime, false, "explicit-jump"); }
-      }, 250);
+      }, exactBeat !== undefined ? 0 : 320);
     }
   }
 
@@ -1695,7 +1711,7 @@ export default function SoloPracticeRoomPage() {
                 memoizedSongAstTree={memoizedSongAstTree} 
                 currentSectionIndex={currentSectionIndex}
                 queuedSectionIndex={queuedSectionIndex}
-                queuedTrackIndex={null} 
+                queuedTrackIndex={queuedSectionIndex !== null ? 0 : null} 
                 currentTrackIndex={0} 
                 activeLineIndex={activeLineIndex}
                 chordFormat={chordFormat} 
@@ -1712,7 +1728,7 @@ export default function SoloPracticeRoomPage() {
           ) : (
             <StandardSheetView 
               memoizedSongAstTree={memoizedSongAstTree} isPlayingFlow={isPlayingFlow} isInteractive={true} playingTrackIndex={0}
-              currentTrackIndex={0} currentSectionIndex={currentSectionIndex} queuedTrackIndex={null}
+              currentTrackIndex={0} currentSectionIndex={currentSectionIndex} queuedTrackIndex={queuedSectionIndex !== null ? 0 : null}
               queuedSectionIndex={queuedSectionIndex} getSectionDurationString={getSectionDurationString} handleSectionInteractiveSelection={handleSectionInteractiveSelection}
               sectionRefs={trackSectionRefs.current[0]} activeLineIndex={activeLineIndex} showChords={showChords} lyricsFontSize={lyricsFontSize}
               lineSpacing={lineSpacing} chordFormat={chordFormat} activeDisplayKey={activeDisplayKey} upcomingTrackItem={null}
