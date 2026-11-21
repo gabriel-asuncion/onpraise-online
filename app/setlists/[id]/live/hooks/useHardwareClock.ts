@@ -256,15 +256,20 @@ export function useHardwareClock(config: HardwareClockConfig) {
         audioCtx.state === "running"
       ) {
         const ytTimeSecs = c.getYoutubeTime?.() ?? null;
-        if (ytTimeSecs !== null && ytTimeSecs > 0 && Math.abs(ytTimeSecs - lastObservedYtTime) > 0.0005) {
-          lastObservedYtTime = ytTimeSecs;
-          ytCalibrationSamples++;
-          const offsetSecs = (song.youtube_sync_offset_ms || 0) / 1000;
+        const offsetSecs = (song.youtube_sync_offset_ms || 0) / 1000;
+        const targetAudioStartIfZero = audioCtx.currentTime + offsetSecs;
+        const isStillAtZero = ytTimeSecs === 0 && lastObservedYtTime <= 0 && (targetAudioStartIfZero - c.audioContextStartTimeRef.current) > 0.025;
+        if (ytTimeSecs !== null && (isStillAtZero || (ytTimeSecs > 0 && Math.abs(ytTimeSecs - lastObservedYtTime) > 0.0005))) {
+          if (ytTimeSecs > 0) {
+            lastObservedYtTime = ytTimeSecs;
+            ytCalibrationSamples++;
+          }
           const targetAudioStart =
             audioCtx.currentTime - (ytTimeSecs - offsetSecs);
           const driftSecs = targetAudioStart - c.audioContextStartTimeRef.current;
+          const isInitialDecoderLock = (isStillAtZero || ytCalibrationSamples <= 6) && Math.abs(driftSecs) > 0.015;
 
-          if ((ytCalibrationSamples <= 12 && Math.abs(driftSecs) > 0.012) || Math.abs(driftSecs) > 0.12) {
+          if (isInitialDecoderLock || Math.abs(driftSecs) > 0.12) {
             c.audioContextStartTimeRef.current = targetAudioStart;
             const beatSpeedSecs = beatSpeedMsCurrent / 1000;
             const beatUnitQuarter = meter.unitQuarterBeats * getMetronomeStep(clickSpeed);
@@ -272,11 +277,13 @@ export function useHardwareClock(config: HardwareClockConfig) {
             const sectionElapsedMs = (actualAbsoluteBeat - sectionStartBeat) * beatSpeedMsCurrent;
             c.mdSectionStartTimeRef.current = globalNow - sectionElapsedMs;
             elapsedMs = sectionElapsedMs;
-            c.cancelFutureAudio?.();
-            c.lastAudioBeatRef.current =
-              Math.max(0, Math.ceil((actualAbsoluteBeat - 0.0001) / beatUnitQuarter)) * beatUnitQuarter;
+            if (!isInitialDecoderLock || Math.abs(driftSecs) > 0.020) {
+              c.cancelFutureAudio?.();
+              c.lastAudioBeatRef.current =
+                Math.max(0, Math.ceil((actualAbsoluteBeat - 0.0001) / beatUnitQuarter)) * beatUnitQuarter;
+            }
           } else {
-            const stepSecs = driftSecs * 0.25;
+            const stepSecs = driftSecs * 0.15;
             c.audioContextStartTimeRef.current += stepSecs;
             c.mdSectionStartTimeRef.current += stepSecs * 1000;
             elapsedMs = globalNow - c.mdSectionStartTimeRef.current;
@@ -285,7 +292,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
       }
 
       if (c.audioContextStartTimeRef && c.audioContextStartTimeRef.current !== null && audioCtx && audioCtx.state === "running") {
-        const lookaheadSecs = 0.200;
+        const lookaheadSecs = 0.100;
         const beatSpeedSecs = beatSpeedMsCurrent / 1000;
         const beatUnitQuarter = meter.unitQuarterBeats * getMetronomeStep(clickSpeed);
         const currentAudioTime = audioCtx.currentTime;
@@ -313,8 +320,6 @@ export function useHardwareClock(config: HardwareClockConfig) {
 
         const audioOffsetSecs = ((c.localClickOffsetMsRef?.current ?? 0) - c.audioLatencyOffsetMs) / 1000;
 
-        // ✅ SURGICAL FIX: Use Math.floor to ensure we catch the exact beat boundary (0-indexed timeline)
-        // instead of aggressively rounding up to the next beat.
         c.lastAudioBeatRef.current = (previousClickStep !== null && previousClickStep !== beatUnitQuarter
           ? Math.ceil((c.lastAudioBeatRef.current - 0.000001) / beatUnitQuarter)
           : Math.floor((c.lastAudioBeatRef.current + 0.000001) / beatUnitQuarter)) * beatUnitQuarter;
@@ -327,7 +332,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
         }
         let nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
         if (!pendingAudioCorrection) {
-          const missed = getMissedClickSteps(nextBeatTime + audioOffsetSecs, currentAudioTime, beatUnitQuarter * beatSpeedSecs);
+          const missed = getMissedClickSteps(nextBeatTime + audioOffsetSecs, currentAudioTime - 0.005, beatUnitQuarter * beatSpeedSecs);
           c.lastAudioBeatRef.current += missed * beatUnitQuarter;
           nextBeatTime = c.audioContextStartTimeRef.current + (c.lastAudioBeatRef.current * beatSpeedSecs);
         }
@@ -342,9 +347,8 @@ export function useHardwareClock(config: HardwareClockConfig) {
             break;
           }
 
-          // If the scheduled beat is accidentally in the past (due to pausing/seeking latency),
-          // skip it to prevent a stacked machine-gun burst of clicks.
-          if (nextBeatTime + audioOffsetSecs >= currentAudioTime) {
+          // Match Edit page's 5ms boundary grace window so Beat 0 is never skipped
+          if (nextBeatTime + audioOffsetSecs >= currentAudioTime - 0.005) {
             const absoluteBeatIndex = c.lastAudioBeatRef.current;
 
             if (c.pendingQuantizedJumpRef.current) {
@@ -356,7 +360,9 @@ export function useHardwareClock(config: HardwareClockConfig) {
             // ✅ SURGICAL FIX: Infinite Audio Metronome Extension
             const clickIndex = Math.round(absoluteBeatIndex / beatUnitQuarter);
             const pulse = getMetronomePulse(clickIndex, clickSpeed, c.metronomePatternRef?.current ?? "default", meter.numerator);
-            if (c.triggerMetronomeSound && pulse !== null) c.triggerMetronomeSound(pulse, nextBeatTime + audioOffsetSecs);
+            if (c.triggerMetronomeSound && pulse !== null) {
+              c.triggerMetronomeSound(pulse, Math.max(currentAudioTime, nextBeatTime + audioOffsetSecs));
+            }
           }
 
           const isCorrectionBoundary =
@@ -458,6 +464,7 @@ export function useHardwareClock(config: HardwareClockConfig) {
           let timerID = null;
           self.onmessage = function(e) {
             if (e.data === 'start') {
+              postMessage('tick');
               timerID = setInterval(() => postMessage('tick'), 25);
             } else if (e.data === 'stop') {
               clearInterval(timerID);

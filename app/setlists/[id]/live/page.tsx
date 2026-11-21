@@ -635,6 +635,7 @@ export default function SetlistPerformanceRoomPage() {
     trackIndex: number;
     sectionIndex: number;
     exactBeat: number | null;
+    expectedYoutubeTime: number;
     videoId: string | null;
     commandInFlight: boolean;
     commandIssued: boolean;
@@ -1608,11 +1609,21 @@ export default function SetlistPerformanceRoomPage() {
     }
 
     if (ytSource) {
+      const offsetMs = songForStart?.youtube_sync_offset_ms || 0;
+      const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
+      const startBeat = effectiveStartBeat ?? sectionStartBeat;
+      const expectedYoutubeTime = getYoutubeTimeForTimeline(
+        startBeat,
+        0,
+        songForStart?.tempo || 75,
+        offsetMs
+      );
       isYtBackingTrackStartRef.current = true;
       pendingYoutubeStartRef.current = {
         trackIndex: currentTrackIndexRef.current,
         sectionIndex: currentSectionIndexRef.current,
         exactBeat: effectiveStartBeat,
+        expectedYoutubeTime,
         videoId: youtubeVideoId,
         commandInFlight: false,
         commandIssued: false,
@@ -1628,7 +1639,6 @@ export default function SetlistPerformanceRoomPage() {
         if (!isPlayingRef.current) isYtBackingTrackStartRef.current = false;
         ytPlayerRef.current?.pauseVideo?.();
       });
-      beginYoutubeBackedStart();
       return;
     }
 
@@ -1638,13 +1648,14 @@ export default function SetlistPerformanceRoomPage() {
         const context = getAudioContext();
         if (context) localClockRef.current = { audioTime: context.currentTime, globalTime: getGlobalTime() };
       }
-      const localLeadMs = audioSourceRef.current === "local" ? 30 : 0;
+      const currentGlobalTime = getPlaybackTime();
+      const localLeadMs = audioSourceRef.current === "local" ? 65 : 0;
       if (effectiveStartBeat !== null && songForStart) {
         const sectionStartBeat = beatMapRef.current.sectionStartBeats[currentSectionIndexRef.current] || 0;
         const beatDurationMs = (60 / (songForStart.tempo || 75)) * 1000;
-        startTimestamp = getGlobalTime() + localLeadMs - ((effectiveStartBeat - sectionStartBeat) * beatDurationMs);
+        startTimestamp = currentGlobalTime + localLeadMs - ((effectiveStartBeat - sectionStartBeat) * beatDurationMs);
       } else {
-        startTimestamp = getGlobalTime() + localLeadMs;
+        startTimestamp = currentGlobalTime + localLeadMs;
       }
       completeLiveStart(currentTrackIndexRef.current, currentSectionIndexRef.current, startTimestamp, false, effectiveStartBeat);
     }).catch((error) => {
@@ -1718,25 +1729,35 @@ export default function SetlistPerformanceRoomPage() {
     }
 
     try {
-      const song = activeSongRef.current;
-      const offsetMs = song?.youtube_sync_offset_ms || 0;
-      const sectionStartBeat = beatMapRef.current.sectionStartBeats[pendingStart.sectionIndex] || 0;
-      const startBeat = pendingStart.exactBeat ?? sectionStartBeat;
-      const expectedYoutubeTime = getYoutubeTimeForTimeline(
-        startBeat,
-        0,
-        song?.tempo || 75,
-        offsetMs
-      );
-
-      player.seekTo(expectedYoutubeTime, true);
+      const { expectedYoutubeTime } = pendingStart;
+      const currentPlayerTime = typeof player.getCurrentTime === "function" ? player.getCurrentTime() : 0;
+      const needsSeek = !Number.isFinite(currentPlayerTime) || Math.abs(currentPlayerTime - expectedYoutubeTime) > 0.05;
+      if (needsSeek) {
+        player.seekTo(expectedYoutubeTime, true);
+      }
       pendingStart.commandIssued = true;
-      player.playVideo();
-      if (player.getPlayerState?.() === 1) {
-        handleYoutubePlaybackStarted(
-          player.getCurrentTime?.() ?? expectedYoutubeTime,
-          player.getVideoData?.().video_id
-        );
+      const startPlayer = () => {
+        if (
+          pendingYoutubeStartRef.current !== pendingStart ||
+          playbackCommandRevisionRef.current !== pendingStart.commandRevision
+        ) return;
+        try {
+          player.playVideo?.();
+          if (player.getPlayerState?.() === 1) {
+            handleYoutubePlaybackStarted(
+              player.getCurrentTime?.() ?? expectedYoutubeTime,
+              player.getVideoData?.().video_id
+            );
+          }
+        } catch (error) {
+          console.warn("Could not start the optional YouTube player.", error);
+          handleYoutubePlaybackError();
+        }
+      };
+      if (needsSeek) {
+        setTimeout(startPlayer, 50);
+      } else {
+        startPlayer();
       }
     } catch (error) {
       pendingStart.commandInFlight = false;
@@ -1757,6 +1778,10 @@ export default function SetlistPerformanceRoomPage() {
     }
     if (!Number.isFinite(currentTimeSeconds)) return;
     if (videoId && pendingStart.videoId && videoId !== pendingStart.videoId) return;
+    if (Math.abs(currentTimeSeconds - pendingStart.expectedYoutubeTime) > 0.35) {
+      ytPlayerRef.current?.seekTo?.(pendingStart.expectedYoutubeTime, true);
+      return;
+    }
 
     try {
       const audioContext = getAudioContext();
@@ -1776,10 +1801,6 @@ export default function SetlistPerformanceRoomPage() {
       const sectionElapsedMs = (absoluteBeat - sectionStartBeat) * beatDurationMs;
       const startTimestamp = globalTime - sectionElapsedMs;
       const audioAnchor = { audioTime, absoluteBeat };
-      const meter = getTimelineMeter(song.section_timings);
-      const clickIndex = Math.floor(absoluteBeat / (meter.unitQuarterBeats * getMetronomeStep(clickSpeedRef.current)));
-      const pulse = getMetronomePulse(clickIndex, clickSpeedRef.current, clickPatternRef.current, meter.numerator);
-      const clickKey = `metronome_${metronomeSoundTypeRef.current}_${pulse}`;
 
       pendingYoutubeStartRef.current = null;
       completeLiveStart(
@@ -1791,13 +1812,6 @@ export default function SetlistPerformanceRoomPage() {
         false,
         audioAnchor
       );
-      if (pulse !== null && isPlayingRef.current && isYtBackingTrackStartRef.current && localClickVolumeRef.current > 0) {
-        playZeroLatencyAudio(
-          clickKey,
-          localClickVolumeRef.current,
-          audioAnchor.audioTime + ((localClickOffsetMsRef.current - audioLatencyOffsetMs) / 1000)
-        );
-      }
     } catch (error) {
       console.error("Could not anchor the metronome to YouTube playback.", error);
       handleResetFlowTrigger(true);
@@ -2213,10 +2227,14 @@ export default function SetlistPerformanceRoomPage() {
         if (audioSourceRef.current === "local" && isPlayingRef.current && activeSongRef.current) {
           cancelFutureAudio?.();
           const song = activeSongRef.current;
-          const now = getGlobalTime();
-          const startAt = audioCtx.currentTime + 0.03;
+          const now = getPlaybackTime();
+          const startAt = audioCtx.currentTime + 0.065;
           const sectionStartBeat = beatMapRef.current.sectionStartBeats[targetSectionIdx] || 0;
-          const elapsedMs = now + (startAt - audioCtx.currentTime) * 1000 - jumpTime;
+          const elapsedMs = isInitialStart
+            ? (exactStartBeat !== undefined && exactStartBeat !== null
+                ? (exactStartBeat - sectionStartBeat) * beatSpeedSecs * 1000
+                : 0)
+            : now + (startAt - audioCtx.currentTime) * 1000 - jumpTime;
           const rawTime = (sectionStartBeat * beatSpeedSecs * 1000 + elapsedMs + (song.youtube_sync_offset_ms || 0)) / 1000;
           try {
             const sourceStartAt = startAt + Math.max(0, -rawTime);
@@ -2260,10 +2278,14 @@ export default function SetlistPerformanceRoomPage() {
     const absoluteStart = exactStartBeat !== undefined && exactStartBeat !== null
       ? exactStartBeat
       : sectionStartBeat;
+    const meter = getTimelineMeter(activeSongRef.current?.section_timings);
+    const beatUnit = meter.unitQuarterBeats * getMetronomeStep(clickSpeedRef.current);
 
     lastAudioBeatRef.current = audioAnchor
-      ? getNextTimelineBeat(audioAnchor.absoluteBeat, getTimelineMeter(activeSongRef.current?.section_timings))
-      : absoluteStart;
+      ? (audioAnchor.absoluteBeat >= -0.06 && audioAnchor.absoluteBeat <= 0.08
+          ? 0
+          : Math.max(0, Math.ceil((audioAnchor.absoluteBeat - 0.0001) / beatUnit)) * beatUnit)
+      : Math.max(0, Math.ceil((absoluteStart - 0.0001) / beatUnit)) * beatUnit;
     lastBeatRef.current = 0; lastVisualBeatRef.current = 0;
     setTracksPlayheadBeat(isPlayingRef.current
       ? sectionStartBeat + (getGlobalTime() - jumpTime) / beatDurationMs
@@ -2958,14 +2980,19 @@ export default function SetlistPerformanceRoomPage() {
   const stemLedStates = useMemo(() => {
     const states: Partial<Record<MixerLedActionId, boolean>> = {
       clickMute: mixerMutes.click,
-      clickSolo: mixerSolos.click,
+      clickSolo: audioSource === "local" ? mixerMutes.guide : mixerSolos.click,
       guideMute: mixerMutes.guide,
-      guideSolo: mixerSolos.guide,
+      guideSolo: audioSource === "local" ? false : mixerSolos.guide,
       youtubeMute: mixerMutes.yt,
       youtubeSolo: mixerSolos.yt,
       youtubeSync: isYoutubeSyncEnabled,
     };
     if (audioSource !== "local") return states;
+    try {
+      states.guideMute = multitrack.getEngine().isMasterMuted;
+    } catch {
+      states.guideMute = false;
+    }
     const grouped = groupStemSlots(storedStems);
     for (const group of STEM_MIDI_ACTION_GROUPS) {
       const stem = grouped[group.slot].length === 1 ? grouped[group.slot][0] : undefined;
@@ -2974,12 +3001,18 @@ export default function SetlistPerformanceRoomPage() {
       states[group.solo] = Boolean(mix?.solo);
     }
     return states;
-  }, [audioSource, storedStems, multitrack.mixes, mixerMutes, mixerSolos, isYoutubeSyncEnabled]);
+  }, [audioSource, storedStems, multitrack, mixerMutes, mixerSolos, isYoutubeSyncEnabled]);
 
   const faderValues = useMemo(() => {
+    let stemMasterVol = 1;
+    if (audioSource === "local") {
+      try {
+        stemMasterVol = multitrack.getEngine().masterVolume;
+      } catch {}
+    }
     const values: Partial<Record<ControlActionId, number>> = {
-      clickVolume: localClickVolume,
-      guideVolume: guideVolume,
+      clickVolume: audioSource === "local" ? (localClickVolume + guideVolume) / 2 : localClickVolume,
+      guideVolume: audioSource === "local" ? stemMasterVol : guideVolume,
       ...(audioSource === "youtube" ? { youtubeVolume } : {}),
     };
     if (audioSource === "local") {
@@ -2991,7 +3024,7 @@ export default function SetlistPerformanceRoomPage() {
       }
     }
     return values;
-  }, [audioSource, localClickVolume, guideVolume, youtubeVolume, storedStems, multitrack.mixes]);
+  }, [audioSource, localClickVolume, guideVolume, youtubeVolume, storedStems, multitrack]);
 
   const keyboardMidiControls = useKeyboardMidiControls(supabase, {
     ...stemMidiActions as any,
@@ -3010,13 +3043,38 @@ export default function SetlistPerformanceRoomPage() {
     lyricsSize: () => setLyricsFontSize(lyricsFontSize === 14 ? 16 : lyricsFontSize === 16 ? 20 : lyricsFontSize === 20 ? 24 : 14),
     youtubeSync: () => handleSetYoutubeSync(!isYoutubeSyncEnabled),
     clickMute: () => toggleMixerMute("click", activeMixerBusChannels),
-    clickSolo: () => toggleMixerSolo("click", activeMixerBusChannels),
-    guideMute: () => toggleMixerMute("guide", activeMixerBusChannels),
-    guideSolo: () => toggleMixerSolo("guide", activeMixerBusChannels),
+    clickSolo: () => {
+      if (audioSourceRef.current === "local") {
+        toggleMixerMute("guide", activeMixerBusChannels);
+      } else {
+        toggleMixerSolo("click", activeMixerBusChannels);
+      }
+    },
+    guideMute: () => {
+      if (audioSourceRef.current === "local") {
+        try { multitrack.getEngine().toggleMasterMute(); } catch {}
+      } else {
+        toggleMixerMute("guide", activeMixerBusChannels);
+      }
+    },
+    guideSolo: () => {
+      if (audioSourceRef.current !== "local") {
+        toggleMixerSolo("guide", activeMixerBusChannels);
+      }
+    },
     youtubeMute: () => toggleMixerMute("yt", activeMixerBusChannels),
     youtubeSolo: () => toggleMixerSolo("yt", activeMixerBusChannels),
     mdTakeover: handleTogglePlaybackAuthority,
-    clickVolume: (value) => { if (typeof value === "number") { setLocalClickVolume(value); setMixerChannelMute("click", isClickVolumeMuted(value * 100), activeMixerBusChannels); } },
+    clickVolume: (value) => {
+      if (typeof value === "number") {
+        setLocalClickVolume(value);
+        setMixerChannelMute("click", isClickVolumeMuted(value * 100), activeMixerBusChannels);
+        if (audioSourceRef.current === "local") {
+          setGuideVolume(value);
+          setMixerChannelMute("guide", isClickVolumeMuted(value * 100), activeMixerBusChannels);
+        }
+      }
+    },
     clickSpeed: () => setClickSpeedSelection(METRONOME_SPEEDS[(METRONOME_SPEEDS.indexOf(clickSpeed) + 1) % METRONOME_SPEEDS.length]),
     clickPattern: () => setClickPattern((current) => METRONOME_PATTERNS[(METRONOME_PATTERNS.indexOf(current) + 1) % METRONOME_PATTERNS.length]),
     clickOffset: (delta) => {
@@ -3055,7 +3113,15 @@ export default function SetlistPerformanceRoomPage() {
       controlFeedback.show("Click sound", next);
     } },
     jogScrub: (delta) => { if (typeof delta === "number") scrubLive(delta); },
-    guideVolume: (value) => { if (typeof value === "number") setGuideVolume(value); },
+    guideVolume: (value) => {
+      if (typeof value === "number") {
+        if (audioSourceRef.current === "local") {
+          try { multitrack.getEngine().setMasterVolume(value); } catch {}
+        } else {
+          setGuideVolume(value);
+        }
+      }
+    },
     youtubeVolume: (value) => { if (typeof value === "number") setYoutubeVolume(value); },
   }, isPlayingFlow ? midiBeatLight : null, "live", {
     isPlaying: isPlayingFlow, beat: tracksPlayheadBeat, tempo: activeSong?.tempo || 75,
@@ -3160,7 +3226,7 @@ export default function SetlistPerformanceRoomPage() {
           />
         </div>
       ) : isTracksMode ? (
-        <div className="flex-1 w-full h-full relative overflow-hidden bg-[#09090b]">
+        <div className="flex-1 flex flex-col w-full h-full relative overflow-hidden bg-[#09090b]">
           <TracksView
              midiZoomSteps={midiZoomSteps}
              activeSong={activeSong} // ✅ SURGICAL FIX: Feed the raw song data so it can parse line timings

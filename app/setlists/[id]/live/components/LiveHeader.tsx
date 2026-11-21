@@ -99,15 +99,32 @@ export function LiveHeader({
     
     const handleScroll = () => {
       const currentScrollY = scrollEl.scrollTop;
-      if (currentScrollY <= 0) setIsNavVisible(true);
-      else if (currentScrollY > lastScrollY) setIsNavVisible(false);
-      else if (currentScrollY < lastScrollY) setIsNavVisible(true);
+      let nextNavVisible = isNavVisible;
+      if (currentScrollY <= 0) nextNavVisible = true;
+      else if (currentScrollY > lastScrollY) nextNavVisible = false;
+      else if (currentScrollY < lastScrollY) nextNavVisible = true;
+      
+      if (nextNavVisible !== isNavVisible) {
+        setIsNavVisible(nextNavVisible);
+      }
       lastScrollY = currentScrollY;
     };
 
     scrollEl.addEventListener("scroll", handleScroll, { passive: true });
     return () => scrollEl.removeEventListener("scroll", handleScroll);
-  }, [scrollContainerRef]);
+  }, [scrollContainerRef, isNavVisible]);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      const isDesktop = window.innerWidth >= 768;
+      if (isDesktop) {
+        document.documentElement.style.setProperty('--stage-bottom-offset', '0px');
+      } else {
+        const offset = isNavVisible ? 'calc(8.5rem + env(safe-area-inset-bottom))' : 'calc(4.5rem + env(safe-area-inset-bottom))';
+        document.documentElement.style.setProperty('--stage-bottom-offset', offset);
+      }
+    }
+  }, [isNavVisible, isPlayingFlow]);
 
   const PlayIcon = () => (
     <svg viewBox="0 0 24 24" className="w-8 h-8 fill-white ml-1">

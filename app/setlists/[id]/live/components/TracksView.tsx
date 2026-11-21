@@ -365,11 +365,13 @@ export function TracksView(props: TracksViewProps) {
   const totalRenderMeasures = preRollMeasures + totalMeasures;
 
   return (
-    <div className="flex-1 flex flex-col bg-[#09090b] h-full relative overflow-hidden font-sans md:pb-[72px]">
-
+    <div 
+      className="flex-1 flex flex-col bg-[#09090b] h-full relative overflow-hidden font-sans transition-[padding-bottom] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]"
+      style={{ paddingBottom: 'var(--stage-bottom-offset, 0px)' }}
+    >
       {/* --- TELEPROMPTER LYRIC GLIDER --- */}
-      <div className="flex-1 flex flex-col justify-center px-4 md:px-8 relative z-10 overflow-hidden">
-        <div className="w-full max-w-4xl mx-auto h-[320px] relative flex items-center justify-center pointer-events-none">
+      <div className="flex-1 flex flex-col justify-center px-4 md:px-8 relative z-10 overflow-hidden min-h-[120px] max-h-[45dvh] md:max-h-none">
+        <div className="w-full max-w-4xl mx-auto h-[240px] md:h-[320px] relative flex items-center justify-center pointer-events-none transform scale-90 md:scale-100">
 
           {flatLines.map((item, idx) => {
             const offset = idx - visualActiveIndex;

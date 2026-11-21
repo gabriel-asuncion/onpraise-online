@@ -16,8 +16,14 @@ export interface StemMidiBindingTemplate {
 }
 
 // Attach the paired device ID and name before adding these templates to a profile.
-export function buildSmcStrips3To8StemBindings(): Partial<Record<StemMidiActionId, StemMidiBindingTemplate>> {
-  const bindings: Partial<Record<StemMidiActionId, StemMidiBindingTemplate>> = {};
+export function buildSmcStrips3To8StemBindings(): Partial<Record<StemMidiActionId | "clickVolume" | "clickMute" | "clickSolo" | "guideVolume" | "guideMute" | "guideSolo", StemMidiBindingTemplate>> {
+  const bindings: Partial<Record<StemMidiActionId | "clickVolume" | "clickMute" | "clickSolo" | "guideVolume" | "guideMute" | "guideSolo", StemMidiBindingTemplate>> = {};
+  bindings.clickVolume = { messageType: "pitchbend", channel: 0, number: 0 };
+  bindings.clickMute = { messageType: "note", channel: 0, number: 16 };
+  bindings.clickSolo = { messageType: "note", channel: 0, number: 8 };
+  bindings.guideVolume = { messageType: "pitchbend", channel: 1, number: 1 };
+  bindings.guideMute = { messageType: "note", channel: 0, number: 17 };
+  bindings.guideSolo = { messageType: "note", channel: 0, number: 9 };
   STEM_MIDI_ACTION_GROUPS.forEach((group, index) => {
     const channel = index + 2;
     bindings[group.vol] = { messageType: "pitchbend", channel, number: channel };

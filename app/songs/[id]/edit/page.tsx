@@ -2313,7 +2313,7 @@ function formatTimeWithMs(seconds: number) {
                   ytAudioAnchorRef.current = {
                     audioTime: ctx.currentTime,
                     youtubeTime: ytTime,
-                    lastObservedYtTime: ytTime,
+                    lastObservedYtTime: ytTime === 0 ? -1 : ytTime,
                   };
                   cancelFutureAudio();
                   nextClickIndexRef.current = null;
@@ -3561,10 +3561,14 @@ function formatTimeWithMs(seconds: number) {
               anchor = {
                 audioTime: audioCtx.currentTime,
                 youtubeTime: rawYtTime,
-                lastObservedYtTime: rawYtTime,
+                lastObservedYtTime: rawYtTime === 0 ? -1 : rawYtTime,
               };
               ytAudioAnchorRef.current = anchor;
               nextClickIndexRef.current = null;
+            } else if (rawYtTime === 0 && anchor.lastObservedYtTime <= 0) {
+              // ⏱️ SURGICAL FIX: Prevent metronome from advancing while the YouTube decoder is locked at 0.000s startup latency
+              anchor.audioTime = audioCtx.currentTime;
+              anchor.youtubeTime = 0;
             } else if (Math.abs(rawYtTime - anchor.lastObservedYtTime) > 0.0005) {
               anchor.lastObservedYtTime = rawYtTime;
               const predictedYtTime = anchor.youtubeTime + (audioCtx.currentTime - anchor.audioTime);

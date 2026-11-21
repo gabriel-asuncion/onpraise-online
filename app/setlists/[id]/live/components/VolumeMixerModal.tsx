@@ -74,6 +74,7 @@ interface FaderChannelProps {
   top?: React.ReactNode;
   disabled?: boolean;
   meterActive?: boolean;
+  soloButtonAsMute?: boolean;
   assignMode?: boolean;
   actions?: { vol: ControlActionId; mute: ControlActionId; solo: ControlActionId };
   learningActionId?: ControlActionId | null;
@@ -84,7 +85,7 @@ interface FaderChannelProps {
 
 const FaderChannel = ({ 
   label, val, setVal, isMuted, isSoloed, anySoloActive, toggleMute, toggleSolo,
-  top, disabled, meterActive = true, assignMode, actions, learningActionId, midiBindings, onStartMidiLearn, onClearMidiBinding,
+  top, disabled, meterActive = true, soloButtonAsMute = false, assignMode, actions, learningActionId, midiBindings, onStartMidiLearn, onClearMidiBinding,
 }: FaderChannelProps) => {
   const trackRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
@@ -165,7 +166,8 @@ const FaderChannel = ({
         {/* Right LED Lights */}
         <div className="absolute right-1.5 top-0 bottom-0 flex flex-col justify-between h-full py-2 opacity-80 pointer-events-none">
           {[...Array(6)].map((_, i) => {
-            const isLightOn = meterActive && val >= (1 - (i * 0.2)) - 0.01 && !isMuted && (!anySoloActive || isSoloed);
+            const isChannelMuted = soloButtonAsMute ? (isMuted && isSoloed) : isMuted;
+            const isLightOn = meterActive && val >= (1 - (i * 0.2)) - 0.01 && !isChannelMuted && (!anySoloActive || soloButtonAsMute || isSoloed);
             return (
               <div key={i} className={`w-1.5 h-1.5 rounded-sm ${isLightOn ? 'bg-green-400 shadow-[0_0_5px_#4ade80]' : 'bg-[#1a1a1a]'}`} />
             );
@@ -174,8 +176,8 @@ const FaderChannel = ({
       </div>
 
       <div className="flex gap-2 mt-2 w-full justify-center">
-        <button type="button" disabled={disabled && !assignMode} aria-label={`Mute ${label}`} aria-pressed={isMuted} onClick={() => assignMode && actions ? onStartMidiLearn?.(actions.mute) : toggleMute()} className={`w-8 h-8 rounded-md text-xs font-black shadow-sm transition-all active:scale-95 ${actions && learningActionId === actions.mute ? "animate-pulse ring-2 ring-cyan-400" : ""} ${isMuted ? 'bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>M</button>
-        <button type="button" disabled={disabled && !assignMode} aria-label={`Solo ${label}`} aria-pressed={isSoloed} onClick={() => assignMode && actions ? onStartMidiLearn?.(actions.solo) : toggleSolo()} className={`w-8 h-8 rounded-md text-xs font-black shadow-sm transition-all active:scale-95 ${actions && learningActionId === actions.solo ? "animate-pulse ring-2 ring-cyan-400" : ""} ${isSoloed ? 'bg-amber-400 text-white shadow-[0_0_10px_rgba(251,191,36,0.5)]' : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>S</button>
+        <button type="button" disabled={disabled && !assignMode} aria-label={soloButtonAsMute ? "Mute Click" : `Mute ${label}`} aria-pressed={isMuted} onClick={() => assignMode && actions ? onStartMidiLearn?.(actions.mute) : toggleMute()} className={`w-8 h-8 rounded-md text-xs font-black shadow-sm transition-all active:scale-95 ${actions && learningActionId === actions.mute ? "animate-pulse ring-2 ring-cyan-400" : ""} ${isMuted ? 'bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>M</button>
+        <button type="button" disabled={disabled && !assignMode} aria-label={soloButtonAsMute ? "Mute Guide" : `Solo ${label}`} aria-pressed={isSoloed} onClick={() => assignMode && actions ? onStartMidiLearn?.(actions.solo) : toggleSolo()} className={`w-8 h-8 rounded-md text-xs font-black shadow-sm transition-all active:scale-95 ${actions && learningActionId === actions.solo ? "animate-pulse ring-2 ring-cyan-400" : ""} ${isSoloed ? (soloButtonAsMute ? 'bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-amber-400 text-white shadow-[0_0_10px_rgba(251,191,36,0.5)]') : 'bg-[#444] text-zinc-300 border-b-2 border-[#222] hover:bg-[#555]'}`}>S</button>
       </div>
       {actions && assignMode && <div className="flex flex-col items-center gap-0.5 mt-1.5">{badge(actions.vol)}{badge(actions.mute)}{badge(actions.solo)}</div>}
       <div className="mt-3.5 text-[10px] text-zinc-300 font-black tracking-widest uppercase text-center w-full truncate border-t border-[#444] pt-2.5">
@@ -875,22 +877,86 @@ export function VolumeMixerModal({
             })}
           </div>
 
-          <FaderChannel 
-            id="click" label="Click" val={localClickVolume} setVal={setLocalClickVolume}
-            isMuted={mutes.click} isSoloed={solos.click} anySoloActive={anySoloActive}
-            toggleMute={() => onToggleMixerMute ? onToggleMixerMute("click") : setMutes(p => ({...p, click: !p.click}))}
-            toggleSolo={() => onToggleMixerSolo ? onToggleMixerSolo("click") : setSolos(p => ({...p, click: !p.click}))}
-            assignMode={assignMode} actions={{ vol: "clickVolume", mute: "clickMute", solo: "clickSolo" }}
-            learningActionId={learningActionId} midiBindings={midiBindings} onStartMidiLearn={onStartMidiLearn} onClearMidiBinding={onClearMidiBinding}
-          />
-          <FaderChannel 
-            id="guide" label="Guides" val={guideVolume} setVal={setGuideVolume}
-            isMuted={mutes.guide} isSoloed={solos.guide} anySoloActive={anySoloActive}
-            toggleMute={() => onToggleMixerMute ? onToggleMixerMute("guide") : setMutes(p => ({...p, guide: !p.guide}))}
-            toggleSolo={() => onToggleMixerSolo ? onToggleMixerSolo("guide") : setSolos(p => ({...p, guide: !p.guide}))}
-            assignMode={assignMode} actions={{ vol: "guideVolume", mute: "guideMute", solo: "guideSolo" }}
-            learningActionId={learningActionId} midiBindings={midiBindings} onStartMidiLearn={onStartMidiLearn} onClearMidiBinding={onClearMidiBinding}
-          />
+          {audioSource === "local" ? (() => {
+            let engineMasterVolume = 1;
+            let engineMasterMuted = false;
+            try {
+              const engine = getEngine?.();
+              if (engine) {
+                engineMasterVolume = engine.masterVolume;
+                engineMasterMuted = engine.isMasterMuted;
+              }
+            } catch {}
+            return (
+              <>
+                <FaderChannel
+                  id="clickGuide"
+                  label="Click & Guide"
+                  val={(localClickVolume + guideVolume) / 2}
+                  setVal={(val) => {
+                    setLocalClickVolume(val);
+                    setGuideVolume(val);
+                  }}
+                  isMuted={mutes.click}
+                  isSoloed={mutes.guide}
+                  soloButtonAsMute={true}
+                  anySoloActive={anySoloActive}
+                  toggleMute={() => onToggleMixerMute ? onToggleMixerMute("click") : setMutes((p) => ({ ...p, click: !p.click }))}
+                  toggleSolo={() => onToggleMixerMute ? onToggleMixerMute("guide") : setMutes((p) => ({ ...p, guide: !p.guide }))}
+                  assignMode={assignMode}
+                  actions={{ vol: "clickVolume", mute: "clickMute", solo: "clickSolo" }}
+                  learningActionId={learningActionId}
+                  midiBindings={midiBindings}
+                  onStartMidiLearn={onStartMidiLearn}
+                  onClearMidiBinding={onClearMidiBinding}
+                />
+                <FaderChannel
+                  id="stemMaster"
+                  label="Stem Master"
+                  val={engineMasterVolume}
+                  setVal={(val) => {
+                    try {
+                      getEngine?.().setMasterVolume(val);
+                    } catch {}
+                  }}
+                  isMuted={engineMasterMuted}
+                  isSoloed={false}
+                  anySoloActive={anySoloActive}
+                  toggleMute={() => {
+                    try {
+                      getEngine?.().toggleMasterMute();
+                    } catch {}
+                  }}
+                  toggleSolo={() => {}}
+                  assignMode={assignMode}
+                  actions={{ vol: "guideVolume", mute: "guideMute", solo: "guideSolo" }}
+                  learningActionId={learningActionId}
+                  midiBindings={midiBindings}
+                  onStartMidiLearn={onStartMidiLearn}
+                  onClearMidiBinding={onClearMidiBinding}
+                />
+              </>
+            );
+          })() : (
+            <>
+              <FaderChannel 
+                id="click" label="Click" val={localClickVolume} setVal={setLocalClickVolume}
+                isMuted={mutes.click} isSoloed={solos.click} anySoloActive={anySoloActive}
+                toggleMute={() => onToggleMixerMute ? onToggleMixerMute("click") : setMutes(p => ({...p, click: !p.click}))}
+                toggleSolo={() => onToggleMixerSolo ? onToggleMixerSolo("click") : setSolos(p => ({...p, click: !p.click}))}
+                assignMode={assignMode} actions={{ vol: "clickVolume", mute: "clickMute", solo: "clickSolo" }}
+                learningActionId={learningActionId} midiBindings={midiBindings} onStartMidiLearn={onStartMidiLearn} onClearMidiBinding={onClearMidiBinding}
+              />
+              <FaderChannel 
+                id="guide" label="Guides" val={guideVolume} setVal={setGuideVolume}
+                isMuted={mutes.guide} isSoloed={solos.guide} anySoloActive={anySoloActive}
+                toggleMute={() => onToggleMixerMute ? onToggleMixerMute("guide") : setMutes(p => ({...p, guide: !p.guide}))}
+                toggleSolo={() => onToggleMixerSolo ? onToggleMixerSolo("guide") : setSolos(p => ({...p, guide: !p.guide}))}
+                assignMode={assignMode} actions={{ vol: "guideVolume", mute: "guideMute", solo: "guideSolo" }}
+                learningActionId={learningActionId} midiBindings={midiBindings} onStartMidiLearn={onStartMidiLearn} onClearMidiBinding={onClearMidiBinding}
+              />
+            </>
+          )}
           {audioSource !== "local" ? <FaderChannel
             id="yt" label="YT Sync" val={youtubeVolume} setVal={setYoutubeVolume}
             isMuted={mutes.yt} isSoloed={solos.yt} anySoloActive={anySoloActive}

@@ -62,6 +62,8 @@ export class MultitrackEngine {
   private filterNodes: AudioNode[] = [];
   private gains = new Map<string, GainNode>();
   private eqEnabled = true;
+  private masterVolumeValue = 1;
+  private masterMutedValue = false;
   private preSoloMuteSnapshot: Map<string, boolean> | null = null;
   private listeners = new Set<() => void>();
   private startAt = 0;
@@ -219,8 +221,28 @@ export class MultitrackEngine {
     return true;
   }
 
+  get masterVolume(): number {
+    return this.master.gain.value;
+  }
+
+  get masterVolume(): number {
+    return this.masterVolumeValue;
+  }
+
+  get isMasterMuted(): boolean {
+    return this.masterMutedValue;
+  }
+
   setMasterVolume(volume: number): void {
-    this.master.gain.value = Math.max(0, Math.min(1, volume));
+    this.masterVolumeValue = Math.max(0, Math.min(1, volume));
+    this.master.gain.value = this.masterMutedValue ? 0 : this.masterVolumeValue;
+    this.notify();
+  }
+
+  toggleMasterMute(): void {
+    this.masterMutedValue = !this.masterMutedValue;
+    this.master.gain.value = this.masterMutedValue ? 0 : this.masterVolumeValue;
+    this.notify();
   }
 
   private updateGains(): void {
