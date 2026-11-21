@@ -22,6 +22,7 @@ interface SimplifiedStackViewProps {
   showChords: boolean;
   lyricsFontSize: number;
   lineSpacing: number;
+  isPlayingFlow?: boolean;
 }
 
 export function SimplifiedStackView(props: SimplifiedStackViewProps) {
@@ -88,7 +89,7 @@ export function SimplifiedStackView(props: SimplifiedStackViewProps) {
       });
     }
 
-    if (activeIdx !== currentTrackIndex && !isPlayingFlow) {
+    if (activeIdx !== currentTrackIndex && !props.isPlayingFlow) {
       handleUserSelectTrackBadge(activeIdx);
     }
   };

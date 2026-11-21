@@ -1724,6 +1724,7 @@ export default function SoloPracticeRoomPage() {
                 lineSpacing={lineSpacing}
                 handleSectionInteractiveSelection={handleSectionInteractiveSelection}
                 handleUserSelectTrackBadge={() => {}}
+                isPlayingFlow={isPlayingFlow}
               />
           ) : (
             <StandardSheetView 

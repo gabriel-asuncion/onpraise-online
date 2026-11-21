@@ -3347,6 +3347,7 @@ export default function SetlistPerformanceRoomPage() {
             handleSectionInteractiveSelection={handleSectionInteractiveSelection}
             handleUserSelectTrackBadge={handleUserSelectTrackBadge}
             showChords={showChords} lyricsFontSize={lyricsFontSize} lineSpacing={lineSpacing}
+            isPlayingFlow={isPlayingFlow}
           />
         </div>
       ) : isTracksMode ? (

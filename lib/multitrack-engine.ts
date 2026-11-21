@@ -222,10 +222,6 @@ export class MultitrackEngine {
   }
 
   get masterVolume(): number {
-    return this.master.gain.value;
-  }
-
-  get masterVolume(): number {
     return this.masterVolumeValue;
   }
 
